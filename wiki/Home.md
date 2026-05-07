@@ -8,6 +8,12 @@ Mimick is a Linux background app that watches selected folders and syncs photos 
   <img src="https://raw.githubusercontent.com/nicx17/mimick/main/docs/screenshots/photos_page_view_sidebar_on.png" width="80%" alt="Mimick Library View" />
 </div>
 
+<div align="center">
+  <a href="https://flathub.org/apps/dev.nicx.mimick">
+    <img width="240" alt="Get it on Flathub" src="https://flathub.org/api/badge?locale=en">
+  </a>
+</div>
+
 ## Start Here
 
 <div align="center">
@@ -39,7 +45,6 @@ Mimick is a Linux background app that watches selected folders and syncs photos 
 - Mimick is a one-way sync tool. It uploads local media to Immich and does not modify local files.
 - The app stores API keys in the desktop keyring and keeps operational state in `~/.cache/mimick/`.
 - Startup rescans use a local sync index so already-synced unchanged files are skipped quickly.
-- Flatpak distribution is signed; verify the published fingerprint before trusting a new repo setup.
 
 ## Current App Highlights
 

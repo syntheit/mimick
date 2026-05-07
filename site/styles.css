@@ -137,6 +137,12 @@ header {
     display: block;
 }
 
+.badge-container {
+    margin-top: 1.5rem;
+    display: flex;
+    justify-content: center;
+}
+
 .eyebrow {
     margin: 0 0 0.45rem;
     font-size: 0.78rem;

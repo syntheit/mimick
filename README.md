@@ -85,53 +85,25 @@ Each watched directory operates with isolated logical constraints:
 
 ## Installation (Recommended)
 
-The easiest and official way to install Mimick on any Linux distribution is via our Flatpak repository. This ensures you receive automatic updates whenever a new version is released.
+The easiest and official way to install Mimick on any Linux distribution is via Flathub. This ensures you receive automatic updates whenever a new version is released.
 
-**Prerequisites**: Flatpak must be installed and the [Flathub](https://flathub.org/setup) remote must be configured on your system (required for GNOME runtime dependencies).
+**Prerequisites**: Flatpak must be installed on your system.
 
-### Graphical Install (One-Click)
+<div align="left">
+  <a href="https://flathub.org/apps/dev.nicx.mimick">
+    <img width="240" alt="Get it on Flathub" src="https://flathub.org/api/badge?locale=en">
+  </a>
+</div>
 
-You can easily install Mimick by downloading and opening the `.flatpakref` file. Your system's software center (like GNOME Software or KDE Discover) should open it and handle adding the repository and installing the app automatically:
+### Install from Flathub
 
-[Download mimick.flatpakref](https://mimick.nicx.dev/mimick.flatpakref)
-
-### Command Line Install
-
-Alternatively, install using the terminal. You can install directly via the `.flatpakref`:
-
-```bash
-flatpak install --user https://mimick.nicx.dev/mimick.flatpakref
-```
-
-Or by adding the repository manually:
+You can install Mimick directly from Flathub:
 
 ```bash
-# Add the official Mimick repository
-flatpak remote-add --user --if-not-exists mimick-repo https://mimick.nicx.dev/mimick.flatpakrepo
-
-# Install the application
-flatpak install --user mimick-repo dev.nicx.mimick
+flatpak install flathub dev.nicx.mimick
 ```
 
-*Note: If Flatpak fails to install due to a missing `runtime/org.gnome.Platform`, ensure that you have the [Flathub](https://flathub.org/setup) remote configured on your system.*
-
-### Verify the Flatpak Repo Key
-
-The published Flatpak repository embeds this signing-key fingerprint:
-
-`04E2 9556 E951 B2EA 15D3 A8EE 632E 1BC5 D956 579C`
-
-You can inspect the currently published key with:
-
-```bash
-curl -fsSL https://mimick.nicx.dev/mimick.flatpakrepo \
-  | sed -n 's/^GPGKey=//p' \
-  | base64 -d > /tmp/mimick-repo-public.gpg
-
-gpg --show-keys --fingerprint /tmp/mimick-repo-public.gpg
-```
-
-Compare the printed fingerprint to the value above. The email address alone is not the trust anchor; the fingerprint is.
+*(Note: If you haven't setup Flathub yet, follow the setup guide for your distribution at [flathub.org/setup](https://flathub.org/setup).)*
 ---
 
 ## Usage & Configuration
@@ -307,14 +279,9 @@ flatpak run dev.nicx.mimick
 
 Mimick currently publishes a few concrete trust signals:
 
-- signed Flatpak repository metadata
 - GitHub release assets with checksums
 - CodeQL analysis in GitHub Actions
 - CI checks for formatting, linting, tests, and dependency audits
-
-If you install via Flatpak, verify the published signing fingerprint before trusting the repo:
-
-`04E2 9556 E951 B2EA 15D3 A8EE 632E 1BC5 D956 579C`
 
 ## Contributing
 

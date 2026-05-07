@@ -55,7 +55,7 @@
           "priceCurrency": "USD"
         },
         "codeRepository": "https://github.com/nicx17/mimick",
-        "downloadUrl": "https://mimick.nicx.dev/mimick.flatpakref",
+        "downloadUrl": "https://flathub.org/apps/dev.nicx.mimick",
         "url": "https://mimick.nicx.dev/"
       }
     </script>
@@ -83,6 +83,11 @@
             Sync local folders to Immich, browse your library, manage albums,
             and search assets — from a native GTK4 desktop app.
           </p>
+          <div class="badge-container">
+            <a href="https://flathub.org/apps/dev.nicx.mimick">
+              <img width="240" alt="Get it on Flathub" src="https://flathub.org/api/badge?locale=en">
+            </a>
+          </div>
         </header>
 
         <section class="feature-summary" aria-label="Mimick features">
@@ -98,67 +103,37 @@
           <div class="install-grid">
             <article class="install-method">
               <div class="method-header">
-                <p class="method-title">Method 1: Direct flatpakref</p>
+                <p class="method-title">Install from Flathub</p>
                 <button
                   class="copy-button"
                   type="button"
-                  data-copy-target="install-flatpakref"
+                  data-copy-target="install-flathub"
                 >
                   Copy
                 </button>
               </div>
-              <pre><code id="install-flatpakref">flatpak install --user https://mimick.nicx.dev/mimick.flatpakref</code></pre>
-            </article>
-
-            <article class="install-method">
-              <div class="method-header">
-                <p class="method-title">Method 2: Add repo + install</p>
-                <button
-                  class="copy-button"
-                  type="button"
-                  data-copy-target="install-repo-manual"
-                >
-                  Copy
-                </button>
-              </div>
-              <pre><code id="install-repo-manual">flatpak remote-add --user --if-not-exists mimick-repo https://mimick.nicx.dev/mimick.flatpakrepo
-flatpak install --user mimick-repo dev.nicx.mimick</code></pre>
-              <p class="method-note">
-                Use this option if you want the repository configured
-                explicitly.
-              </p>
+              <pre><code id="install-flathub">flatpak install flathub dev.nicx.mimick</code></pre>
             </article>
           </div>
           <p class="install-note">
-            <strong>Note:</strong> If you receive a "Required runtime not found"
-            error, ensure you have the
+            <strong>Note:</strong> Ensure you have the
             <a href="https://flathub.org/setup" target="_blank" rel="noopener"
               >Flathub</a
             >
-            remote configured.
+            remote configured on your system.
           </p>
         </section>
 
         <section class="links-container" aria-label="Repository links">
-          <a class="link-block" href="mimick.flatpakref">
+          <a class="link-block" href="https://flathub.org/apps/dev.nicx.mimick">
             <span class="link-icon">01</span>
             <span class="link-copy">
-              <strong>Graphical Install (One-Click)</strong>
-              <span
-                >Download the <code>.flatpakref</code> to open in your software
-                center.</span
-              >
-            </span>
-          </a>
-          <a class="link-block" href="mimick.flatpakrepo">
-            <span class="link-icon">02</span>
-            <span class="link-copy">
-              <strong>Download repository file</strong>
-              <span>Get the <code>.flatpakrepo</code> directly.</span>
+              <strong>View on Flathub</strong>
+              <span>Install Mimick from the official Flathub repository.</span>
             </span>
           </a>
           <a class="link-block" href="https://github.com/nicx17/mimick">
-            <span class="link-icon">03</span>
+            <span class="link-icon">02</span>
             <span class="link-copy">
               <strong>View on GitHub</strong>
               <span>Browse source, releases, and issues.</span>
@@ -168,7 +143,7 @@ flatpak install --user mimick-repo dev.nicx.mimick</code></pre>
             class="link-block"
             href="https://github.com/nicx17/mimick/blob/main/CHANGELOG.md"
           >
-            <span class="link-icon">04</span>
+            <span class="link-icon">03</span>
             <span class="link-copy">
               <strong>Read the changelog</strong>
               <span>See the latest app and packaging changes.</span>

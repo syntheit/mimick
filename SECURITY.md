@@ -27,27 +27,10 @@ When reporting a vulnerability, include:
 
 Mimick already uses several controls intended to reduce risk:
 
-- Flatpak distribution is signed with a dedicated repository signing key
 - release assets include checksums
 - the API key is stored in the desktop keyring instead of plain-text config
 - Flatpak builds use selected-folder access instead of broad home-directory access
 - CodeQL is enabled for static analysis
 - CI enforces formatting, linting, tests, and dependency auditing
 
-## Flatpak Repo Signing Fingerprint
 
-Current published Flatpak repo signing fingerprint:
-
-`04E2 9556 E951 B2EA 15D3 A8EE 632E 1BC5 D956 579C`
-
-You can verify the key embedded in the live `.flatpakrepo` file with:
-
-```bash
-curl -fsSL https://mimick.nicx.dev/mimick.flatpakrepo \
-  | sed -n 's/^GPGKey=//p' \
-  | base64 -d > /tmp/mimick-repo-public.gpg
-
-gpg --show-keys --fingerprint /tmp/mimick-repo-public.gpg
-```
-
-Compare the printed fingerprint to the value above. The fingerprint is the trust anchor, not the email address on the key.
