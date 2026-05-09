@@ -113,10 +113,10 @@ pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -
             .css_classes(vec!["mimick-status-badge".to_string()])
             .build();
         let video_badge = gtk::Image::builder()
-            .icon_name("media-playback-start-symbolic")
+            .icon_name("mimick-video-symbolic")
             .halign(gtk::Align::Center)
             .valign(gtk::Align::Center)
-            .pixel_size(28)
+            .pixel_size(32)
             .visible(false)
             .css_classes(vec!["mimick-video-badge".to_string()])
             .build();
@@ -171,8 +171,8 @@ pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -
         let in_timeline = ctx
             .library_timeline_active
             .load(std::sync::atomic::Ordering::Relaxed);
-        status.set_visible(!in_timeline);
-        video_badge.set_visible(!in_timeline && asset_type.eq_ignore_ascii_case("VIDEO"));
+        status.set_visible(true);
+        video_badge.set_visible(asset_type.eq_ignore_ascii_case("VIDEO"));
         set_square_class(&picture, in_timeline);
 
         let generation = bump_generation(&picture);
@@ -374,9 +374,9 @@ fn sync_state_label(sync_state: u32) -> &'static str {
 
 fn sync_icon_name(sync_state: u32) -> &'static str {
     match sync_state {
-        2 => "emblem-default-symbolic",
-        1 => "folder-symbolic",
-        _ => "network-server-symbolic",
+        2 => "mimick-check-circle-symbolic",
+        1 => "mimick-computer-symbolic",
+        _ => "mimick-cloud-symbolic",
     }
 }
 
