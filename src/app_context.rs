@@ -3,12 +3,13 @@
 //! Replaces the growing list of individual `Arc<T>` parameters that were previously
 //! threaded through `build_settings_window()` and `open_settings_if_needed()`.
 
+use parking_lot::{Mutex, RwLock};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api_client::ImmichApiClient;
-use crate::config::WatchPathEntry;
+use crate::config::{Config, WatchPathEntry};
 use crate::library::state::LibraryState;
 use crate::library::thumbnail_cache::ThumbnailCache;
 use crate::monitor::MonitorHandle;
@@ -19,6 +20,7 @@ use crate::sync_index::SyncIndex;
 /// Shared application context holding all dependency handles that UI and background
 /// tasks need. Wrapped in `Arc` at construction time so it can be cloned cheaply.
 pub struct AppContext {
+    pub config: Arc<RwLock<Config>>,
     pub state: Arc<Mutex<AppState>>,
     pub api_client: Arc<ImmichApiClient>,
     pub queue_manager: Arc<QueueManager>,

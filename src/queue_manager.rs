@@ -15,12 +15,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
 
 fn upload_progress_callback(
-    shared_state: &Arc<std::sync::Mutex<AppState>>,
+    shared_state: &Arc<parking_lot::Mutex<AppState>>,
     item_id: String,
 ) -> TransferProgressCallback {
     let state_ref = shared_state.clone();
     Arc::new(move |bytes_done, total_bytes| {
-        let mut state = state_ref.lock().unwrap();
+        let mut state = state_ref.lock();
         let route = state.active_server_route.clone();
         if let Some(total_bytes) = total_bytes {
             let current = state
@@ -60,18 +60,18 @@ pub struct FileTask {
 pub struct QueueManager {
     sender: mpsc::Sender<FileTask>,
     /// Shared in-memory state accessed by both workers and the UI.
-    shared_state: Arc<std::sync::Mutex<AppState>>,
+    shared_state: Arc<parking_lot::Mutex<AppState>>,
     /// Failed tasks accumulated in memory and flushed during graceful shutdown.
-    retry_list: Arc<std::sync::Mutex<Vec<FileTask>>>,
+    retry_list: Arc<parking_lot::Mutex<Vec<FileTask>>>,
     /// Paths already queued or awaiting retry.
     ///
     /// Prevents duplicate entries when the startup scan and live watcher both
     /// notice the same file in a short time window.
-    pending_paths: Arc<std::sync::Mutex<HashSet<String>>>,
+    pending_paths: Arc<parking_lot::Mutex<HashSet<String>>>,
     retry_path: PathBuf,
-    policy: Arc<std::sync::Mutex<EnvironmentPolicy>>,
+    policy: Arc<parking_lot::Mutex<EnvironmentPolicy>>,
     worker_limit: Arc<AtomicUsize>,
-    batch_notify_state: Arc<std::sync::Mutex<BatchNotifyState>>,
+    batch_notify_state: Arc<parking_lot::Mutex<BatchNotifyState>>,
 }
 
 #[derive(Debug, Default)]
@@ -98,8 +98,8 @@ impl QueueManager {
     pub fn new(
         api_client: Arc<ImmichApiClient>,
         workers: usize,
-        shared_state: Arc<std::sync::Mutex<AppState>>,
-        sync_index: Arc<std::sync::Mutex<SyncIndex>>,
+        shared_state: Arc<parking_lot::Mutex<AppState>>,
+        sync_index: Arc<parking_lot::Mutex<SyncIndex>>,
         policy: EnvironmentPolicy,
     ) -> Self {
         const MAX_WORKERS: usize = 10;
@@ -122,22 +122,22 @@ impl QueueManager {
                 loaded_retries.len()
             );
             let _ = fs::write(&retry_path, "[]");
-            shared_state.lock().unwrap().failed_count = loaded_retries.len();
+            shared_state.lock().failed_count = loaded_retries.len();
         }
 
         // Retry state stays in memory during the session to avoid per-failure disk writes.
-        let retry_list = Arc::new(std::sync::Mutex::new(Vec::<FileTask>::new()));
-        let pending_paths = Arc::new(std::sync::Mutex::new(
+        let retry_list = Arc::new(parking_lot::Mutex::new(Vec::<FileTask>::new()));
+        let pending_paths = Arc::new(parking_lot::Mutex::new(
             loaded_retries
                 .iter()
                 .map(|task| task.path.clone())
                 .collect(),
         ));
-        let policy_ref = Arc::new(std::sync::Mutex::new(policy));
+        let policy_ref = Arc::new(parking_lot::Mutex::new(policy));
         let worker_limit = Arc::new(AtomicUsize::new(workers.clamp(1, MAX_WORKERS)));
-        let batch_notify_state = Arc::new(std::sync::Mutex::new(BatchNotifyState::default()));
-        let connectivity_lost_notified = Arc::new(std::sync::Mutex::new(false));
-        let consecutive_failures = Arc::new(std::sync::Mutex::new(0usize));
+        let batch_notify_state = Arc::new(parking_lot::Mutex::new(BatchNotifyState::default()));
+        let connectivity_lost_notified = Arc::new(parking_lot::Mutex::new(false));
+        let consecutive_failures = Arc::new(parking_lot::Mutex::new(0usize));
 
         let qm = Self {
             sender: tx,
@@ -182,7 +182,7 @@ impl QueueManager {
 
                             // Update the shared progress snapshot before handing off to the API.
                             let (pc, tq) = {
-                                let mut s = state_ref.lock().unwrap();
+                                let mut s = state_ref.lock();
                                 s.active_workers += 1;
                                 s.status = "uploading".to_string();
                                 s.pause_reason = None;
@@ -235,10 +235,10 @@ impl QueueManager {
 
                             if success {
                                 log::info!("Upload SUCCESS: {} ({:.2}s)", file_task.path, elapsed);
-                                pending_ref.lock().unwrap().remove(&file_task.path);
+                                pending_ref.lock().remove(&file_task.path);
 
                                 if let Some(target) = sync_target.as_ref()
-                                    && let Err(err) = sync_index_ref.lock().unwrap().record_synced(
+                                    && let Err(err) = sync_index_ref.lock().record_synced(
                                         &file_task.path,
                                         &file_task.checksum,
                                         target,
@@ -253,7 +253,7 @@ impl QueueManager {
 
                                 // Drain retries and requeue them once connectivity is working again.
                                 let retries: Vec<FileTask> = {
-                                    let mut rl = retry_ref.lock().unwrap();
+                                    let mut rl = retry_ref.lock();
                                     std::mem::take(&mut *rl)
                                 };
                                 if !retries.is_empty() {
@@ -262,8 +262,8 @@ impl QueueManager {
                                         retries.len()
                                     );
                                     {
-                                        let mut s = state_ref.lock().unwrap();
-                                        let mut batch_state = batch_notify_ref.lock().unwrap();
+                                        let mut s = state_ref.lock();
+                                        let mut batch_state = batch_notify_ref.lock();
                                         activate_batch_if_needed(&mut batch_state, &s);
                                         s.failed_count =
                                             s.failed_count.saturating_sub(retries.len());
@@ -275,7 +275,7 @@ impl QueueManager {
                                     }
                                 }
 
-                                let mut s = state_ref.lock().unwrap();
+                                let mut s = state_ref.lock();
                                 let attempts = current_attempt_count(&s, &file_task.path);
                                 s.active_server_route = active_route;
                                 s.last_successful_sync_at = Some(unix_timestamp_now());
@@ -305,8 +305,8 @@ impl QueueManager {
                                     elapsed
                                 );
                                 // Keep failed tasks in memory until the next graceful shutdown.
-                                retry_ref.lock().unwrap().push(file_task.clone());
-                                let mut s = state_ref.lock().unwrap();
+                                retry_ref.lock().push(file_task.clone());
+                                let mut s = state_ref.lock();
                                 s.failed_count += 1;
                                 s.active_server_route = active_route;
                                 let error_text = latest_issue
@@ -344,13 +344,13 @@ impl QueueManager {
 
                             // Track consecutive failures for connectivity-lost detection.
                             if success {
-                                *consec_fail_ref.lock().unwrap() = 0;
+                                *consec_fail_ref.lock() = 0;
                             } else {
-                                let mut cf = consec_fail_ref.lock().unwrap();
+                                let mut cf = consec_fail_ref.lock();
                                 *cf += 1;
                                 // Fire connectivity-lost the first time N consecutive uploads fail.
                                 if *cf >= 3 {
-                                    let mut notified = connectivity_notified_ref.lock().unwrap();
+                                    let mut notified = connectivity_notified_ref.lock();
                                     if !*notified {
                                         *notified = true;
                                         notifications::send_connectivity_lost();
@@ -360,7 +360,7 @@ impl QueueManager {
 
                             // Update processed count and determine idle state.
                             let summary_batch = {
-                                let mut s = state_ref.lock().unwrap();
+                                let mut s = state_ref.lock();
                                 if success {
                                     s.processed_count += 1;
                                 }
@@ -388,7 +388,7 @@ impl QueueManager {
                                     };
                                     s.progress = 100;
                                     log::info!("All {} file(s) processed. Idle.", s.total_queued);
-                                    let mut batch_state = batch_notify_ref.lock().unwrap();
+                                    let mut batch_state = batch_notify_ref.lock();
                                     if batch_state.active
                                         && batch_state.current_batch_id
                                             != batch_state.last_notified_batch_id
@@ -421,8 +421,8 @@ impl QueueManager {
                                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
                                     let summary = {
-                                        let s = state_ref.lock().unwrap();
-                                        let mut batch_state = batch_notify_ref.lock().unwrap();
+                                        let s = state_ref.lock();
+                                        let mut batch_state = batch_notify_ref.lock();
                                         let total_handled = s.processed_count + s.failed_count;
                                         let queue_idle = total_handled >= s.total_queued
                                             && s.active_workers == 0;
@@ -475,8 +475,8 @@ impl QueueManager {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             if !loaded_retries.is_empty() {
                 {
-                    let mut s = state_ref2.lock().unwrap();
-                    let mut batch_state = batch_notify_state.lock().unwrap();
+                    let mut s = state_ref2.lock();
+                    let mut batch_state = batch_notify_state.lock();
                     activate_batch_if_needed(&mut batch_state, &s);
                     // Retry items are now being actively queued — reset failed_count.
                     s.failed_count = 0;
@@ -496,7 +496,7 @@ impl QueueManager {
     pub async fn add_to_queue(&self, task: FileTask) -> bool {
         log::debug!("Queuing: {}", task.path);
         {
-            let mut pending = self.pending_paths.lock().unwrap();
+            let mut pending = self.pending_paths.lock();
             if pending.contains(&task.path) {
                 log::debug!("Skipping already pending task: {}", task.path);
                 return false;
@@ -505,8 +505,8 @@ impl QueueManager {
         }
 
         {
-            let mut s = self.shared_state.lock().unwrap();
-            let mut batch_state = self.batch_notify_state.lock().unwrap();
+            let mut s = self.shared_state.lock();
+            let mut batch_state = self.batch_notify_state.lock();
             activate_batch_if_needed(&mut batch_state, &s);
             s.total_queued += 1;
             s.queue_size = s.total_queued.saturating_sub(s.processed_count);
@@ -529,10 +529,10 @@ impl QueueManager {
         }
         if let Err(e) = self.sender.send(task).await {
             log::error!("Failed to send task to queue: {}", e);
-            self.pending_paths.lock().unwrap().remove(&e.0.path);
+            self.pending_paths.lock().remove(&e.0.path);
 
             // Revert the total_queued increment since it will never be processed.
-            let mut s = self.shared_state.lock().unwrap();
+            let mut s = self.shared_state.lock();
             s.total_queued = s.total_queued.saturating_sub(1);
             s.queue_size = s.total_queued.saturating_sub(s.processed_count);
             let route = s.active_server_route.clone();
@@ -551,7 +551,7 @@ impl QueueManager {
     }
 
     pub fn set_paused(&self, paused: bool, reason: Option<String>) {
-        let mut state = self.shared_state.lock().unwrap();
+        let mut state = self.shared_state.lock();
         state.paused = paused;
         state.pause_reason = reason;
         state.status = if paused {
@@ -564,7 +564,7 @@ impl QueueManager {
     }
 
     pub fn is_paused(&self) -> bool {
-        self.shared_state.lock().unwrap().paused
+        self.shared_state.lock().paused
     }
 
     pub fn set_worker_limit(&self, workers: u8) {
@@ -573,20 +573,20 @@ impl QueueManager {
     }
 
     pub fn update_environment_policy(&self, policy: EnvironmentPolicy) {
-        *self.policy.lock().unwrap() = policy;
+        *self.policy.lock() = policy;
     }
 
     pub fn recent_events(&self) -> Vec<crate::state_manager::QueueEvent> {
-        self.shared_state.lock().unwrap().recent_events.clone()
+        self.shared_state.lock().recent_events.clone()
     }
 
     pub fn failed_tasks(&self) -> Vec<FileTask> {
-        self.retry_list.lock().unwrap().clone()
+        self.retry_list.lock().clone()
     }
 
     pub fn clear_failed(&self) -> usize {
         let tasks = {
-            let mut retries = self.retry_list.lock().unwrap();
+            let mut retries = self.retry_list.lock();
             std::mem::take(&mut *retries)
         };
         if tasks.is_empty() {
@@ -594,13 +594,13 @@ impl QueueManager {
         }
 
         {
-            let mut pending = self.pending_paths.lock().unwrap();
+            let mut pending = self.pending_paths.lock();
             for task in &tasks {
                 pending.remove(&task.path);
             }
         }
 
-        let mut state = self.shared_state.lock().unwrap();
+        let mut state = self.shared_state.lock();
         state.failed_count = state.failed_count.saturating_sub(tasks.len());
         for task in &tasks {
             let attempts = current_attempt_count(&state, &task.path);
@@ -617,7 +617,7 @@ impl QueueManager {
 
     pub async fn retry_all_failed(&self) -> usize {
         let tasks = {
-            let mut retries = self.retry_list.lock().unwrap();
+            let mut retries = self.retry_list.lock();
             std::mem::take(&mut *retries)
         };
         self.requeue_failed(tasks, "Manual retry".to_string()).await
@@ -625,7 +625,7 @@ impl QueueManager {
 
     pub async fn retry_failed_path(&self, path: &str) -> bool {
         let task = {
-            let mut retries = self.retry_list.lock().unwrap();
+            let mut retries = self.retry_list.lock();
             let index = retries.iter().position(|task| task.path == path);
             index.map(|index| retries.remove(index))
         };
@@ -641,7 +641,7 @@ impl QueueManager {
 
     /// Persist any in-memory retry items so they survive a clean shutdown.
     pub fn flush_retries(&self) {
-        let retries = self.retry_list.lock().unwrap();
+        let retries = self.retry_list.lock();
         if !retries.is_empty() {
             save_retries(&self.retry_path, &retries);
             log::info!(
@@ -657,8 +657,8 @@ impl QueueManager {
         }
 
         {
-            let mut state = self.shared_state.lock().unwrap();
-            let mut batch_state = self.batch_notify_state.lock().unwrap();
+            let mut state = self.shared_state.lock();
+            let mut batch_state = self.batch_notify_state.lock();
             activate_batch_if_needed(&mut batch_state, &state);
             state.failed_count = state.failed_count.saturating_sub(tasks.len());
             state.total_queued += tasks.len();
@@ -730,13 +730,13 @@ fn is_quiet_hour(start: Option<u8>, end: Option<u8>) -> bool {
 }
 
 async fn wait_until_allowed(
-    state_ref: &Arc<std::sync::Mutex<AppState>>,
-    policy_ref: &Arc<std::sync::Mutex<EnvironmentPolicy>>,
+    state_ref: &Arc<parking_lot::Mutex<AppState>>,
+    policy_ref: &Arc<parking_lot::Mutex<EnvironmentPolicy>>,
 ) {
     loop {
-        let policy = *policy_ref.lock().unwrap();
+        let policy = *policy_ref.lock();
         let defer_reason = {
-            let state = state_ref.lock().unwrap();
+            let state = state_ref.lock();
             if state.paused {
                 Some(
                     state
@@ -757,7 +757,7 @@ async fn wait_until_allowed(
 
         if let Some(reason) = defer_reason {
             {
-                let mut state = state_ref.lock().unwrap();
+                let mut state = state_ref.lock();
                 state.status = "paused".to_string();
                 state.pause_reason = Some(reason);
             }
@@ -765,7 +765,7 @@ async fn wait_until_allowed(
             continue;
         }
 
-        let mut state = state_ref.lock().unwrap();
+        let mut state = state_ref.lock();
         if state.status == "paused" && !state.paused {
             state.status = "idle".to_string();
             state.pause_reason = None;
@@ -947,8 +947,9 @@ fn load_retries(path: &PathBuf) -> Vec<FileTask> {
 mod tests {
     use super::*;
     use crate::state_manager::AppState;
+    use parking_lot::Mutex;
     use std::collections::HashSet;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
@@ -1046,8 +1047,8 @@ mod tests {
 
         let queued = rx.recv().await.unwrap();
         assert_eq!(queued.path, task.path);
-        assert!(pending_paths.lock().unwrap().contains("/a/1.jpg"));
-        assert_eq!(shared_state.lock().unwrap().total_queued, 1);
+        assert!(pending_paths.lock().contains("/a/1.jpg"));
+        assert_eq!(shared_state.lock().total_queued, 1);
     }
 
     #[tokio::test]
@@ -1062,17 +1063,17 @@ mod tests {
             reassociate_only: false,
         };
 
-        retry_list.lock().unwrap().push(task.clone());
-        pending_paths.lock().unwrap().insert(task.path.clone());
-        shared_state.lock().unwrap().failed_count = 1;
+        retry_list.lock().push(task.clone());
+        pending_paths.lock().insert(task.path.clone());
+        shared_state.lock().failed_count = 1;
 
         assert!(qm.retry_failed_path(&task.path).await);
 
         let requeued = rx.recv().await.unwrap();
         assert_eq!(requeued.path, task.path);
-        assert!(retry_list.lock().unwrap().is_empty());
+        assert!(retry_list.lock().is_empty());
 
-        let state = shared_state.lock().unwrap();
+        let state = shared_state.lock();
         assert_eq!(state.failed_count, 0);
         assert_eq!(state.total_queued, 1);
         assert_eq!(state.recent_events[0].status, "pending");
@@ -1096,15 +1097,15 @@ mod tests {
             reassociate_only: false,
         };
 
-        retry_list.lock().unwrap().push(task.clone());
-        pending_paths.lock().unwrap().insert(task.path.clone());
-        shared_state.lock().unwrap().failed_count = 1;
+        retry_list.lock().push(task.clone());
+        pending_paths.lock().insert(task.path.clone());
+        shared_state.lock().failed_count = 1;
 
         assert_eq!(qm.clear_failed(), 1);
-        assert!(retry_list.lock().unwrap().is_empty());
-        assert!(!pending_paths.lock().unwrap().contains(&task.path));
+        assert!(retry_list.lock().is_empty());
+        assert!(!pending_paths.lock().contains(&task.path));
 
-        let state = shared_state.lock().unwrap();
+        let state = shared_state.lock();
         assert_eq!(state.failed_count, 0);
         assert_eq!(state.recent_events[0].status, "cleared");
     }

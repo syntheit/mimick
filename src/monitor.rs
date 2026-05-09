@@ -88,8 +88,9 @@ impl Monitor {
             // Track files that are currently waiting for size stability.
             // Prevents long-running records (like screencasts) from spawning
             // duplicate tasks every 2 seconds.
-            let active_tasks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
-                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+            let active_tasks: std::sync::Arc<
+                parking_lot::Mutex<std::collections::HashSet<String>>,
+            > = std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
 
             loop {
                 while let Ok(command) = command_rx.try_recv() {
@@ -145,7 +146,7 @@ impl Monitor {
                                 }
 
                                 // Bail immediately if we're already waiting on this file to finish.
-                                if active_tasks.lock().unwrap().contains(&path_str) {
+                                if active_tasks.lock().contains(&path_str) {
                                     continue;
                                 }
 
@@ -166,7 +167,7 @@ impl Monitor {
 
                                 log::info!("New file event: {}", path_str);
                                 debounce_map.insert(path_str.clone(), now);
-                                active_tasks.lock().unwrap().insert(path_str.clone());
+                                active_tasks.lock().insert(path_str.clone());
 
                                 let tx_clone = tx.clone();
                                 let active_clone = active_tasks.clone();
@@ -202,7 +203,7 @@ impl Monitor {
                                     }
 
                                     // Clear from active tasks so future modifications can be sensed.
-                                    active_clone.lock().unwrap().remove(&path_str);
+                                    active_clone.lock().remove(&path_str);
                                 });
                             }
                         }
@@ -378,9 +379,28 @@ mod tests {
     use super::{
         compute_sha1_chunked, is_flatpak_sandbox, is_supported_media_path, is_temporary_file,
     };
-    use std::io::Write;
+    use std::io::{BufReader, Read, Write};
     use std::path::Path;
     use tempfile::NamedTempFile;
+
+    /// Compute BLAKE3 in chunks. Prepared for Phase 1.5 when hashing switches
+    /// from SHA-1 to BLAKE3 for local content identity. Will be promoted to
+    /// `pub(crate)` once it replaces SHA-1 in the production path.
+    fn compute_blake3_chunked(path: &str) -> std::io::Result<String> {
+        const BUF_SIZE: usize = 65536;
+        let file = std::fs::File::open(path)?;
+        let mut reader = BufReader::with_capacity(BUF_SIZE, file);
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; BUF_SIZE];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(hasher.finalize().to_hex().to_string())
+    }
 
     #[test]
     fn test_compute_sha1_chunked() {
@@ -390,6 +410,17 @@ mod tests {
 
         let hash = compute_sha1_chunked(file.path().to_str().unwrap()).unwrap();
         assert_eq!(hash, "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed");
+    }
+
+    #[test]
+    fn test_compute_blake3_chunked() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"hello world").unwrap();
+
+        let hash = compute_blake3_chunked(file.path().to_str().unwrap()).unwrap();
+        // Known BLAKE3 hash of "hello world"
+        let expected = blake3::hash(b"hello world").to_hex().to_string();
+        assert_eq!(hash, expected);
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub struct MimickTray {
     pub pause_tx: watch::Sender<bool>,
     /// Sender used to request an immediate catch-up scan.
     pub sync_now_tx: watch::Sender<bool>,
+    /// Cached from `Config` at tray construction to avoid disk I/O per menu open.
+    pub library_view_enabled: bool,
 }
 
 impl ksni::Tray for MimickTray {
@@ -34,7 +36,7 @@ impl ksni::Tray for MimickTray {
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
-        let library_enabled = crate::config::Config::new().data.library_view_enabled;
+        let library_enabled = self.library_view_enabled;
         let mut items: Vec<ksni::MenuItem<Self>> = Vec::new();
         if library_enabled {
             items.push(
@@ -98,7 +100,7 @@ pub struct TrayHandles {
     pub sync_now_rx: watch::Receiver<bool>,
 }
 
-pub async fn build_tray() -> Result<TrayHandles, ksni::Error> {
+pub async fn build_tray(library_view_enabled: bool) -> Result<TrayHandles, ksni::Error> {
     let (settings_tx, settings_rx) = watch::channel(false);
     let (library_tx, library_rx) = watch::channel(false);
     let (quit_tx, quit_rx) = watch::channel(false);
@@ -110,6 +112,7 @@ pub async fn build_tray() -> Result<TrayHandles, ksni::Error> {
         quit_tx,
         pause_tx,
         sync_now_tx,
+        library_view_enabled,
     };
     let handle = if ashpd::is_sandboxed() {
         // Flatpak sessions already broker the item through the watcher, so we avoid owning

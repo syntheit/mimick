@@ -15,6 +15,9 @@ ksni = "0.3.4"
 libadwaita = { version = "0.9.1", features = ["v1_6"] }
 log = "0.4.29"
 lru = "0.18.0"
+parking_lot = "0.12.5"
+blake3 = "1.8.5"
+url = "2.5.8"
 notify = "8.2.0"
 oo7 = { version = "0.6.0", default-features = false, features = ["tokio", "native_crypto"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["native-tls", "charset", "http2", "json", "multipart", "stream"] }

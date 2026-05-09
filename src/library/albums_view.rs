@@ -87,12 +87,7 @@ pub fn populate_albums(
     clear(&parts.owned_grid);
     clear(&parts.shared_grid);
 
-    let current_user = ctx
-        .current_user_id
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_default();
+    let current_user = ctx.current_user_id.lock().clone().unwrap_or_default();
 
     let mut recent: Vec<&LibraryAlbum> = albums.iter().collect();
     recent.sort_by(|a, b| b.created_at.cmp(&a.created_at));

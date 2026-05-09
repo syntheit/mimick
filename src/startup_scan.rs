@@ -7,9 +7,10 @@ use crate::monitor::{compute_sha1_chunked, is_supported_media_path, is_temporary
 use crate::queue_manager::{FileTask, QueueManager};
 use crate::state_manager::AppState;
 use crate::sync_index::{SyncDecision, SyncIndex, SyncTarget};
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Scans watch folders at startup and queues new, changed, or retargeted files for upload.
 pub async fn queue_unsynced_files(
@@ -38,7 +39,7 @@ pub async fn queue_unsynced_files(
                 "Startup scan skipped missing watch path: {}",
                 root.display()
             );
-            if let Ok(mut state) = shared_state.lock() {
+            if let Some(mut state) = shared_state.try_lock() {
                 let status = state.folder_statuses.entry(watch_path_str).or_default();
                 status.last_error = Some("Permission lost or folder missing".to_string());
             }
@@ -88,7 +89,6 @@ pub async fn queue_unsynced_files(
                         } else if catchup_mode == StartupCatchupMode::NewFilesOnly {
                             let last_sync = shared_state
                                 .lock()
-                                .unwrap()
                                 .last_successful_sync_at
                                 .unwrap_or_default();
 
@@ -132,19 +132,18 @@ pub async fn queue_unsynced_files(
                             album_id: existing_album_id.clone(),
                         };
 
-                        let decision =
-                            match sync_index.lock().unwrap().sync_decision(&path, &target) {
-                                Ok(decision) => decision,
-                                Err(err) => {
-                                    scan_errors += 1;
-                                    log::warn!(
-                                        "Startup scan could not inspect '{}': {}",
-                                        path.display(),
-                                        err
-                                    );
-                                    continue;
-                                }
-                            };
+                        let decision = match sync_index.lock().sync_decision(&path, &target) {
+                            Ok(decision) => decision,
+                            Err(err) => {
+                                scan_errors += 1;
+                                log::warn!(
+                                    "Startup scan could not inspect '{}': {}",
+                                    path.display(),
+                                    err
+                                );
+                                continue;
+                            }
+                        };
 
                         match decision {
                             SyncDecision::UpToDate => {
@@ -204,8 +203,7 @@ pub async fn queue_unsynced_files(
                                         continue;
                                     }
                                 };
-                                let checksum =
-                                    sync_index.lock().unwrap().stored_checksum(&path_str);
+                                let checksum = sync_index.lock().stored_checksum(&path_str);
                                 match queue_scan_candidate(
                                     &queue_manager,
                                     path_str,
@@ -233,7 +231,7 @@ pub async fn queue_unsynced_files(
         }
     }
 
-    if let Err(err) = sync_index.lock().unwrap().prune_missing(&seen_paths) {
+    if let Err(err) = sync_index.lock().prune_missing(&seen_paths) {
         log::warn!("Failed to prune sync index after startup scan: {}", err);
     }
 

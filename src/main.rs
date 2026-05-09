@@ -3,8 +3,9 @@
 use gtk::prelude::*;
 use libadwaita as adw;
 use log::Record;
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 mod api_client;
@@ -17,11 +18,13 @@ mod monitor;
 mod notifications;
 mod queue_manager;
 mod runtime_env;
+mod sanitize;
 mod settings_window;
 mod startup_scan;
 mod state_manager;
 mod sync_index;
 mod tray_icon;
+mod util;
 mod watch_path_display;
 
 use api_client::ImmichApiClient;
@@ -124,7 +127,7 @@ async fn main() {
     let is_primary_instance = Arc::new(AtomicBool::new(false));
     let is_primary_instance_clone = is_primary_instance.clone();
 
-    let shared_state: Arc<Mutex<AppState>> = Arc::new(Mutex::new({
+    let shared_state: Arc<parking_lot::Mutex<AppState>> = Arc::new(parking_lot::Mutex::new({
         let mut saved = StateManager::new().read_state();
         // Any items left in the channel during shutdown were dropped, so we must
         // sync total_queued down to processed_count to clear the stuck queue state.
@@ -176,7 +179,7 @@ async fn main() {
         );
 
         {
-            let mut state = shared_state_startup.lock().unwrap();
+            let mut state = shared_state_startup.lock();
             state.watched_folder_count = watch_folder_count;
         }
 
@@ -199,13 +202,14 @@ async fn main() {
             runtime_external_url,
             api_key,
         ));
-        let sync_index = Arc::new(Mutex::new(SyncIndex::new()));
+        let sync_index = Arc::new(parking_lot::Mutex::new(SyncIndex::new()));
 
         let sync_index_flusher = sync_index.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                if let Ok(mut index) = sync_index_flusher.lock() {
+                {
+                    let mut index = sync_index_flusher.lock();
                     let _ = index.flush();
                 }
             }
@@ -250,7 +254,7 @@ async fn main() {
                 log::info!("Queuing: {} (sha1={})", path, checksum);
 
                 let (album_id, album_name, watch_path) = {
-                    let path_configs = live_watch_paths_for_queue.lock().unwrap();
+                    let path_configs = live_watch_paths_for_queue.lock();
                     best_matching_watch_entry(std::path::Path::new(&path), &path_configs)
                         .map(|entry| match entry {
                             config::WatchPathEntry::WithConfig {
@@ -290,8 +294,10 @@ async fn main() {
             api_client.clone(),
             config.data.library_thumbnail_cache_mb,
         ));
-        let library_state = Arc::new(Mutex::new(LibraryState::new()));
+        let library_state = Arc::new(parking_lot::Mutex::new(LibraryState::new()));
+        let shared_config = Arc::new(parking_lot::RwLock::new(config));
         let ctx = Arc::new(AppContext {
+            config: shared_config.clone(),
             state: shared_state_startup.clone(),
             api_client: api_client.clone(),
             queue_manager: qm.clone(),
@@ -302,7 +308,7 @@ async fn main() {
             thumbnail_cache,
             library_state,
             library_timeline_active: std::sync::atomic::AtomicBool::new(false),
-            current_user_id: Arc::new(Mutex::new(None)),
+            current_user_id: Arc::new(parking_lot::Mutex::new(None)),
         });
         let _ = APP_CONTEXT.set(ctx.clone());
 
@@ -310,13 +316,14 @@ async fn main() {
         if background_sync_enabled {
             let shared_state_startup_task = shared_state_startup.clone();
             let startup_api = ctx.api_client.clone();
+            let catchup_mode = shared_config.read().data.startup_catchup_mode.clone();
             tokio::spawn(async move {
                 queue_unsynced_files(
                     startup_paths,
                     startup_qm,
                     startup_sync_index,
                     startup_api,
-                    config::Config::new().data.startup_catchup_mode,
+                    catchup_mode,
                     shared_state_startup_task,
                 )
                 .await;
@@ -332,7 +339,7 @@ async fn main() {
             let route = status_api.active_route_label().await;
             let latest_issue = status_api.latest_issue().await;
 
-            let mut state = startup_state.lock().unwrap();
+            let mut state = startup_state.lock();
             state.active_server_route = route;
             if connected {
                 state.last_error = None;
@@ -347,15 +354,19 @@ async fn main() {
         let manual_sync_index = sync_index.clone();
         let manual_sync_api = ctx.api_client.clone();
         let shared_state_manual_task = shared_state_startup.clone();
+        let manual_config = shared_config.clone();
         tokio::spawn(async move {
             while manual_sync_rx.recv().await.is_some() {
-                let config = Config::new();
+                let (watch_paths, catchup_mode) = {
+                    let cfg = manual_config.read();
+                    (cfg.data.watch_paths.clone(), cfg.data.startup_catchup_mode.clone())
+                };
                 queue_unsynced_files(
-                    config.data.watch_paths.clone(),
+                    watch_paths,
                     manual_qm.clone(),
                     manual_sync_index.clone(),
                     manual_sync_api.clone(),
-                    config.data.startup_catchup_mode,
+                    catchup_mode,
                     shared_state_manual_task.clone(),
                 )
                 .await;
@@ -367,22 +378,22 @@ async fn main() {
 
         // Cross-thread flag: Tokio sets it; the GTK timer reads and clears it.
         // Arc<Mutex<bool>> is Send + Sync, so it can cross the tokio::spawn boundary.
-        let settings_flag = Arc::new(std::sync::Mutex::new(false));
+        let settings_flag = Arc::new(parking_lot::Mutex::new(false));
         let settings_flag_writer = settings_flag.clone(); // moves into tokio::spawn (Send ✓)
-        let library_flag = Arc::new(std::sync::Mutex::new(false));
+        let library_flag = Arc::new(parking_lot::Mutex::new(false));
         let library_flag_writer = library_flag.clone();
-        let quit_flag = Arc::new(std::sync::Mutex::new(false));
+        let quit_flag = Arc::new(parking_lot::Mutex::new(false));
         let quit_flag_writer = quit_flag.clone(); // moves into tokio::spawn (Send ✓)
-        let pause_flag = Arc::new(std::sync::Mutex::new(false));
+        let pause_flag = Arc::new(parking_lot::Mutex::new(false));
         let pause_flag_writer = pause_flag.clone();
-        let sync_now_flag = Arc::new(std::sync::Mutex::new(false));
+        let sync_now_flag = Arc::new(parking_lot::Mutex::new(false));
         let sync_now_flag_writer = sync_now_flag.clone();
 
         // GTK-side: poll the flag every 250ms on the main thread.
         // The application handle stays on the GTK thread and never enters Tokio tasks.
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
             let settings_triggered = {
-                let mut f = settings_flag.lock().unwrap();
+                let mut f = settings_flag.lock();
                 if *f {
                     *f = false;
                     true
@@ -399,7 +410,7 @@ async fn main() {
             }
 
             let library_triggered = {
-                let mut f = library_flag.lock().unwrap();
+                let mut f = library_flag.lock();
                 if *f {
                     *f = false;
                     true
@@ -416,7 +427,7 @@ async fn main() {
             }
 
             let quit_triggered = {
-                let mut f = quit_flag.lock().unwrap();
+                let mut f = quit_flag.lock();
                 if *f {
                     *f = false;
                     true
@@ -430,7 +441,7 @@ async fn main() {
             }
 
             let pause_triggered = {
-                let mut f = pause_flag.lock().unwrap();
+                let mut f = pause_flag.lock();
                 if *f {
                     *f = false;
                     true
@@ -453,7 +464,7 @@ async fn main() {
             }
 
             let sync_now_triggered = {
-                let mut f = sync_now_flag.lock().unwrap();
+                let mut f = sync_now_flag.lock();
                 if *f {
                     *f = false;
                     true
@@ -474,9 +485,10 @@ async fn main() {
 
         // Tokio-side: build the tray and forward watch signals into the flag.
         // Only *_writer flags (Send ✓) and watch receivers (Send ✓) are captured here.
+        let tray_library_enabled = shared_config.read().data.library_view_enabled;
         tokio::spawn(async move {
             log::info!("Starting system tray");
-            match build_tray().await {
+            match build_tray(tray_library_enabled).await {
                 Ok(handles) => {
                     let crate::tray_icon::TrayHandles {
                         handle: _handle,
@@ -493,7 +505,7 @@ async fn main() {
                                     break;
                                 }
                                 if *settings_rx.borrow() {
-                                    *settings_flag_writer.lock().unwrap() = true;
+                                    *settings_flag_writer.lock() = true;
                                 }
                             }
                             res = library_rx.changed() => {
@@ -501,7 +513,7 @@ async fn main() {
                                     break;
                                 }
                                 if *library_rx.borrow() {
-                                    *library_flag_writer.lock().unwrap() = true;
+                                    *library_flag_writer.lock() = true;
                                 }
                             }
                             res = quit_rx.changed() => {
@@ -509,7 +521,7 @@ async fn main() {
                                     break;
                                 }
                                 if *quit_rx.borrow() {
-                                    *quit_flag_writer.lock().unwrap() = true;
+                                    *quit_flag_writer.lock() = true;
                                 }
                             }
                             res = pause_rx.changed() => {
@@ -517,7 +529,7 @@ async fn main() {
                                     break;
                                 }
                                 if *pause_rx.borrow() {
-                                    *pause_flag_writer.lock().unwrap() = true;
+                                    *pause_flag_writer.lock() = true;
                                 }
                             }
                             res = sync_now_rx.changed() => {
@@ -525,7 +537,7 @@ async fn main() {
                                     break;
                                 }
                                 if *sync_now_rx.borrow() {
-                                    *sync_now_flag_writer.lock().unwrap() = true;
+                                    *sync_now_flag_writer.lock() = true;
                                 }
                             }
                         }
@@ -550,10 +562,13 @@ async fn main() {
             return 0.into();
         }
 
-        let runtime_config = Config::new();
+        let ctx_early = APP_CONTEXT.get().cloned();
         let want_settings = argv.contains(&"--settings".to_string());
         let want_library = argv.contains(&"--library".to_string());
-        let setup_required = runtime_config.get_api_key().unwrap_or_default().is_empty();
+        let setup_required = ctx_early
+            .as_ref()
+            .map(|c| c.config.read().get_api_key().unwrap_or_default().is_empty())
+            .unwrap_or(true);
         let secondary_activation = cmdline.is_remote();
 
         let ctx_lookup = || {
@@ -567,7 +582,12 @@ async fn main() {
             open_settings_window_now(app, ctx_lookup());
         } else if want_library {
             open_library_window_now(app, ctx_lookup());
-        } else if secondary_activation || !runtime_config.data.background_sync_enabled {
+        } else if secondary_activation
+            || !ctx_early
+                .as_ref()
+                .map(|c| c.config.read().data.background_sync_enabled)
+                .unwrap_or(false)
+        {
             open_default_window(app, ctx_lookup());
         }
 
@@ -589,8 +609,8 @@ async fn main() {
         }
         let state = APP_CONTEXT
             .get()
-            .map(|ctx| ctx.state.lock().unwrap().clone())
-            .unwrap_or_else(|| shared_state.lock().unwrap().clone());
+            .map(|ctx| ctx.state.lock().clone())
+            .unwrap_or_else(|| shared_state.lock().clone());
         StateManager::new().write_state(state);
         log::info!("Mimick exiting");
     }
@@ -605,7 +625,7 @@ fn open_default_window(app: &adw::Application, ctx: Arc<AppContext>) {
         win.present();
         return;
     }
-    if Config::new().data.library_view_enabled {
+    if ctx.config.read().data.library_view_enabled {
         open_library_window_now(app, ctx);
     } else {
         open_settings_window_now(app, ctx);
@@ -626,7 +646,7 @@ fn open_library_window_now(app: &adw::Application, ctx: Arc<AppContext>) {
         win.present();
         return;
     }
-    if !Config::new().data.library_view_enabled {
+    if !ctx.config.read().data.library_view_enabled {
         log::info!("Library view is disabled in settings; opening Settings instead");
         open_settings_window_now(app, ctx);
         return;

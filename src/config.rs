@@ -217,6 +217,7 @@ fn default_upload_concurrency() -> u8 {
     3
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub data: ConfigData,
     pub config_file: PathBuf,
@@ -262,17 +263,21 @@ impl Config {
     }
 
     pub fn save(&self) -> bool {
-        if let Some(parent) = self.config_file.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
         if let Ok(content) = serde_json::to_string_pretty(&self.data) {
-            let ok = fs::write(&self.config_file, content).is_ok();
-            if ok {
-                log::info!("Config saved to: {}", self.config_file.display());
-            } else {
-                log::error!("Failed to write config: {}", self.config_file.display());
+            match crate::util::atomic_write(&self.config_file, content.as_bytes()) {
+                Ok(()) => {
+                    log::info!("Config saved to: {}", self.config_file.display());
+                    true
+                }
+                Err(err) => {
+                    log::error!(
+                        "Failed to write config {}: {}",
+                        self.config_file.display(),
+                        err
+                    );
+                    false
+                }
             }
-            ok
         } else {
             false
         }

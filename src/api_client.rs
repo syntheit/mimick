@@ -2,10 +2,11 @@
 
 use chrono::{SecondsFormat, TimeZone, Utc};
 use futures_util::TryStreamExt;
+use parking_lot::RwLock;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
@@ -161,7 +162,6 @@ pub struct ExploreSection {
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct ExifInfo {
     #[serde(default)]
     pub make: Option<String>,
@@ -197,24 +197,13 @@ pub struct ExifInfo {
     pub exif_image_width: Option<u32>,
     #[serde(default)]
     pub exif_image_height: Option<u32>,
-    #[serde(default)]
-    pub orientation: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct AssetDetails {
-    pub id: String,
-    pub original_file_name: String,
-    #[serde(rename = "type")]
-    pub asset_type: String,
     #[serde(default)]
     pub exif_info: Option<ExifInfo>,
-    #[serde(default)]
-    pub duration: Option<String>,
-    #[serde(default)]
-    pub file_created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,7 +293,7 @@ impl ImmichApiClient {
         api_key: String,
     ) {
         {
-            let mut settings = self.settings.write().unwrap();
+            let mut settings = self.settings.write();
             settings.internal_url = internal_url.trim_end_matches('/').to_string();
             settings.external_url = external_url.trim_end_matches('/').to_string();
             settings.api_key = api_key;
@@ -324,11 +313,11 @@ impl ImmichApiClient {
     }
 
     fn settings_snapshot(&self) -> ApiClientSettings {
-        self.settings.read().unwrap().clone()
+        self.settings.read().clone()
     }
 
     fn route_label_for_url(&self, url: &str) -> String {
-        let settings = self.settings.read().unwrap().clone();
+        let settings = self.settings.read().clone();
         let trimmed = url.trim_end_matches('/');
         if !settings.internal_url.is_empty() && trimmed == settings.internal_url {
             "LAN".to_string()
@@ -342,7 +331,7 @@ impl ImmichApiClient {
     /// Determine which base URL to use, preferring the internal address when reachable.
     pub async fn check_connection(&self) -> bool {
         log::debug!("Checking connectivity...");
-        let settings = self.settings.read().unwrap().clone();
+        let settings = self.settings.read().clone();
         let was_active = self.active_url.lock().await.clone();
 
         if self.ping_url(&settings.internal_url).await {
@@ -554,7 +543,7 @@ impl ImmichApiClient {
             .text("isFavorite", "false");
 
         let url = format!("{}/api/assets", base_url);
-        let api_key = self.settings.read().unwrap().api_key.clone();
+        let api_key = self.settings.read().api_key.clone();
 
         match self
             .client
@@ -672,7 +661,7 @@ impl ImmichApiClient {
         time_zone: Option<String>,
     ) {
         let client = self.client.clone();
-        let api_key = self.settings.read().unwrap().api_key.clone();
+        let api_key = self.settings.read().api_key.clone();
 
         tokio::spawn(async move {
             let Some(time_zone) = time_zone else {
@@ -711,7 +700,7 @@ impl ImmichApiClient {
         };
 
         let url = format!("{}/api/albums", base_url);
-        let api_key = self.settings.read().unwrap().api_key.clone();
+        let api_key = self.settings.read().api_key.clone();
         log::info!("Fetching album list...");
 
         match self
@@ -784,7 +773,7 @@ impl ImmichApiClient {
             .await
             .ok_or_else(|| "No active connection".to_string())?;
         let url = format!("{}/api/albums", base_url);
-        let api_key = self.settings.read().unwrap().api_key.clone();
+        let api_key = self.settings.read().api_key.clone();
 
         log::info!("Creating album: '{}'", album_name);
 
@@ -885,7 +874,7 @@ impl ImmichApiClient {
     pub async fn find_existing_asset_id(&self, checksum: &str) -> Option<String> {
         let base_url = self.get_active_url().await?;
         let url = format!("{}/api/assets/bulk-upload-check", base_url);
-        let api_key = self.settings.read().unwrap().api_key.clone();
+        let api_key = self.settings.read().api_key.clone();
         let body = serde_json::json!({
             "assets": [
                 {
@@ -946,7 +935,7 @@ impl ImmichApiClient {
         };
 
         let url = format!("{}/api/albums/{}/assets", base_url, album_id);
-        let api_key = self.settings.read().unwrap().api_key.clone();
+        let api_key = self.settings.read().api_key.clone();
         let body = serde_json::json!({ "ids": asset_ids });
 
         log::info!(
@@ -1249,46 +1238,6 @@ impl ImmichApiClient {
             }
             Ok(resp) => Err(format!("HTTP {}", resp.status())),
             Err(err) => Err(err.to_string()),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub async fn delete_album(&self, album_id: &str) -> Result<(), String> {
-        let base_url = self
-            .get_active_url()
-            .await
-            .ok_or_else(|| "No active connection".to_string())?;
-        let settings = self.settings_snapshot();
-        let url = format!("{}/api/albums/{}", base_url, album_id);
-
-        match self
-            .client
-            .delete(&url)
-            .header("x-api-key", &settings.api_key)
-            .header("Accept", "application/json")
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                self.clear_issue().await;
-                Ok(())
-            }
-            Ok(resp) => {
-                self.set_issue(classify_http_issue(
-                    RequestContext::AlbumDelete,
-                    resp.status().as_u16(),
-                    Some(album_id),
-                ))
-                .await;
-                Err(format!("HTTP {}", resp.status()))
-            }
-            Err(err) => {
-                *self.active_url.lock().await = None;
-                self.set_issue(classify_network_issue(RequestContext::AlbumDelete, &err))
-                    .await;
-                Err(err.to_string())
-            }
         }
     }
 
@@ -1597,7 +1546,6 @@ impl ImmichApiClient {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 enum RequestContext {
     Upload,
     Albums,
@@ -1608,7 +1556,6 @@ enum RequestContext {
     SmartSearch,
     MetadataSearch,
     AssetDownload,
-    AlbumDelete,
     ServerStats,
     ServerAbout,
 }
@@ -1670,9 +1617,6 @@ fn classify_http_issue(context: RequestContext, status: u16, subject: Option<&st
                 RequestContext::AssetDownload => {
                     "Immich could not download the selected asset".to_string()
                 }
-                RequestContext::AlbumDelete => {
-                    "Immich could not delete the selected album".to_string()
-                }
                 RequestContext::ServerStats => {
                     "Immich could not load library statistics".to_string()
                 }
@@ -1725,9 +1669,6 @@ fn classify_network_issue(context: RequestContext, error: &reqwest::Error) -> Ap
                 }
                 RequestContext::AssetDownload => {
                     "The asset download request failed before completion".to_string()
-                }
-                RequestContext::AlbumDelete => {
-                    "The album deletion request failed before completion".to_string()
                 }
                 RequestContext::ServerStats => {
                     "The library statistics request failed before completion".to_string()

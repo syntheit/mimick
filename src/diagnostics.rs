@@ -9,15 +9,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn export_bundle(destination_root: &Path, state: &AppState) -> io::Result<PathBuf> {
-    let config = Config::new();
+pub fn export_bundle(
+    destination_root: &Path,
+    state: &AppState,
+    config: &Config,
+) -> io::Result<PathBuf> {
     let cache_root = dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("mimick");
     let data_root = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("mimick");
-    export_bundle_with_paths(destination_root, state, &config, &cache_root, &data_root)
+    export_bundle_with_paths(destination_root, state, config, &cache_root, &data_root)
 }
 
 fn export_bundle_with_paths(

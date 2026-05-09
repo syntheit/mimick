@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 /// Represents a record stored on disk for a synced file, including the last associated album target.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -168,25 +168,11 @@ impl SyncIndex {
     }
 
     fn save(&self) -> io::Result<()> {
-        if let Some(parent) = self.index_file.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
         let content = serde_json::to_string_pretty(&SyncIndexDataRef {
             files: &self.entries,
         })?;
 
-        let tmp_file = self.index_file.with_extension(format!(
-            "tmp.{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-
-        fs::write(&tmp_file, content)?;
-        fs::rename(&tmp_file, &self.index_file)?;
-        Ok(())
+        crate::util::atomic_write(&self.index_file, content.as_bytes())
     }
 }
 

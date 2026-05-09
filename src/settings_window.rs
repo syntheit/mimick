@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app_context::AppContext;
-use crate::config::Config;
 use crate::queue_manager::QueueManager;
 use crate::watch_path_display::{display_watch_path, watch_path_subtitle};
 
@@ -82,6 +81,7 @@ pub fn build_settings_window_with_parent(
     let live_watch_paths = ctx.live_watch_paths.clone();
     let sync_now_tx = ctx.sync_now_tx.clone();
     let thumbnail_cache = ctx.thumbnail_cache.clone();
+    let shared_config = ctx.config.clone();
     // Use an application window with a Libadwaita header switcher and two pages.
     let mut window_builder = adw::ApplicationWindow::builder()
         .application(app)
@@ -145,7 +145,7 @@ pub fn build_settings_window_with_parent(
     );
 
     let app_clone = app.clone();
-    let config = Config::new();
+    let config = ctx.config.read().clone();
 
     let status_page = adw::PreferencesPage::builder()
         .title("Status")
@@ -603,24 +603,54 @@ pub fn build_settings_window_with_parent(
         background_sync_state,
         #[strong]
         apply_in_flight,
+        #[strong]
+        shared_config,
         move |include_connectivity: bool, show_success_ack: bool| {
             if apply_in_flight.get() {
                 return;
             }
             apply_in_flight.set(true);
 
-            let existing = Config::new();
-            let mut internal_url_enabled = existing.data.internal_url_enabled;
-            let mut external_url_enabled = existing.data.external_url_enabled;
-            let mut internal_url = existing.data.internal_url.clone();
-            let mut external_url = existing.data.external_url.clone();
-            let mut api_key = existing.get_api_key().unwrap_or_default();
+            let (
+                mut internal_url_enabled,
+                mut external_url_enabled,
+                mut internal_url,
+                mut external_url,
+                mut api_key,
+            ) = {
+                let existing = shared_config.read();
+                (
+                    existing.data.internal_url_enabled,
+                    existing.data.external_url_enabled,
+                    existing.data.internal_url.clone(),
+                    existing.data.external_url.clone(),
+                    existing.get_api_key().unwrap_or_default(),
+                )
+            };
             if include_connectivity {
                 internal_url_enabled = internal_switch.is_active();
                 external_url_enabled = external_switch.is_active();
                 internal_url = internal_entry.text().to_string();
                 external_url = external_entry.text().to_string();
                 api_key = api_key_entry.text().to_string();
+
+                // Reject non-HTTP(S) URL schemes before persisting.
+                if internal_url_enabled
+                    && !internal_url.trim().is_empty()
+                    && let Err(err) = crate::sanitize::validate_http_url(&internal_url)
+                {
+                    show_alert(&window, "Invalid Internal URL", &err);
+                    apply_in_flight.set(false);
+                    return;
+                }
+                if external_url_enabled
+                    && !external_url.trim().is_empty()
+                    && let Err(err) = crate::sanitize::validate_http_url(&external_url)
+                {
+                    show_alert(&window, "Invalid External URL", &err);
+                    apply_in_flight.set(false);
+                    return;
+                }
             }
             let run_on_startup = startup_row.is_active();
             let pause_on_metered_network = metered_row.is_active();
@@ -712,6 +742,8 @@ pub fn build_settings_window_with_parent(
                 background_sync_state,
                 #[strong]
                 apply_in_flight,
+                #[strong]
+                shared_config,
                 async move {
                     if run_on_startup != previous_startup {
                         match autostart::apply(&window, run_on_startup).await {
@@ -737,49 +769,51 @@ pub fn build_settings_window_with_parent(
                         }
                     }
 
-                    let mut new_config = Config::new();
-                    new_config.data.internal_url_enabled = internal_url_enabled;
-                    new_config.data.external_url_enabled = external_url_enabled;
-                    new_config.data.internal_url = internal_url;
-                    new_config.data.external_url = external_url;
-                    new_config.data.watch_paths = watch_paths.clone();
-                    new_config.data.run_on_startup = run_on_startup;
-                    new_config.data.background_sync_enabled = background_sync_enabled;
-                    new_config.data.pause_on_metered_network = pause_on_metered_network;
-                    new_config.data.pause_on_battery_power = pause_on_battery_power;
-                    new_config.data.notifications_enabled = notifications_enabled;
-                    new_config.data.library_view_enabled = library_view_enabled;
-                    new_config.data.library_preview_full_resolution =
-                        library_preview_full_resolution;
-                    new_config.data.library_thumbnail_cache_mb = library_thumbnail_cache_mb;
-                    new_config.data.startup_catchup_mode = catchup_mode;
-                    new_config.data.upload_concurrency = upload_concurrency;
-                    new_config.data.quiet_hours_start = quiet_hours_start;
-                    new_config.data.quiet_hours_end = quiet_hours_end;
-
-                    if include_connectivity
-                        && !api_key.is_empty()
-                        && !new_config.set_api_key(&api_key)
                     {
-                        apply_in_flight.set(false);
+                        let mut new_config = shared_config.write();
+                        new_config.data.internal_url_enabled = internal_url_enabled;
+                        new_config.data.external_url_enabled = external_url_enabled;
+                        new_config.data.internal_url = internal_url;
+                        new_config.data.external_url = external_url;
+                        new_config.data.watch_paths = watch_paths.clone();
+                        new_config.data.run_on_startup = run_on_startup;
+                        new_config.data.background_sync_enabled = background_sync_enabled;
+                        new_config.data.pause_on_metered_network = pause_on_metered_network;
+                        new_config.data.pause_on_battery_power = pause_on_battery_power;
+                        new_config.data.notifications_enabled = notifications_enabled;
+                        new_config.data.library_view_enabled = library_view_enabled;
+                        new_config.data.library_preview_full_resolution =
+                            library_preview_full_resolution;
+                        new_config.data.library_thumbnail_cache_mb = library_thumbnail_cache_mb;
+                        new_config.data.startup_catchup_mode = catchup_mode;
+                        new_config.data.upload_concurrency = upload_concurrency;
+                        new_config.data.quiet_hours_start = quiet_hours_start;
+                        new_config.data.quiet_hours_end = quiet_hours_end;
 
-                        show_alert(
-                            &window,
-                            "Could Not Save API Key",
-                            "Mimick could not store the API key in your desktop keyring.",
-                        );
-                        return;
-                    }
+                        if include_connectivity
+                            && !api_key.is_empty()
+                            && !new_config.set_api_key(&api_key)
+                        {
+                            apply_in_flight.set(false);
 
-                    if !new_config.save() {
-                        apply_in_flight.set(false);
+                            show_alert(
+                                &window,
+                                "Could Not Save API Key",
+                                "Mimick could not store the API key in your desktop keyring.",
+                            );
+                            return;
+                        }
 
-                        show_alert(
-                            &window,
-                            "Could Not Save Settings",
-                            "Mimick could not write the updated configuration to disk.",
-                        );
-                        return;
+                        if !new_config.save() {
+                            apply_in_flight.set(false);
+
+                            show_alert(
+                                &window,
+                                "Could Not Save Settings",
+                                "Mimick could not write the updated configuration to disk.",
+                            );
+                            return;
+                        }
                     }
 
                     *startup_state.borrow_mut() = run_on_startup;
@@ -817,7 +851,7 @@ pub fn build_settings_window_with_parent(
                     crate::notifications::set_enabled(notifications_enabled);
 
                     if previous_background_sync != background_sync_enabled {
-                        let mut state = shared_state.lock().unwrap();
+                        let mut state = shared_state.lock();
                         if !background_sync_enabled && state.status != "uploading" && !state.paused
                         {
                             state.status = "idle".to_string();
@@ -832,7 +866,7 @@ pub fn build_settings_window_with_parent(
                     };
                     monitor_handle.replace_watch_paths(monitor_paths, background_sync_enabled);
 
-                    *live_watch_paths.lock().unwrap() = watch_paths.clone();
+                    *live_watch_paths.lock() = watch_paths.clone();
 
                     if background_sync_enabled
                         && previous_background_sync != background_sync_enabled
@@ -841,7 +875,7 @@ pub fn build_settings_window_with_parent(
                     }
 
                     {
-                        let mut state = shared_state.lock().unwrap();
+                        let mut state = shared_state.lock();
                         state.watched_folder_count = watch_paths.len();
                         let current_paths = watch_paths
                             .iter()
@@ -1066,11 +1100,14 @@ pub fn build_settings_window_with_parent(
         window,
         #[strong]
         shared_state,
+        #[strong]
+        shared_config,
         move |_| {
             let dialog = FileDialog::builder()
                 .title("Choose Diagnostics Export Folder")
                 .build();
             let state = shared_state.clone();
+            let config_ref = shared_config.clone();
             dialog.select_folder(
                 Some(&window),
                 gtk::gio::Cancellable::NONE,
@@ -1081,13 +1118,18 @@ pub fn build_settings_window_with_parent(
                         if let Ok(folder) = res
                             && let Some(path) = folder.path()
                         {
-                            let state_snapshot = state.lock().unwrap().clone();
+                            let state_snapshot = state.lock().clone();
+                            let config_snapshot = config_ref.read().clone();
                             glib::MainContext::default().spawn_local(clone!(
                                 #[weak]
                                 window,
                                 async move {
                                     let export_result = tokio::task::spawn_blocking(move || {
-                                        diagnostics::export_bundle(&path, &state_snapshot)
+                                        diagnostics::export_bundle(
+                                            &path,
+                                            &state_snapshot,
+                                            &config_snapshot,
+                                        )
                                     })
                                     .await;
 
@@ -1363,7 +1405,7 @@ pub fn build_settings_window_with_parent(
                     last_error_guidance,
                     folder_subtitles,
                 ) = {
-                    let s = shared_state.lock().unwrap();
+                    let s = shared_state.lock();
                     let folder_subtitles = tracked_rows
                         .borrow()
                         .iter()
