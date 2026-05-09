@@ -4,7 +4,7 @@ use crate::api_client::{ImmichApiClient, TransferProgressCallback};
 use crate::notifications;
 use crate::runtime_env;
 use crate::state_manager::{AppState, TransferDirection};
-use crate::sync_index::{SyncIndex, SyncTarget};
+use crate::sync_index::{ShardedSyncIndex, SyncTarget};
 use chrono::Timelike;
 use std::collections::HashSet;
 use std::fs;
@@ -99,7 +99,7 @@ impl QueueManager {
         api_client: Arc<ImmichApiClient>,
         workers: usize,
         shared_state: Arc<parking_lot::Mutex<AppState>>,
-        sync_index: Arc<parking_lot::Mutex<SyncIndex>>,
+        sync_index: Arc<ShardedSyncIndex>,
         policy: EnvironmentPolicy,
     ) -> Self {
         const MAX_WORKERS: usize = 10;
@@ -238,7 +238,7 @@ impl QueueManager {
                                 pending_ref.lock().remove(&file_task.path);
 
                                 if let Some(target) = sync_target.as_ref()
-                                    && let Err(err) = sync_index_ref.lock().record_synced(
+                                    && let Err(err) = sync_index_ref.record_synced(
                                         &file_task.path,
                                         &file_task.checksum,
                                         target,

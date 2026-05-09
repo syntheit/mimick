@@ -86,10 +86,9 @@ async fn resolve_local_checksums(ctx: Arc<AppContext>, locals: Vec<LocalAsset>) 
     let mut to_compute: Vec<LocalAsset> = Vec::new();
 
     {
-        let index = ctx.sync_index.lock();
         for asset in locals {
             let path_str = asset.path.to_string_lossy().to_string();
-            match index.stored_checksum(&path_str) {
+            match ctx.sync_index.stored_checksum(&path_str) {
                 Some(c) => out.push(LocalEntry {
                     local: asset,
                     checksum: c,
