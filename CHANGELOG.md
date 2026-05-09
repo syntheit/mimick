@@ -9,13 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Configurable test-asset generator script for Mimick benchmarks (#101).
+- Configurable test-asset generator script for reproducing deduplication and startup scan benchmarks across all supported API asset formats (#101).
 
 ### Changed
 
-- Hardened security sanitization and centralized configuration access (#98).
-- Parallelized startup scan, added hash worker pool, and sharded the SyncIndex (#99).
-- Implemented custom ListModel, sliding window cap, and prefetch tuning for performance (#100).
+- Hardened security by adding strict path sanitization against directory traversal on downloads, and enforcing `http`/`https` scheme validation for server URLs (#98).
+- Centralized read/write lock configuration access into `AppContext`, eliminating redundant disk parsing and streamlining context usage across modules (#98).
+- Replaced standard non-async locks (Mutex/RwLock) with `parking_lot` for faster operations, and added `atomic_write()` for crash-safe file persistence (#98).
+- Eliminated single-lock bottlenecks by replacing the monolithic `SyncIndex` with a 16-shard `ShardedSyncIndex` backed by `RwLock` shards (#99).
+- Significantly improved startup scan speeds by rewriting it as a two-stage parallel pipeline using `rayon` for fast directory enumeration and bounded asynchronous queueing (#99).
+- Added a worker pool cap to file monitor events with backpressure channels rather than unbounded blocking spawns (#99).
+- Implemented a custom `LibraryAssetModel` replacing the monolithic `gio::ListStore` to enable client-side sorting independently of server retrieval (#100).
+- Memory unbounded growth issues when scrolling large remote libraries are resolved using a new 400-asset sliding window with FIFO eviction (#100).
+- Implemented background lookahead thumbnail prefetching and lowered scroll trigger thresholds so thumbnails pop in faster while dragging down the grid (#100).
+- Added formal sorting support (`SortOrder`) across metadata and OCR search endpoints from the client side (#100).
 - Relocated the server connection status indicator from the sidebar top to the bottom for better visibility and layout balance.
 - Removed the redundant checkbox toggle icon from the library header bar; selection mode is now managed via Ctrl-hold or keyboard interaction.
 - Removed support for `.xmp` files from the media scanning and MIME detection logic as they are not utilized by the application.
