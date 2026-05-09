@@ -37,7 +37,7 @@ use queue_manager::{EnvironmentPolicy, FileTask, QueueManager};
 use settings_window::build_settings_window;
 use startup_scan::queue_unsynced_files;
 use state_manager::{AppState, StateManager};
-use sync_index::SyncIndex;
+use sync_index::ShardedSyncIndex;
 use tray_icon::build_tray;
 
 use flexi_logger::{
@@ -202,16 +202,13 @@ async fn main() {
             runtime_external_url,
             api_key,
         ));
-        let sync_index = Arc::new(parking_lot::Mutex::new(SyncIndex::new()));
+        let sync_index = Arc::new(ShardedSyncIndex::new());
 
         let sync_index_flusher = sync_index.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                {
-                    let mut index = sync_index_flusher.lock();
-                    let _ = index.flush();
-                }
+                let _ = sync_index_flusher.flush();
             }
         });
 

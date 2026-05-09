@@ -3,9 +3,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::time::UNIX_EPOCH;
+
+/// Number of shards for distributing sync index entries.
+const SHARD_COUNT: usize = 16;
 
 /// Represents a record stored on disk for a synced file, including the last associated album target.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -43,15 +48,43 @@ struct SyncIndexDataRef<'a> {
     files: &'a HashMap<String, SyncedFileRecord>,
 }
 
-pub struct SyncIndex {
-    index_file: PathBuf,
+/// A single shard of the sync index, holding a subset of entries.
+struct Shard {
     entries: HashMap<String, SyncedFileRecord>,
     checksum_to_path: HashMap<String, String>,
-    needs_save: bool,
-    dirty_count: usize,
+    dirty: bool,
 }
 
-impl SyncIndex {
+impl Shard {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            checksum_to_path: HashMap::new(),
+            dirty: false,
+        }
+    }
+}
+
+/// Thread-safe sync index that distributes entries across 16 `RwLock` shards
+/// keyed by path hash. This eliminates the single-lock bottleneck when
+/// parallel producers (startup scan, watcher workers) and consumers (library
+/// UI sync-state lookups) all contend on the index simultaneously.
+///
+/// The public API is identical to the old `SyncIndex` but methods are inherent
+/// -- callers no longer wrap this in `Arc<Mutex<_>>`.
+pub struct ShardedSyncIndex {
+    index_file: PathBuf,
+    shards: [RwLock<Shard>; SHARD_COUNT],
+}
+
+/// Determine which shard a path belongs to.
+fn shard_for(path: &str) -> usize {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    (hasher.finish() as usize) & (SHARD_COUNT - 1)
+}
+
+impl ShardedSyncIndex {
     /// Loads the sync index from the persistent data directory, migrating
     /// from the old cache location on first run so users who clear the
     /// system cache don't lose sync state and trigger a full re-upload.
@@ -63,20 +96,20 @@ impl SyncIndex {
 
         migrate_from_cache_dir(&index_file);
 
-        let entries = load_entries(&index_file);
+        let all_entries = load_entries(&index_file);
 
-        let mut checksum_to_path = HashMap::new();
-        for (path, record) in &entries {
-            checksum_to_path.insert(record.checksum.clone(), path.clone());
+        // Distribute entries across shards.
+        let shards: [RwLock<Shard>; SHARD_COUNT] =
+            std::array::from_fn(|_| RwLock::new(Shard::new()));
+        for (path, record) in all_entries {
+            let idx = shard_for(&path);
+            let mut s = shards[idx].write().unwrap();
+            s.checksum_to_path
+                .insert(record.checksum.clone(), path.clone());
+            s.entries.insert(path, record);
         }
 
-        Self {
-            index_file,
-            entries,
-            checksum_to_path,
-            needs_save: false,
-            dirty_count: 0,
-        }
+        Self { index_file, shards }
     }
 
     /// Decide whether a file is already current, needs a new upload, or only needs reassociation.
@@ -84,8 +117,10 @@ impl SyncIndex {
         let metadata = fs::metadata(path)?;
         let fingerprint = fingerprint_from_metadata(&metadata);
         let key = path.to_string_lossy();
+        let idx = shard_for(&key);
+        let shard = self.shards[idx].read().unwrap();
 
-        Ok(match self.entries.get(key.as_ref()) {
+        Ok(match shard.entries.get(key.as_ref()) {
             Some(record) => {
                 if record.size != fingerprint.0 || record.modified_ms != fingerprint.1 {
                     SyncDecision::NeedsUpload
@@ -102,15 +137,12 @@ impl SyncIndex {
     }
 
     /// Save the latest synced fingerprint and album target for a file.
-    pub fn record_synced(
-        &mut self,
-        path: &str,
-        checksum: &str,
-        target: &SyncTarget,
-    ) -> io::Result<()> {
+    pub fn record_synced(&self, path: &str, checksum: &str, target: &SyncTarget) -> io::Result<()> {
         let metadata = fs::metadata(path)?;
         let (size, modified_ms) = fingerprint_from_metadata(&metadata);
-        self.entries.insert(
+        let idx = shard_for(path);
+        let mut shard = self.shards[idx].write().unwrap();
+        shard.entries.insert(
             path.to_string(),
             SyncedFileRecord {
                 size,
@@ -120,12 +152,15 @@ impl SyncIndex {
                 album_id: target.album_id.clone(),
             },
         );
-        self.checksum_to_path
+        shard
+            .checksum_to_path
             .insert(checksum.to_string(), path.to_string());
-        self.needs_save = true;
-        self.dirty_count += 1;
+        shard.dirty = true;
 
-        if self.dirty_count >= 50 {
+        // Auto-flush when any shard accumulates enough changes.
+        let dirty_count = shard.entries.len();
+        drop(shard);
+        if dirty_count.is_multiple_of(50) {
             self.flush()
         } else {
             Ok(())
@@ -133,46 +168,66 @@ impl SyncIndex {
     }
 
     /// Drop records for files that no longer exist under any configured watch path.
-    pub fn prune_missing(&mut self, seen_paths: &HashSet<String>) -> io::Result<()> {
-        let before = self.entries.len();
-        self.entries.retain(|path, _| seen_paths.contains(path));
-        self.checksum_to_path
-            .retain(|_, path| seen_paths.contains(path));
-
-        if self.entries.len() != before {
-            self.needs_save = true;
+    pub fn prune_missing(&self, seen_paths: &HashSet<String>) -> io::Result<()> {
+        let mut any_changed = false;
+        for lock in &self.shards {
+            let mut shard = lock.write().unwrap();
+            let before = shard.entries.len();
+            shard.entries.retain(|path, _| seen_paths.contains(path));
+            shard
+                .checksum_to_path
+                .retain(|_, path| seen_paths.contains(path));
+            if shard.entries.len() != before {
+                shard.dirty = true;
+                any_changed = true;
+            }
+        }
+        if any_changed {
             self.flush()?;
         }
-
         Ok(())
     }
 
     /// Reuse the previous checksum when a file only needs album reassociation.
     pub fn stored_checksum(&self, path: &str) -> Option<String> {
-        self.entries.get(path).map(|record| record.checksum.clone())
+        let idx = shard_for(path);
+        let shard = self.shards[idx].read().unwrap();
+        shard
+            .entries
+            .get(path)
+            .map(|record| record.checksum.clone())
     }
 
     /// Reverse-lookup a local path by checksum for library sync-state indicators.
     pub fn local_path_for_checksum(&self, checksum: &str) -> Option<String> {
-        self.checksum_to_path.get(checksum).cloned()
+        // The checksum could be in any shard, so we must search all.
+        for lock in &self.shards {
+            let shard = lock.read().unwrap();
+            if let Some(path) = shard.checksum_to_path.get(checksum) {
+                return Some(path.clone());
+            }
+        }
+        None
     }
 
     /// Force a flush to disk if there are unwritten changes.
-    pub fn flush(&mut self) -> io::Result<()> {
-        if self.needs_save {
-            self.save()?;
-            self.needs_save = false;
-            self.dirty_count = 0;
+    pub fn flush(&self) -> io::Result<()> {
+        let mut merged = HashMap::new();
+        let mut any_dirty = false;
+        for lock in &self.shards {
+            let mut shard = lock.write().unwrap();
+            if shard.dirty {
+                any_dirty = true;
+                shard.dirty = false;
+            }
+            merged.extend(shard.entries.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
-        Ok(())
-    }
-
-    fn save(&self) -> io::Result<()> {
-        let content = serde_json::to_string_pretty(&SyncIndexDataRef {
-            files: &self.entries,
-        })?;
-
-        crate::util::atomic_write(&self.index_file, content.as_bytes())
+        if any_dirty {
+            let content = serde_json::to_string_pretty(&SyncIndexDataRef { files: &merged })?;
+            crate::util::atomic_write(&self.index_file, content.as_bytes())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -258,11 +313,18 @@ fn fingerprint_from_metadata(metadata: &fs::Metadata) -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{SyncDecision, SyncIndex, SyncTarget};
+    use super::{Shard, ShardedSyncIndex, SyncDecision, SyncTarget, load_entries, shard_for};
     use std::collections::HashSet;
     use std::fs;
     use std::io::Write;
     use tempfile::tempdir;
+
+    fn make_index(dir: &std::path::Path) -> ShardedSyncIndex {
+        ShardedSyncIndex {
+            index_file: dir.join("synced_index.json"),
+            shards: std::array::from_fn(|_| std::sync::RwLock::new(Shard::new())),
+        }
+    }
 
     #[test]
     fn test_record_synced_then_skip_unchanged_file() {
@@ -270,13 +332,7 @@ mod tests {
         let file_path = dir.path().join("photo.jpg");
         fs::write(&file_path, b"hello").unwrap();
 
-        let mut index = SyncIndex {
-            index_file: dir.path().join("synced_index.json"),
-            entries: Default::default(),
-            checksum_to_path: Default::default(),
-            needs_save: false,
-            dirty_count: 0,
-        };
+        let index = make_index(dir.path());
         let target = SyncTarget {
             album_name: Some("Album".into()),
             album_id: Some("album-1".into()),
@@ -301,13 +357,7 @@ mod tests {
         let file_path = dir.path().join("photo.jpg");
         fs::write(&file_path, b"hello").unwrap();
 
-        let mut index = SyncIndex {
-            index_file: dir.path().join("synced_index.json"),
-            entries: Default::default(),
-            checksum_to_path: Default::default(),
-            needs_save: false,
-            dirty_count: 0,
-        };
+        let index = make_index(dir.path());
         let target = SyncTarget {
             album_name: Some("Album".into()),
             album_id: Some("album-1".into()),
@@ -331,13 +381,7 @@ mod tests {
     #[test]
     fn test_prune_missing_removes_deleted_entries() {
         let dir = tempdir().unwrap();
-        let mut index = SyncIndex {
-            index_file: dir.path().join("synced_index.json"),
-            entries: Default::default(),
-            checksum_to_path: Default::default(),
-            needs_save: false,
-            dirty_count: 0,
-        };
+        let index = make_index(dir.path());
 
         let file_path = dir.path().join("photo.jpg");
         fs::write(&file_path, b"hello").unwrap();
@@ -362,13 +406,7 @@ mod tests {
         let file_path = dir.path().join("photo.jpg");
         fs::write(&file_path, b"hello").unwrap();
 
-        let mut index = SyncIndex {
-            index_file: dir.path().join("synced_index.json"),
-            entries: Default::default(),
-            checksum_to_path: Default::default(),
-            needs_save: false,
-            dirty_count: 0,
-        };
+        let index = make_index(dir.path());
         let original = SyncTarget {
             album_name: Some("Album A".into()),
             album_id: Some("album-a".into()),
@@ -391,13 +429,7 @@ mod tests {
     #[test]
     fn test_local_path_for_checksum_returns_matching_entry() {
         let dir = tempdir().unwrap();
-        let mut index = SyncIndex {
-            index_file: dir.path().join("synced_index.json"),
-            entries: Default::default(),
-            checksum_to_path: Default::default(),
-            needs_save: false,
-            dirty_count: 0,
-        };
+        let index = make_index(dir.path());
         let file_path = dir.path().join("photo.jpg");
         fs::write(&file_path, b"hello").unwrap();
         let target = SyncTarget {
@@ -413,5 +445,63 @@ mod tests {
             Some(file_path.to_string_lossy().to_string())
         );
         assert!(index.local_path_for_checksum("missing").is_none());
+    }
+
+    #[test]
+    fn test_sharded_index_distributes_entries_across_shards() {
+        let paths = [
+            "/home/user/photos/a.jpg",
+            "/home/user/photos/b.jpg",
+            "/home/user/photos/c.jpg",
+            "/home/user/photos/d.jpg",
+            "/home/user/photos/e.jpg",
+            "/home/user/photos/f.jpg",
+            "/home/user/photos/g.jpg",
+            "/home/user/photos/h.jpg",
+        ];
+        let mut shard_ids: HashSet<usize> = HashSet::new();
+        for path in &paths {
+            shard_ids.insert(shard_for(path));
+        }
+        // With 8 paths and 16 shards, we should have at least 2 distinct shards.
+        assert!(
+            shard_ids.len() >= 2,
+            "Expected at least 2 distinct shards, got {}",
+            shard_ids.len()
+        );
+    }
+
+    #[test]
+    fn test_sharded_index_flush_round_trips() {
+        let dir = tempdir().unwrap();
+        let index = make_index(dir.path());
+
+        let file_path = dir.path().join("photo.jpg");
+        fs::write(&file_path, b"hello").unwrap();
+        let target = SyncTarget {
+            album_name: Some("Album".into()),
+            album_id: Some("album-1".into()),
+        };
+        index
+            .record_synced(file_path.to_str().unwrap(), "hash1", &target)
+            .unwrap();
+        index.flush().unwrap();
+
+        // Load a fresh index from the same file and verify the entry survived.
+        let index_file = dir.path().join("synced_index.json");
+        let all = load_entries(&index_file);
+        let shards = std::array::from_fn(|_| std::sync::RwLock::new(Shard::new()));
+        for (path, record) in all {
+            let idx = shard_for(&path);
+            let mut s = shards[idx].write().unwrap();
+            s.checksum_to_path
+                .insert(record.checksum.clone(), path.clone());
+            s.entries.insert(path, record);
+        }
+        let index2 = ShardedSyncIndex { index_file, shards };
+        assert!(matches!(
+            index2.sync_decision(&file_path, &target).unwrap(),
+            SyncDecision::UpToDate
+        ));
     }
 }

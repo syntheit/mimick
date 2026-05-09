@@ -2190,12 +2190,12 @@ fn immich_checksum_to_hex(b64: &str) -> Option<String> {
 }
 
 fn asset_objects_from_state(assets: &[LibraryAsset], ctx: &AppContext) -> Vec<AssetObject> {
-    let sync_index = ctx.sync_index.lock();
     assets
         .iter()
         .map(|asset| {
             if let Some(local_path) = asset.id.strip_prefix(LOCAL_ID_PREFIX) {
-                let sync_state = local_sync_state(&sync_index, std::path::Path::new(local_path));
+                let sync_state =
+                    local_sync_state(&ctx.sync_index, std::path::Path::new(local_path));
                 let object = AssetObject::new_local(
                     &asset.id,
                     &asset.filename,
@@ -2216,7 +2216,7 @@ fn asset_objects_from_state(assets: &[LibraryAsset], ctx: &AppContext) -> Vec<As
                 .as_deref()
                 .and_then(immich_checksum_to_hex)
                 .as_deref()
-                .and_then(|hex| sync_index.local_path_for_checksum(hex));
+                .and_then(|hex| ctx.sync_index.local_path_for_checksum(hex));
             let sync_state = if local_match.is_some() { 2 } else { 0 };
             let object = AssetObject::new(
                 &asset.id,
@@ -2957,12 +2957,11 @@ async fn merge_unified_page(
     }
 
     let synced_paths: std::collections::HashSet<String> = {
-        let idx = ui.ctx.sync_index.lock();
         remote
             .iter()
             .filter_map(|a| a.checksum.as_deref())
             .filter_map(immich_checksum_to_hex)
-            .filter_map(|hex| idx.local_path_for_checksum(&hex))
+            .filter_map(|hex| ui.ctx.sync_index.local_path_for_checksum(&hex))
             .collect()
     };
 
@@ -3002,12 +3001,11 @@ async fn merge_album_unified_page(
     };
 
     let synced_paths: std::collections::HashSet<String> = {
-        let idx = ui.ctx.sync_index.lock();
         remote
             .iter()
             .filter_map(|a| a.checksum.as_deref())
             .filter_map(immich_checksum_to_hex)
-            .filter_map(|hex| idx.local_path_for_checksum(&hex))
+            .filter_map(|hex| ui.ctx.sync_index.local_path_for_checksum(&hex))
             .collect()
     };
 

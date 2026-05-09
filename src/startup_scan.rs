@@ -1,4 +1,10 @@
 //! Performs a startup catch-up scan for files that were missed while Mimick was not running.
+//!
+//! The scan runs in two stages:
+//!   1. **Enumerate (parallel, sync)** -- uses `rayon` to walk all watch paths
+//!      concurrently, collecting candidate files with their filesystem fingerprints.
+//!   2. **Decide + queue (bounded async)** -- resolves album IDs, checks the sync
+//!      index, hashes only when needed, and queues uploads with bounded concurrency.
 
 use crate::api_client::ImmichApiClient;
 use crate::config::StartupCatchupMode;
@@ -6,17 +12,30 @@ use crate::config::WatchPathEntry;
 use crate::monitor::{compute_sha1_chunked, is_supported_media_path, is_temporary_file};
 use crate::queue_manager::{FileTask, QueueManager};
 use crate::state_manager::AppState;
-use crate::sync_index::{SyncDecision, SyncIndex, SyncTarget};
+use crate::sync_index::{ShardedSyncIndex, SyncDecision, SyncTarget};
+use futures_util::stream::{self, StreamExt};
 use parking_lot::Mutex;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A file discovered during the parallel enumeration stage.
+struct ScanCandidate {
+    path: String,
+    watch_path: String,
+    album_name: String,
+}
 
 /// Scans watch folders at startup and queues new, changed, or retargeted files for upload.
+///
+/// Stage 1 parallelises the directory walk and filtering via rayon.
+/// Stage 2 resolves album IDs and processes candidates with bounded async concurrency.
 pub async fn queue_unsynced_files(
     watch_paths: Vec<WatchPathEntry>,
     queue_manager: Arc<QueueManager>,
-    sync_index: Arc<Mutex<SyncIndex>>,
+    sync_index: Arc<ShardedSyncIndex>,
     api_client: Arc<ImmichApiClient>,
     catchup_mode: StartupCatchupMode,
     shared_state: Arc<Mutex<AppState>>,
@@ -25,74 +44,271 @@ pub async fn queue_unsynced_files(
         return;
     }
 
-    let mut seen_paths = HashSet::new();
-    let mut queued = 0usize;
-    let mut skipped_current = 0usize;
-    let mut scan_errors = 0usize;
-    let mut album_id_cache: HashMap<String, Option<String>> = HashMap::new();
+    // ── Stage 1: Parallel enumerate + fingerprint ────────────────────────
+    //
+    // Read last_sync once, before spawning into rayon, to avoid locking
+    // shared_state on every file.
+    let last_sync = shared_state
+        .lock()
+        .last_successful_sync_at
+        .unwrap_or_default();
 
-    for entry in &watch_paths {
-        let watch_path_str = entry.path().to_string();
-        let root = Path::new(&watch_path_str);
-        if !root.exists() {
-            log::warn!(
-                "Startup scan skipped missing watch path: {}",
-                root.display()
-            );
-            if let Some(mut state) = shared_state.try_lock() {
-                let status = state.folder_statuses.entry(watch_path_str).or_default();
-                status.last_error = Some("Permission lost or folder missing".to_string());
-            }
-            continue;
-        }
+    let (candidates, seen_paths, skipped_enum, enum_errors) =
+        enumerate_candidates(&watch_paths, catchup_mode, last_sync, &shared_state);
 
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let read_dir = match std::fs::read_dir(&dir) {
-                Ok(iter) => iter,
-                Err(err) => {
-                    scan_errors += 1;
-                    log::warn!("Startup scan could not read '{}': {}", dir.display(), err);
-                    continue;
+    // ── Stage 2: Async decide + queue ────────────────────────────────────
+
+    // 2a. Pre-batch album ID resolution: collect unique names, resolve in parallel.
+    let unique_albums: Vec<String> = candidates
+        .iter()
+        .map(|c| c.album_name.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let album_id_cache: Arc<Mutex<HashMap<String, Option<String>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    // Resolve album IDs with bounded concurrency.
+    {
+        let api = api_client.clone();
+        let cache = album_id_cache.clone();
+        stream::iter(unique_albums)
+            .for_each_concurrent(8, |name| {
+                let api = api.clone();
+                let cache = cache.clone();
+                async move {
+                    match api.get_album_id_if_exists(&name).await {
+                        Ok(id) => {
+                            cache.lock().insert(name, id);
+                        }
+                        Err(err) => {
+                            log::warn!("Startup scan: album lookup failed for '{}': {}", name, err);
+                        }
+                    }
                 }
-            };
+            })
+            .await;
+    }
 
-            for child in read_dir {
-                match child {
-                    Ok(entry_fs) => {
-                        let path = entry_fs.path();
-                        if path.is_dir() {
-                            stack.push(path);
-                            continue;
+    // 2b. Process each candidate: sync_decision -> hash (if needed) -> queue.
+    let queued = Arc::new(AtomicUsize::new(0));
+    let skipped = Arc::new(AtomicUsize::new(skipped_enum));
+    let errors = Arc::new(AtomicUsize::new(enum_errors));
+
+    stream::iter(candidates)
+        .for_each_concurrent(16, |candidate| {
+            let sync_index = sync_index.clone();
+            let queue_manager = queue_manager.clone();
+            let api_client = api_client.clone();
+            let album_cache = album_id_cache.clone();
+            let queued = queued.clone();
+            let skipped = skipped.clone();
+            let errors = errors.clone();
+
+            async move {
+                let path = Path::new(&candidate.path);
+                let album_name = candidate.album_name.clone();
+
+                // Lookup existing album ID (no lock held across await).
+                let existing_album_id = album_cache.lock().get(&album_name).cloned().flatten();
+
+                let target = SyncTarget {
+                    album_name: Some(album_name.clone()),
+                    album_id: existing_album_id,
+                };
+
+                // sync_decision -- brief shard lock, no await.
+                let decision = match sync_index.sync_decision(path, &target) {
+                    Ok(d) => d,
+                    Err(err) => {
+                        errors.fetch_add(1, Ordering::Relaxed);
+                        log::warn!(
+                            "Startup scan could not inspect '{}': {}",
+                            candidate.path,
+                            err
+                        );
+                        return;
+                    }
+                };
+
+                match decision {
+                    SyncDecision::UpToDate => {
+                        skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    SyncDecision::NeedsUpload => {
+                        let album_id =
+                            match resolve_album(&api_client, &album_name, &album_cache).await {
+                                Ok(id) => id,
+                                Err(err) => {
+                                    errors.fetch_add(1, Ordering::Relaxed);
+                                    log::warn!(
+                                        "Startup scan skipping '{}': album resolution failed: {}",
+                                        candidate.path,
+                                        err
+                                    );
+                                    return;
+                                }
+                            };
+                        match hash_and_queue(
+                            &queue_manager,
+                            candidate.path,
+                            candidate.watch_path,
+                            album_id,
+                            Some(album_name),
+                            false,
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                queued.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(false) => {}
+                            Err(()) => {
+                                errors.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
-
-                        if !is_supported_media_path(&path) {
-                            continue;
+                    }
+                    SyncDecision::NeedsReassociate => {
+                        let album_id =
+                            match resolve_album(&api_client, &album_name, &album_cache).await {
+                                Ok(id) => id,
+                                Err(err) => {
+                                    errors.fetch_add(1, Ordering::Relaxed);
+                                    log::warn!(
+                                        "Startup scan skipping '{}': album resolution failed: {}",
+                                        candidate.path,
+                                        err
+                                    );
+                                    return;
+                                }
+                            };
+                        let checksum = sync_index.stored_checksum(&candidate.path);
+                        match hash_and_queue(
+                            &queue_manager,
+                            candidate.path,
+                            candidate.watch_path,
+                            album_id,
+                            Some(album_name),
+                            true,
+                            checksum,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                queued.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(false) => {}
+                            Err(()) => {
+                                errors.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
-                        if is_temporary_file(&path) || !entry.rules().matches(&path) {
-                            continue;
-                        }
+                    }
+                }
+            }
+        })
+        .await;
 
-                        let path_str = path.to_string_lossy().into_owned();
+    // Prune index entries for files that no longer exist.
+    if let Err(err) = sync_index.prune_missing(&seen_paths) {
+        log::warn!("Failed to prune sync index after startup scan: {}", err);
+    }
 
-                        // Apply Startup Catch-up Controls
-                        if catchup_mode == StartupCatchupMode::RecentOnly {
-                            if let Ok(meta) = entry_fs.metadata()
-                                && let Ok(modified) = meta.modified()
-                                && let Ok(duration) =
-                                    std::time::SystemTime::now().duration_since(modified)
-                                && duration.as_secs() > 7 * 86400
-                            {
-                                skipped_current += 1;
+    let total_queued = queued.load(Ordering::Relaxed);
+    let total_skipped = skipped.load(Ordering::Relaxed);
+    let total_errors = errors.load(Ordering::Relaxed);
+
+    if total_queued == 0 {
+        log::info!(
+            "Startup scan complete: no unsynced files found ({} already current, {} error(s)).",
+            total_skipped,
+            total_errors
+        );
+        return;
+    }
+
+    log::info!(
+        "Startup scan queued {} unsynced file(s) ({} already current, {} error(s)).",
+        total_queued,
+        total_skipped,
+        total_errors
+    );
+}
+
+/// Stage 1: Walk all watch paths in parallel using rayon.
+///
+/// Returns `(candidates, seen_paths, skipped_count, error_count)`.
+fn enumerate_candidates(
+    watch_paths: &[WatchPathEntry],
+    catchup_mode: StartupCatchupMode,
+    last_sync: f64,
+    shared_state: &Arc<Mutex<AppState>>,
+) -> (Vec<ScanCandidate>, HashSet<String>, usize, usize) {
+    let skipped = AtomicUsize::new(0);
+    let errors = AtomicUsize::new(0);
+    let seen_paths = Mutex::new(HashSet::new());
+
+    let candidates: Vec<ScanCandidate> = watch_paths
+        .par_iter()
+        .flat_map(|entry| {
+            let watch_path_str = entry.path().to_string();
+            let root = Path::new(&watch_path_str);
+            if !root.exists() {
+                log::warn!(
+                    "Startup scan skipped missing watch path: {}",
+                    root.display()
+                );
+                if let Some(mut state) = shared_state.try_lock() {
+                    let status = state.folder_statuses.entry(watch_path_str).or_default();
+                    status.last_error = Some("Permission lost or folder missing".to_string());
+                }
+                return Vec::new();
+            }
+
+            let mut results = Vec::new();
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(dir) = stack.pop() {
+                let read_dir = match std::fs::read_dir(&dir) {
+                    Ok(iter) => iter,
+                    Err(err) => {
+                        errors.fetch_add(1, Ordering::Relaxed);
+                        log::warn!("Startup scan could not read '{}': {}", dir.display(), err);
+                        continue;
+                    }
+                };
+
+                for child in read_dir {
+                    match child {
+                        Ok(entry_fs) => {
+                            let path = entry_fs.path();
+                            if path.is_dir() {
+                                stack.push(path);
                                 continue;
                             }
-                        } else if catchup_mode == StartupCatchupMode::NewFilesOnly {
-                            let last_sync = shared_state
-                                .lock()
-                                .last_successful_sync_at
-                                .unwrap_or_default();
 
-                            if let Ok(meta) = entry_fs.metadata()
+                            if !is_supported_media_path(&path) {
+                                continue;
+                            }
+                            if is_temporary_file(&path) || !entry.rules().matches(&path) {
+                                continue;
+                            }
+
+                            let path_str = path.to_string_lossy().into_owned();
+
+                            // Apply catchup-mode filtering.
+                            if catchup_mode == StartupCatchupMode::RecentOnly {
+                                if let Ok(meta) = entry_fs.metadata()
+                                    && let Ok(modified) = meta.modified()
+                                    && let Ok(duration) =
+                                        std::time::SystemTime::now().duration_since(modified)
+                                    && duration.as_secs() > 7 * 86400
+                                {
+                                    skipped.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
+                            } else if catchup_mode == StartupCatchupMode::NewFilesOnly
+                                && let Ok(meta) = entry_fs.metadata()
                                 && let Ok(created) = meta.created().or_else(|_| meta.modified())
                             {
                                 let created_secs = created
@@ -100,159 +316,40 @@ pub async fn queue_unsynced_files(
                                     .unwrap_or_default()
                                     .as_secs_f64();
                                 if created_secs < last_sync {
-                                    skipped_current += 1;
+                                    skipped.fetch_add(1, Ordering::Relaxed);
                                     continue;
                                 }
                             }
+
+                            seen_paths.lock().insert(path_str.clone());
+                            let album_name = effective_album_name(entry, &path);
+                            results.push(ScanCandidate {
+                                path: path_str,
+                                watch_path: watch_path_str.clone(),
+                                album_name,
+                            });
                         }
-
-                        seen_paths.insert(path_str.clone());
-                        let album_name = effective_album_name(entry, &path);
-                        let existing_album_id = match lookup_target_album_id(
-                            &api_client,
-                            &album_name,
-                            &mut album_id_cache,
-                        )
-                        .await
-                        {
-                            Ok(id) => id,
-                            Err(err) => {
-                                scan_errors += 1;
-                                log::warn!(
-                                    "Startup scan skipping '{}' because album resolution failed: {}",
-                                    path.display(),
-                                    err
-                                );
-                                continue;
-                            }
-                        };
-
-                        let target = SyncTarget {
-                            album_name: Some(album_name.clone()),
-                            album_id: existing_album_id.clone(),
-                        };
-
-                        let decision = match sync_index.lock().sync_decision(&path, &target) {
-                            Ok(decision) => decision,
-                            Err(err) => {
-                                scan_errors += 1;
-                                log::warn!(
-                                    "Startup scan could not inspect '{}': {}",
-                                    path.display(),
-                                    err
-                                );
-                                continue;
-                            }
-                        };
-
-                        match decision {
-                            SyncDecision::UpToDate => {
-                                skipped_current += 1;
-                            }
-                            SyncDecision::NeedsUpload => {
-                                let album_id = match resolve_target_album_id(
-                                    &api_client,
-                                    &album_name,
-                                    &mut album_id_cache,
-                                )
-                                .await
-                                {
-                                    Ok(id) => id,
-                                    Err(err) => {
-                                        scan_errors += 1;
-                                        log::warn!(
-                                            "Startup scan skipping '{}' because album resolution failed: {}",
-                                            path.display(),
-                                            err
-                                        );
-                                        continue;
-                                    }
-                                };
-                                match queue_scan_candidate(
-                                    &queue_manager,
-                                    path_str,
-                                    watch_path_str.clone(),
-                                    album_id,
-                                    Some(album_name),
-                                    false,
-                                    None,
-                                )
-                                .await
-                                {
-                                    Ok(true) => queued += 1,
-                                    Ok(false) => {}
-                                    Err(()) => scan_errors += 1,
-                                }
-                            }
-                            SyncDecision::NeedsReassociate => {
-                                let album_id = match resolve_target_album_id(
-                                    &api_client,
-                                    &album_name,
-                                    &mut album_id_cache,
-                                )
-                                .await
-                                {
-                                    Ok(id) => id,
-                                    Err(err) => {
-                                        scan_errors += 1;
-                                        log::warn!(
-                                            "Startup scan skipping '{}' because album resolution failed: {}",
-                                            path.display(),
-                                            err
-                                        );
-                                        continue;
-                                    }
-                                };
-                                let checksum = sync_index.lock().stored_checksum(&path_str);
-                                match queue_scan_candidate(
-                                    &queue_manager,
-                                    path_str,
-                                    watch_path_str.clone(),
-                                    album_id,
-                                    Some(album_name),
-                                    true,
-                                    checksum,
-                                )
-                                .await
-                                {
-                                    Ok(true) => queued += 1,
-                                    Ok(false) => {}
-                                    Err(()) => scan_errors += 1,
-                                }
-                            }
+                        Err(err) => {
+                            errors.fetch_add(1, Ordering::Relaxed);
+                            log::warn!("Startup scan directory entry error: {}", err);
                         }
-                    }
-                    Err(err) => {
-                        scan_errors += 1;
-                        log::warn!("Startup scan directory entry error: {}", err);
                     }
                 }
             }
-        }
-    }
+            results
+        })
+        .collect();
 
-    if let Err(err) = sync_index.lock().prune_missing(&seen_paths) {
-        log::warn!("Failed to prune sync index after startup scan: {}", err);
-    }
-
-    if queued == 0 {
-        log::info!(
-            "Startup scan complete: no unsynced files found ({} already current, {} error(s)).",
-            skipped_current,
-            scan_errors
-        );
-        return;
-    }
-
-    log::info!(
-        "Startup scan queued {} unsynced file(s) ({} already current, {} error(s)).",
-        queued,
-        skipped_current,
-        scan_errors
-    );
+    (
+        candidates,
+        seen_paths.into_inner(),
+        skipped.into_inner(),
+        errors.into_inner(),
+    )
 }
 
-async fn queue_scan_candidate(
+/// Hash a candidate file and submit it to the upload queue.
+async fn hash_and_queue(
     queue_manager: &QueueManager,
     path: String,
     watch_path: String,
@@ -302,33 +399,22 @@ fn effective_album_name(entry: &WatchPathEntry, path: &Path) -> String {
     }
 }
 
-/// Resolve and memoize existing album IDs without creating albums during scan inspection.
-async fn lookup_target_album_id(
+/// Resolve an album ID, creating the album if it doesn't exist yet.
+/// Caches the result for reuse by other candidates in the same folder.
+async fn resolve_album(
     api_client: &ImmichApiClient,
     album_name: &str,
-    album_id_cache: &mut HashMap<String, Option<String>>,
+    cache: &Arc<Mutex<HashMap<String, Option<String>>>>,
 ) -> Result<Option<String>, String> {
-    if let Some(cached) = album_id_cache.get(album_name) {
-        return Ok(cached.clone());
-    }
-
-    let resolved = api_client.get_album_id_if_exists(album_name).await?;
-    album_id_cache.insert(album_name.to_string(), resolved.clone());
-    Ok(resolved)
-}
-
-/// Resolve and memoize target album IDs so repeated files in the same folder reuse the lookup.
-async fn resolve_target_album_id(
-    api_client: &ImmichApiClient,
-    album_name: &str,
-    album_id_cache: &mut HashMap<String, Option<String>>,
-) -> Result<Option<String>, String> {
-    if let Some(Some(cached)) = album_id_cache.get(album_name) {
+    // Fast path: already resolved.
+    if let Some(Some(cached)) = cache.lock().get(album_name) {
         return Ok(Some(cached.clone()));
     }
 
     let resolved = api_client.resolve_album_by_name(album_name, false).await?;
-    album_id_cache.insert(album_name.to_string(), resolved.clone());
+    cache
+        .lock()
+        .insert(album_name.to_string(), resolved.clone());
     Ok(resolved)
 }
 

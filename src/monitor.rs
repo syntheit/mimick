@@ -56,11 +56,68 @@ impl Monitor {
     }
 
     /// Start the watcher thread and emit `(path, sha1_hex)` tuples for ready files.
+    ///
+    /// Hashing is offloaded to a bounded worker pool (N = num_cpus / 2, capped at 4)
+    /// so bursts of file events don't serialise on hash latency.
     pub fn start(&self, tx: mpsc::Sender<(String, String)>) -> MonitorHandle {
         let watch_paths = self.watch_paths.clone();
         let background_sync_enabled = self.background_sync_enabled;
         let handle = tokio::runtime::Handle::current();
         let (command_tx, command_rx) = std::sync::mpsc::channel();
+
+        // Worker pool: bounded channel provides backpressure.
+        let worker_count = (num_cpus::get() / 2).clamp(1, 4);
+        let (work_tx, work_rx) = tokio::sync::mpsc::channel::<String>(32);
+        let work_rx = std::sync::Arc::new(tokio::sync::Mutex::new(work_rx));
+
+        // Track files that are currently waiting for size stability or hashing.
+        let active_tasks: std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<String>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+        // Spawn the worker pool on the tokio runtime.
+        for i in 0..worker_count {
+            let rx = work_rx.clone();
+            let tx_out = tx.clone();
+            let active = active_tasks.clone();
+            handle.spawn(async move {
+                loop {
+                    let path_str = {
+                        let mut guard = rx.lock().await;
+                        match guard.recv().await {
+                            Some(p) => p,
+                            None => break, // channel closed
+                        }
+                    };
+
+                    let is_complete = wait_for_file_completion(&path_str).await;
+
+                    if is_complete {
+                        let p_clone = path_str.clone();
+                        match tokio::task::spawn_blocking(move || compute_sha1_chunked(&p_clone))
+                            .await
+                        {
+                            Ok(Ok(checksum)) => {
+                                log::info!("File ready: {} (sha1={})", path_str, checksum);
+                                let _ = tx_out.send((path_str.clone(), checksum)).await;
+                            }
+                            Ok(Err(e)) => {
+                                log::error!("Checksum error for {}: {}", path_str, e);
+                            }
+                            Err(e) => {
+                                log::error!("Checksum task panicked for {}: {}", path_str, e);
+                            }
+                        }
+                    } else {
+                        log::warn!("File never stabilised, skipping: {}", path_str);
+                    }
+
+                    // Clear from active tasks so future modifications can be sensed.
+                    active.lock().remove(&path_str);
+                }
+                log::debug!("Hash worker {} exiting", i);
+            });
+        }
+        log::info!("Started {} hash worker(s) for file monitor", worker_count);
 
         std::thread::spawn(move || {
             let (notify_tx, notify_rx) = std::sync::mpsc::channel();
@@ -84,13 +141,6 @@ impl Monitor {
 
             // Debounce map: path -> last seen instant
             let mut debounce_map: HashMap<String, Instant> = HashMap::new();
-
-            // Track files that are currently waiting for size stability.
-            // Prevents long-running records (like screencasts) from spawning
-            // duplicate tasks every 2 seconds.
-            let active_tasks: std::sync::Arc<
-                parking_lot::Mutex<std::collections::HashSet<String>>,
-            > = std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
 
             loop {
                 while let Ok(command) = command_rx.try_recv() {
@@ -145,7 +195,7 @@ impl Monitor {
                                     continue;
                                 }
 
-                                // Bail immediately if we're already waiting on this file to finish.
+                                // Bail immediately if we're already waiting on this file.
                                 if active_tasks.lock().contains(&path_str) {
                                     continue;
                                 }
@@ -169,42 +219,10 @@ impl Monitor {
                                 debounce_map.insert(path_str.clone(), now);
                                 active_tasks.lock().insert(path_str.clone());
 
-                                let tx_clone = tx.clone();
-                                let active_clone = active_tasks.clone();
-                                handle.spawn(async move {
-                                    let is_complete = wait_for_file_completion(&path_str).await;
-
-                                    if is_complete {
-                                        let p_clone = path_str.clone();
-                                        match tokio::task::spawn_blocking(move || {
-                                            compute_sha1_chunked(&p_clone)
-                                        })
-                                        .await
-                                        .unwrap()
-                                        {
-                                            Ok(checksum) => {
-                                                log::info!(
-                                                    "File ready: {} (sha1={})",
-                                                    path_str,
-                                                    checksum
-                                                );
-                                                let _ = tx_clone
-                                                    .send((path_str.clone(), checksum))
-                                                    .await;
-                                            }
-                                            Err(e) => log::error!(
-                                                "Checksum error for {}: {}",
-                                                path_str,
-                                                e
-                                            ),
-                                        }
-                                    } else {
-                                        log::warn!("File never stabilised, skipping: {}", path_str);
-                                    }
-
-                                    // Clear from active tasks so future modifications can be sensed.
-                                    active_clone.lock().remove(&path_str);
-                                });
+                                // Route to worker pool via bounded channel.
+                                if let Err(err) = work_tx.blocking_send(path_str) {
+                                    log::warn!("Failed to send work to hash pool: {}", err);
+                                }
                             }
                         }
                     }

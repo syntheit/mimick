@@ -200,7 +200,7 @@ pub fn filter_by_filename(items: Vec<LocalAsset>, query: &str) -> Vec<LocalAsset
 /// would deadlock against the outer guard (`parking_lot::Mutex` is
 /// non-reentrant). Returns 2 when the file's path is recorded as synced
 /// (badge "Both"), 1 otherwise (LocalOnly).
-pub fn local_sync_state(idx: &crate::sync_index::SyncIndex, path: &Path) -> u32 {
+pub fn local_sync_state(idx: &crate::sync_index::ShardedSyncIndex, path: &Path) -> u32 {
     if idx.stored_checksum(&path.display().to_string()).is_some() {
         2
     } else {

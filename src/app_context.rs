@@ -15,7 +15,7 @@ use crate::library::thumbnail_cache::ThumbnailCache;
 use crate::monitor::MonitorHandle;
 use crate::queue_manager::QueueManager;
 use crate::state_manager::AppState;
-use crate::sync_index::SyncIndex;
+use crate::sync_index::ShardedSyncIndex;
 
 /// Shared application context holding all dependency handles that UI and background
 /// tasks need. Wrapped in `Arc` at construction time so it can be cloned cheaply.
@@ -25,7 +25,7 @@ pub struct AppContext {
     pub api_client: Arc<ImmichApiClient>,
     pub queue_manager: Arc<QueueManager>,
     pub monitor_handle: Arc<MonitorHandle>,
-    pub sync_index: Arc<Mutex<SyncIndex>>,
+    pub sync_index: Arc<ShardedSyncIndex>,
     pub live_watch_paths: Arc<Mutex<Vec<WatchPathEntry>>>,
     pub sync_now_tx: UnboundedSender<()>,
     pub thumbnail_cache: Arc<ThumbnailCache>,

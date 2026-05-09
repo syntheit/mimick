@@ -19,7 +19,9 @@ parking_lot = "0.12.5"
 blake3 = "1.8.5"
 url = "2.5.8"
 notify = "8.2.0"
+num_cpus = "1.17.0"
 oo7 = { version = "0.6.0", default-features = false, features = ["tokio", "native_crypto"] }
+rayon = "1.12.0"
 reqwest = { version = "0.13.2", default-features = false, features = ["native-tls", "charset", "http2", "json", "multipart", "stream"] }
 tokio-util = { version = "0.7.18", features = ["codec"] }
 futures-util = "0.3.32"
