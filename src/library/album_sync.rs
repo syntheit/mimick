@@ -34,7 +34,7 @@ pub async fn diff_album_vs_folder(
     loop {
         let chunk = ctx
             .api_client
-            .fetch_album_assets(album_id, page, 1000)
+            .fetch_album_assets(album_id, page, 1000, None)
             .await?;
         let len = chunk.len();
         remote.extend(chunk);

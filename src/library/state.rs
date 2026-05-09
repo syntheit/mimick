@@ -5,6 +5,17 @@ use crate::api_client::{
 };
 
 const PAGE_SIZE: usize = 50;
+const WINDOW_PAGES: usize = 8;
+pub const WINDOW_CAP: usize = WINDOW_PAGES * PAGE_SIZE;
+
+/// Outcome of an append/replace, used by the listmodel layer to emit a
+/// single `items_changed(0, prev_n, new_n)` reset signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageMutation {
+    pub generation: u64,
+    pub prev_n: usize,
+    pub new_n: usize,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LibrarySource {
@@ -72,8 +83,21 @@ impl LibrarySource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LibrarySortMode {
     NewestFirst,
+    OldestFirst,
     Filename,
     FileType,
+}
+
+impl LibrarySortMode {
+    /// Server-side date order for paged remote sources, or `None` when the
+    /// mode is purely client-side (filename/filetype sort over loaded pages).
+    pub fn server_order(&self) -> Option<crate::api_client::SortOrder> {
+        match self {
+            LibrarySortMode::NewestFirst => Some(crate::api_client::SortOrder::Desc),
+            LibrarySortMode::OldestFirst => Some(crate::api_client::SortOrder::Asc),
+            LibrarySortMode::Filename | LibrarySortMode::FileType => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,11 +187,16 @@ impl LibraryState {
         Some((self.generation, self.source.clone(), self.next_page))
     }
 
-    pub fn replace_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
+    pub fn replace_assets(
+        &mut self,
+        generation: u64,
+        items: Vec<LibraryAsset>,
+    ) -> Option<PageMutation> {
         if generation != self.generation {
-            return false;
+            return None;
         }
 
+        let prev_n = self.assets.len();
         self.assets = dedup_assets(items);
         self.page_in_flight = false;
         self.next_page = 2;
@@ -178,18 +207,34 @@ impl LibraryState {
             LibraryLoadState::Loaded
         };
         self.apply_sort(self.sort_mode.clone());
-        true
+        Some(PageMutation {
+            generation,
+            prev_n,
+            new_n: self.assets.len(),
+        })
     }
 
-    pub fn append_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
+    pub fn append_assets(
+        &mut self,
+        generation: u64,
+        items: Vec<LibraryAsset>,
+    ) -> Option<PageMutation> {
         if generation != self.generation {
-            return false;
+            return None;
         }
 
         let page_len = items.len();
         self.page_in_flight = false;
+
+        let prev_n = self.assets.len();
         self.assets.extend(items);
         self.assets = dedup_assets(std::mem::take(&mut self.assets));
+
+        if self.assets.len() > WINDOW_CAP {
+            let drop = self.assets.len() - WINDOW_CAP;
+            self.assets.drain(..drop);
+        }
+
         if page_len > 0 {
             self.next_page = self.next_page.saturating_add(1);
         }
@@ -200,30 +245,20 @@ impl LibraryState {
             LibraryLoadState::Loaded
         };
         self.apply_sort(self.sort_mode.clone());
-        true
+
+        Some(PageMutation {
+            generation,
+            prev_n,
+            new_n: self.assets.len(),
+        })
     }
 
+    /// Records the user's preferred sort mode. `LibraryState.assets` is always
+    /// stored in insertion (server) order so that the sliding-window FIFO
+    /// eviction is well-defined; the listmodel layer applies client-side sort
+    /// visually for `Filename`/`FileType`.
     pub fn apply_sort(&mut self, mode: LibrarySortMode) {
         self.sort_mode = mode;
-        match self.sort_mode {
-            LibrarySortMode::NewestFirst => self.assets.sort_by(|a, b| {
-                b.created_at
-                    .cmp(&a.created_at)
-                    .then_with(|| a.id.cmp(&b.id))
-            }),
-            LibrarySortMode::Filename => self.assets.sort_by(|a, b| {
-                a.filename
-                    .to_ascii_lowercase()
-                    .cmp(&b.filename.to_ascii_lowercase())
-                    .then_with(|| a.id.cmp(&b.id))
-            }),
-            LibrarySortMode::FileType => self.assets.sort_by(|a, b| {
-                a.mime_type
-                    .cmp(&b.mime_type)
-                    .then_with(|| a.filename.cmp(&b.filename))
-                    .then_with(|| a.id.cmp(&b.id))
-            }),
-        }
     }
 
     pub fn clear_search_restore_previous_source(&mut self) -> Option<(u64, LibrarySource, u32)> {
@@ -304,8 +339,16 @@ mod tests {
             query: "cats".into(),
         });
 
-        assert!(!state.replace_assets(generation, vec![asset("1", "a.jpg")]));
-        assert!(state.replace_assets(newer_generation.0, vec![asset("2", "b.jpg")]));
+        assert!(
+            state
+                .replace_assets(generation, vec![asset("1", "a.jpg")])
+                .is_none()
+        );
+        assert!(
+            state
+                .replace_assets(newer_generation.0, vec![asset("2", "b.jpg")])
+                .is_some()
+        );
         assert_eq!(state.assets.len(), 1);
         assert_eq!(state.assets[0].id, "2");
     }
@@ -318,6 +361,62 @@ mod tests {
         state.page_in_flight = false;
         assert!(state.load_next_page_if_needed().is_some());
         assert!(state.load_next_page_if_needed().is_none());
+    }
+
+    #[test]
+    fn test_appending_past_window_cap_evicts_oldest() {
+        let mut state = LibraryState::new();
+        let (generation, _, _) = state.load_initial_source();
+
+        let pages_to_load = (WINDOW_CAP / 50) + 2;
+        for page in 0..pages_to_load {
+            let chunk: Vec<LibraryAsset> = (0..50)
+                .map(|i| asset(&format!("{}", page * 50 + i), "a.jpg"))
+                .collect();
+            assert!(state.append_assets(generation, chunk).is_some());
+        }
+
+        assert_eq!(state.assets.len(), WINDOW_CAP);
+        let ids: std::collections::HashSet<String> =
+            state.assets.iter().map(|a| a.id.clone()).collect();
+        assert_eq!(ids.len(), WINDOW_CAP);
+        // After loading 10 pages (500 ids) into a 400-cap window, the oldest
+        // 100 must have been dropped.
+        assert!(!ids.contains("0"));
+        assert!(!ids.contains("99"));
+    }
+
+    #[test]
+    fn test_dedup_after_eviction_does_not_duplicate() {
+        let mut state = LibraryState::new();
+        let (generation, _, _) = state.load_initial_source();
+        // Load three pages, then re-append page 2's content — its ids must
+        // not appear twice in the window even though they get re-inserted.
+        let mk_page = |start: u32| -> Vec<LibraryAsset> {
+            (0..50)
+                .map(|i| asset(&format!("{}", start + i), "a.jpg"))
+                .collect()
+        };
+        state.append_assets(generation, mk_page(0));
+        state.append_assets(generation, mk_page(50));
+        state.append_assets(generation, mk_page(50));
+        let unique: std::collections::HashSet<_> =
+            state.assets.iter().map(|a| a.id.clone()).collect();
+        assert_eq!(unique.len(), state.assets.len());
+    }
+
+    #[test]
+    fn test_sort_mode_server_order_mapping() {
+        assert!(matches!(
+            LibrarySortMode::NewestFirst.server_order(),
+            Some(crate::api_client::SortOrder::Desc)
+        ));
+        assert!(matches!(
+            LibrarySortMode::OldestFirst.server_order(),
+            Some(crate::api_client::SortOrder::Asc)
+        ));
+        assert!(LibrarySortMode::Filename.server_order().is_none());
+        assert!(LibrarySortMode::FileType.server_order().is_none());
     }
 
     #[test]

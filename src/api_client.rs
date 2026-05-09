@@ -121,6 +121,15 @@ pub struct MetadataSearchFilters {
     pub person_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<SortOrder>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
@@ -1027,12 +1036,21 @@ impl ImmichApiClient {
         album_id: &str,
         page: u32,
         size: u32,
+        order: Option<SortOrder>,
     ) -> Result<Vec<LibraryAsset>, String> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "albumIds": [album_id],
             "page": page,
             "size": size.max(1),
         });
+        if let Some(order) = order
+            && let Some(obj) = body.as_object_mut()
+        {
+            obj.insert(
+                "order".into(),
+                serde_json::to_value(order).unwrap_or(serde_json::Value::Null),
+            );
+        }
         self.fetch_search_assets(
             "/api/search/metadata",
             body,
@@ -1358,12 +1376,21 @@ impl ImmichApiClient {
         query: &str,
         page: u32,
         size: u32,
+        order: Option<SortOrder>,
     ) -> Result<Vec<LibraryAsset>, String> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "ocr": query,
             "page": page,
             "size": size.max(1),
         });
+        if let Some(order) = order
+            && let Some(obj) = body.as_object_mut()
+        {
+            obj.insert(
+                "order".into(),
+                serde_json::to_value(order).unwrap_or(serde_json::Value::Null),
+            );
+        }
         self.fetch_search_assets(
             "/api/search/metadata",
             body,
@@ -1378,9 +1405,11 @@ impl ImmichApiClient {
         query: &str,
         page: u32,
         size: u32,
+        order: Option<SortOrder>,
     ) -> Result<Vec<LibraryAsset>, String> {
         let filters = MetadataSearchFilters {
             original_file_name: Some(query.to_string()),
+            order,
             ..Default::default()
         };
         self.search_metadata_with_filters(&filters, page, size)
