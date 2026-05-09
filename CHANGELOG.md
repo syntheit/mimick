@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Configurable test-asset generator script for Mimick benchmarks (#101).
+
 ### Changed
 
+- Hardened security sanitization and centralized configuration access (#98).
+- Parallelized startup scan, added hash worker pool, and sharded the SyncIndex (#99).
+- Implemented custom ListModel, sliding window cap, and prefetch tuning for performance (#100).
 - Relocated the server connection status indicator from the sidebar top to the bottom for better visibility and layout balance.
 - Removed the redundant checkbox toggle icon from the library header bar; selection mode is now managed via Ctrl-hold or keyboard interaction.
 - Removed support for `.xmp` files from the media scanning and MIME detection logic as they are not utilized by the application.
