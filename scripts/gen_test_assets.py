@@ -144,6 +144,14 @@ def gen_mp4(rng: random.Random, size_hint_px: int) -> bytes:
     return proc.stdout
 
 
+def gen_dummy(rng: random.Random, size_hint_px: int) -> bytes:
+    # Generates reproducible random noise for formats where we don't have
+    # a native builder. Mimick primarily relies on the extension and file size
+    # for startup indexing, so dummy bytes work for scale benchmarking.
+    size = max(1024, size_hint_px * size_hint_px * 3)
+    return rng.randbytes(size)
+
+
 @dataclass(frozen=True)
 class FormatSpec:
     ext: str
@@ -154,15 +162,79 @@ class FormatSpec:
 
 def build_format_registry() -> dict[str, FormatSpec]:
     return {
-        "jpg":  FormatSpec("jpg",  _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
-        "jpeg": FormatSpec("jpeg", _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
-        "png":  FormatSpec("png",  _gen_pillow("PNG"),                   needs_pillow=True),
-        "webp": FormatSpec("webp", _gen_pillow("WebP", {"quality": 80}), needs_pillow=True),
-        "gif":  FormatSpec("gif",  _gen_pillow("GIF"),                   needs_pillow=True),
-        "tiff": FormatSpec("tiff", _gen_pillow("TIFF"),                  needs_pillow=True),
+        # Standard images
+        "avif": FormatSpec("avif", gen_dummy),
         "bmp":  FormatSpec("bmp",  gen_bmp),
+        "gif":  FormatSpec("gif",  _gen_pillow("GIF"),                   needs_pillow=True),
+        "heic": FormatSpec("heic", gen_dummy),
+        "heif": FormatSpec("heif", gen_dummy),
+        "hif":  FormatSpec("hif",  gen_dummy),
+        "insp": FormatSpec("insp", gen_dummy),
+        "jpe":  FormatSpec("jpe",  _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
+        "jpeg": FormatSpec("jpeg", _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
+        "jpg":  FormatSpec("jpg",  _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
+        "jp2":  FormatSpec("jp2",  gen_dummy),
+        "jxl":  FormatSpec("jxl",  gen_dummy),
+        "png":  FormatSpec("png",  _gen_pillow("PNG"),                   needs_pillow=True),
+        "mpo":  FormatSpec("mpo",  _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
+        "psd":  FormatSpec("psd",  gen_dummy),
         "svg":  FormatSpec("svg",  gen_svg),
+        "tif":  FormatSpec("tif",  _gen_pillow("TIFF"),                  needs_pillow=True),
+        "tiff": FormatSpec("tiff", _gen_pillow("TIFF"),                  needs_pillow=True),
+        "webp": FormatSpec("webp", _gen_pillow("WebP", {"quality": 80}), needs_pillow=True),
+        
+        # RAW Formats
+        "3fr": FormatSpec("3fr", gen_dummy),
+        "ari": FormatSpec("ari", gen_dummy),
+        "arw": FormatSpec("arw", gen_dummy),
+        "cap": FormatSpec("cap", gen_dummy),
+        "cin": FormatSpec("cin", gen_dummy),
+        "cr2": FormatSpec("cr2", gen_dummy),
+        "cr3": FormatSpec("cr3", gen_dummy),
+        "crw": FormatSpec("crw", gen_dummy),
+        "dcr": FormatSpec("dcr", gen_dummy),
+        "dng": FormatSpec("dng", gen_dummy),
+        "erf": FormatSpec("erf", gen_dummy),
+        "fff": FormatSpec("fff", gen_dummy),
+        "iiq": FormatSpec("iiq", gen_dummy),
+        "k25": FormatSpec("k25", gen_dummy),
+        "kdc": FormatSpec("kdc", gen_dummy),
+        "mrw": FormatSpec("mrw", gen_dummy),
+        "nef": FormatSpec("nef", gen_dummy),
+        "nrw": FormatSpec("nrw", gen_dummy),
+        "orf": FormatSpec("orf", gen_dummy),
+        "ori": FormatSpec("ori", gen_dummy),
+        "pef": FormatSpec("pef", gen_dummy),
+        "raf": FormatSpec("raf", gen_dummy),
+        "raw": FormatSpec("raw", gen_dummy),
+        "rw2": FormatSpec("rw2", gen_dummy),
+        "rwl": FormatSpec("rwl", gen_dummy),
+        "sr2": FormatSpec("sr2", gen_dummy),
+        "srf": FormatSpec("srf", gen_dummy),
+        "srw": FormatSpec("srw", gen_dummy),
+        "x3f": FormatSpec("x3f", gen_dummy),
+
+        # Video formats
+        "3gp":  FormatSpec("3gp",  gen_dummy),
+        "3gpp": FormatSpec("3gpp", gen_dummy),
+        "avi":  FormatSpec("avi",  gen_dummy),
+        "flv":  FormatSpec("flv",  gen_dummy),
+        "insv": FormatSpec("insv", gen_dummy),
         "mp4":  FormatSpec("mp4",  gen_mp4, needs_ffmpeg=True),
+        "m2t":  FormatSpec("m2t",  gen_dummy),
+        "m2ts": FormatSpec("m2ts", gen_dummy),
+        "mts":  FormatSpec("mts",  gen_dummy),
+        "ts":   FormatSpec("ts",   gen_dummy),
+        "m4v":  FormatSpec("m4v",  gen_dummy),
+        "mkv":  FormatSpec("mkv",  gen_dummy),
+        "mpe":  FormatSpec("mpe",  gen_dummy),
+        "mpeg": FormatSpec("mpeg", gen_dummy),
+        "mpg":  FormatSpec("mpg",  gen_dummy),
+        "mov":  FormatSpec("mov",  gen_dummy),
+        "mxf":  FormatSpec("mxf",  gen_dummy),
+        "vob":  FormatSpec("vob",  gen_dummy),
+        "webm": FormatSpec("webm", gen_dummy),
+        "wmv":  FormatSpec("wmv",  gen_dummy),
     }
 
 
@@ -283,7 +355,7 @@ def parse_args() -> argparse.Namespace:
         "--formats",
         type=str,
         default="jpg,png,webp,bmp",
-        help="Comma-separated subset of: jpg,jpeg,png,webp,gif,tiff,bmp,svg,mp4. Default: jpg,png,webp,bmp.",
+        help="Comma-separated subset of formats. Supports all formats from api_client.rs (e.g. jpg, png, heic, arw, mp4, mkv). Default: jpg,png,webp,bmp.",
     )
     p.add_argument(
         "--duplicate-ratio",
