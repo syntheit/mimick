@@ -1,9 +1,9 @@
 
-# Mimick - Unofficial Immich Desktop Client for Linux
+# Mimick - Immich Desktop Client for Linux
 
 <div align="center">
 
-<img src="src/assets/icon.png" width="128" alt="Mimick Logo">
+<img src="src/assets/icon.png" width="256" alt="Mimick Logo">
 
 ![Status](https://img.shields.io/badge/Status-stable-FF90C3?style=for-the-badge)
 [![GitHub Release](https://img.shields.io/github/v/release/nicx17/mimick?include_prereleases&style=for-the-badge&logo=github&color=FF90C3)](https://github.com/nicx17/mimick/releases/latest)
