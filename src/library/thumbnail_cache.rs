@@ -1,8 +1,9 @@
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use gdk4::Texture;
 use gdk4::prelude::TextureExt;
@@ -31,9 +32,8 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        if let Ok(mut map) = self.inflight.lock() {
-            map.remove(&self.key);
-        }
+        let mut map = self.inflight.lock();
+        map.remove(&self.key);
     }
 }
 
@@ -147,7 +147,7 @@ impl ThumbnailCache {
 
     pub fn get_cached(&self, asset_id: &str, size: ThumbnailSize) -> Option<Texture> {
         let key = cache_key(asset_id, size);
-        self.memory.lock().unwrap().get(&key)
+        self.memory.lock().get(&key)
     }
 
     pub async fn load_thumbnail(
@@ -220,10 +220,7 @@ impl ThumbnailCache {
             let texture = decode_to_scaled_texture(bytes)
                 .await
                 .map_err(|err| err.to_string())?;
-            self.memory
-                .lock()
-                .unwrap()
-                .insert(key.to_string(), texture.clone());
+            self.memory.lock().insert(key.to_string(), texture.clone());
             return Ok(texture);
         }
 
@@ -243,21 +240,8 @@ impl ThumbnailCache {
             .await
             .map_err(|err| err.to_string())?;
 
-        self.memory
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), texture.clone());
+        self.memory.lock().insert(key.to_string(), texture.clone());
         Ok(texture)
-    }
-
-    #[allow(dead_code)]
-    pub async fn load_local_thumbnail(
-        &self,
-        asset_id: &str,
-        path: &std::path::Path,
-    ) -> Result<Texture, String> {
-        self.load_local_thumbnail_cancellable(asset_id, path, || false)
-            .await
     }
 
     pub async fn load_local_thumbnail_cancellable<F>(
@@ -270,7 +254,7 @@ impl ThumbnailCache {
         F: Fn() -> bool,
     {
         let key = cache_key(asset_id, ThumbnailSize::Thumbnail);
-        if let Some(texture) = self.memory.lock().unwrap().get(&key) {
+        if let Some(texture) = self.memory.lock().get(&key) {
             return Ok(texture);
         }
 
@@ -305,7 +289,7 @@ impl ThumbnailCache {
         if is_cancelled() {
             return Err("cancelled".to_string());
         }
-        if let Some(texture) = self.memory.lock().unwrap().get(key) {
+        if let Some(texture) = self.memory.lock().get(key) {
             return Ok(texture);
         }
 
@@ -321,10 +305,7 @@ impl ThumbnailCache {
         .map_err(|err| err.to_string())?;
 
         if let Some(texture) = from_disk {
-            self.memory
-                .lock()
-                .unwrap()
-                .insert(key.to_string(), texture.clone());
+            self.memory.lock().insert(key.to_string(), texture.clone());
             return Ok(texture);
         }
 
@@ -341,15 +322,12 @@ impl ThumbnailCache {
         })
         .await
         .map_err(|err| err.to_string())??;
-        self.memory
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), texture.clone());
+        self.memory.lock().insert(key.to_string(), texture.clone());
         Ok(texture)
     }
 
     pub fn clear(&self) -> Result<(), String> {
-        self.memory.lock().unwrap().clear();
+        self.memory.lock().clear();
         if self.cache_dir.exists() {
             std::fs::remove_dir_all(&self.cache_dir).map_err(|err| err.to_string())?;
         }
@@ -405,7 +383,7 @@ impl ThumbnailCache {
     }
 
     fn enter_inflight(&self, key: &str) -> Result<InflightGuard, InflightRx> {
-        let mut map = self.inflight.lock().unwrap();
+        let mut map = self.inflight.lock();
         if let Some(rx) = map.get(key) {
             return Err(rx.clone());
         }
@@ -491,7 +469,6 @@ mod tests {
         cache
             .memory
             .lock()
-            .unwrap()
             .insert("thumbnail:1".into(), texture_from_png());
 
         assert!(cache.get_cached("1", ThumbnailSize::Thumbnail).is_some());
@@ -512,15 +489,13 @@ mod tests {
         cache
             .memory
             .lock()
-            .unwrap()
             .insert("thumbnail:1".into(), texture_from_png());
         cache
             .memory
             .lock()
-            .unwrap()
             .insert("thumbnail:2".into(), texture_from_png());
 
-        assert!(cache.memory.lock().unwrap().inner.len() <= 1);
+        assert!(cache.memory.lock().inner.len() <= 1);
     }
 
     #[test]
@@ -531,12 +506,11 @@ mod tests {
         cache
             .memory
             .lock()
-            .unwrap()
             .insert("thumbnail:3".into(), texture_from_png());
 
         cache.clear().unwrap();
 
-        assert!(cache.memory.lock().unwrap().inner.is_empty());
+        assert!(cache.memory.lock().inner.is_empty());
         assert!(!cache.cache_dir.exists());
     }
 }

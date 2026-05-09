@@ -34,23 +34,9 @@ pub struct LocalAsset {
     pub mime: String,
     /// "IMAGE" or "VIDEO".
     pub asset_type: &'static str,
-    /// File size in bytes (carried for future use — not currently displayed).
-    #[allow(dead_code)]
-    pub size: u64,
     /// ISO-8601 modification time, used as `created_at` for sort consistency
     /// with remote `LibraryAsset`.
     pub created_at: String,
-}
-
-impl LocalAsset {
-    /// Synthetic identity used by the GridView model. Using the path keeps
-    /// dedup logic stable across enumerations even when modification times
-    /// change. Currently unused outside tests, but kept as the canonical
-    /// recipe so future call sites match the prefix logic in `mod.rs`.
-    #[allow(dead_code)]
-    pub fn synthetic_id(&self) -> String {
-        format!("local::{}", self.path.display())
-    }
 }
 
 /// Walk every configured watch path and return matching media files.
@@ -58,11 +44,7 @@ impl LocalAsset {
 /// Runs the synchronous walk on a Tokio blocking thread so the UI thread
 /// stays responsive even on libraries with tens of thousands of files.
 pub async fn enumerate_local(ctx: Arc<AppContext>) -> Vec<LocalAsset> {
-    let watch_paths = ctx
-        .live_watch_paths
-        .lock()
-        .map(|guard| guard.clone())
-        .unwrap_or_default();
+    let watch_paths = ctx.live_watch_paths.lock().clone();
 
     tokio::task::spawn_blocking(move || enumerate_blocking(&watch_paths))
         .await
@@ -76,11 +58,7 @@ pub async fn enumerate_local_for_entry(
     ctx: Arc<AppContext>,
     entry_path: String,
 ) -> Vec<LocalAsset> {
-    let watch_paths = ctx
-        .live_watch_paths
-        .lock()
-        .map(|guard| guard.clone())
-        .unwrap_or_default();
+    let watch_paths = ctx.live_watch_paths.lock().clone();
 
     let scoped: Vec<WatchPathEntry> = watch_paths
         .into_iter()
@@ -135,7 +113,6 @@ fn enumerate_blocking(watch_paths: &[WatchPathEntry]) -> Vec<LocalAsset> {
 fn build_asset(path: &Path) -> Option<LocalAsset> {
     let filename = path.file_name()?.to_string_lossy().into_owned();
     let metadata = std::fs::metadata(path).ok()?;
-    let size = metadata.len();
     let created_at = format_modified(&metadata);
     let mime = mime_for_extension(path);
     let asset_type = if mime.starts_with("video/") {
@@ -148,7 +125,6 @@ fn build_asset(path: &Path) -> Option<LocalAsset> {
         filename,
         mime: mime.into(),
         asset_type,
-        size,
         created_at,
     })
 }
@@ -221,7 +197,7 @@ pub fn filter_by_filename(items: Vec<LocalAsset>, query: &str) -> Vec<LocalAsset
 /// Takes a borrowed `&SyncIndex` rather than `&AppContext` because callers
 /// like `asset_objects_from_state` already hold the `sync_index` mutex
 /// guard while iterating assets. Re-acquiring it inside this function
-/// would deadlock against the outer guard (`std::sync::Mutex` is
+/// would deadlock against the outer guard (`parking_lot::Mutex` is
 /// non-reentrant). Returns 2 when the file's path is recorded as synced
 /// (badge "Both"), 1 otherwise (LocalOnly).
 pub fn local_sync_state(idx: &crate::sync_index::SyncIndex, path: &Path) -> u32 {
@@ -242,9 +218,15 @@ mod tests {
             filename: name.into(),
             mime: "image/jpeg".into(),
             asset_type: "IMAGE",
-            size: 0,
             created_at: String::new(),
         }
+    }
+
+    /// Synthetic identity used by the GridView model. Using the path keeps
+    /// dedup logic stable across enumerations even when modification times
+    /// change.
+    fn synthetic_id(asset: &LocalAsset) -> String {
+        format!("local::{}", asset.path.display())
     }
 
     #[test]
@@ -263,6 +245,6 @@ mod tests {
     #[test]
     fn synthetic_id_is_stable_across_clones() {
         let a = make("/tmp/a.jpg");
-        assert_eq!(a.synthetic_id(), a.clone().synthetic_id());
+        assert_eq!(synthetic_id(&a), synthetic_id(&a.clone()));
     }
 }

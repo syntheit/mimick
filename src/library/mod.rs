@@ -13,7 +13,6 @@ use crate::api_client::{
     LibraryAsset, MetadataSearchFilters, ThumbnailSize, TransferProgressCallback,
 };
 use crate::app_context::AppContext;
-use crate::config::Config;
 use crate::library::albums_view::{
     AlbumClick, AlbumsViewParts, build_albums_view, populate_albums,
 };
@@ -45,7 +44,7 @@ const PAGE_SIZE: u32 = 50;
 
 fn begin_download_session(ctx: &Arc<AppContext>, item_label: String) {
     let state_ref = ctx.state.clone();
-    let mut state = state_ref.lock().unwrap();
+    let mut state = state_ref.lock();
     let route = state.active_server_route.clone();
     state
         .transfer
@@ -60,7 +59,7 @@ fn track_download_item(
 ) -> TransferProgressCallback {
     let state_ref = ctx.state.clone();
     {
-        let mut state = state_ref.lock().unwrap();
+        let mut state = state_ref.lock();
         let route = state.active_server_route.clone();
         state.transfer.register_item(
             TransferDirection::Download,
@@ -71,7 +70,7 @@ fn track_download_item(
         );
     }
     Arc::new(move |bytes_done, total_bytes| {
-        let mut state = state_ref.lock().unwrap();
+        let mut state = state_ref.lock();
         if let Some(total_bytes) = total_bytes {
             let current = state
                 .transfer
@@ -91,7 +90,7 @@ fn track_download_item(
 }
 
 fn finish_download_item(ctx: &Arc<AppContext>, item_id: &str) {
-    let mut state = ctx.state.lock().unwrap();
+    let mut state = ctx.state.lock();
     let route = state.active_server_route.clone();
     state
         .transfer
@@ -476,7 +475,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
 
 fn bootstrap_window(ui: Rc<LibraryWindowUi>) {
     let initial_request = {
-        let mut state = ui.ctx.library_state.lock().unwrap();
+        let mut state = ui.ctx.library_state.lock();
         state.load_initial_source()
     };
 
@@ -504,7 +503,7 @@ fn spawn_server_ping_loop(ui: Rc<LibraryWindowUi>) {
 
 fn spawn_transfer_poll_loop(ui: Rc<LibraryWindowUi>) {
     glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-        let completed_batches = ui.ctx.state.lock().unwrap().completed_upload_batches;
+        let completed_batches = ui.ctx.state.lock().completed_upload_batches;
         if completed_batches != ui.last_seen_upload_batch.get() {
             ui.last_seen_upload_batch.set(completed_batches);
             refresh_library_after_mutation(ui.clone(), true);
@@ -515,13 +514,13 @@ fn spawn_transfer_poll_loop(ui: Rc<LibraryWindowUi>) {
 }
 
 fn fetch_current_user(ui: Rc<LibraryWindowUi>) {
-    if ui.ctx.current_user_id.lock().unwrap().is_some() {
+    if ui.ctx.current_user_id.lock().is_some() {
         return;
     }
     glib::MainContext::default().spawn_local(async move {
         match ui.ctx.api_client.fetch_current_user_id().await {
             Ok(id) => {
-                *ui.ctx.current_user_id.lock().unwrap() = Some(id);
+                *ui.ctx.current_user_id.lock() = Some(id);
             }
             Err(err) => log::warn!("Could not fetch current user id: {}", err),
         }
@@ -651,7 +650,7 @@ fn connect_controls(
             if ui.source_mode_suppressed.get() {
                 return;
             }
-            let album_ctx = match ui.ctx.library_state.lock().unwrap().source.clone() {
+            let album_ctx = match ui.ctx.library_state.lock().source.clone() {
                 LibrarySource::Album { id, name }
                 | LibrarySource::AlbumLocal { id, name }
                 | LibrarySource::AlbumUnified { id, name } => Some((id, name)),
@@ -674,7 +673,7 @@ fn connect_controls(
             // Searching while switching sources would require thread-safe
             // re-routing of the search field; clear it on source change.
             ui.search_entry.set_text("");
-            let request = ui.ctx.library_state.lock().unwrap().switch_source(source);
+            let request = ui.ctx.library_state.lock().switch_source(source);
             apply_timeline_ui_state(&ui, &request.1);
             load_source_page(ui.clone(), request, false);
         }
@@ -687,7 +686,7 @@ fn connect_controls(
             if !toggle.is_sensitive() {
                 return;
             }
-            let current = ui.ctx.library_state.lock().unwrap().source.clone();
+            let current = ui.ctx.library_state.lock().source.clone();
             if !matches!(current, LibrarySource::AllAssets | LibrarySource::Timeline) {
                 toggle.set_active(false);
                 return;
@@ -701,12 +700,7 @@ fn connect_controls(
             } else {
                 LibrarySource::AllAssets
             };
-            let request = ui
-                .ctx
-                .library_state
-                .lock()
-                .unwrap()
-                .switch_source(next_source);
+            let request = ui.ctx.library_state.lock().switch_source(next_source);
             apply_timeline_ui_state(&ui, &request.1);
             load_source_page(ui.clone(), request, false);
         }
@@ -730,7 +724,7 @@ fn connect_controls(
                     _ => LibrarySource::MetadataSearch { query },
                 },
             };
-            let request = ui.ctx.library_state.lock().unwrap().switch_source(source);
+            let request = ui.ctx.library_state.lock().switch_source(source);
             apply_timeline_ui_state(&ui, &request.1);
             load_source_page(ui.clone(), request, false);
         }
@@ -758,7 +752,6 @@ fn connect_controls(
                 .ctx
                 .library_state
                 .lock()
-                .unwrap()
                 .clear_search_restore_previous_source();
             if let Some(request) = request {
                 apply_timeline_ui_state(&ui, &request.1);
@@ -778,7 +771,7 @@ fn connect_controls(
             };
 
             let objects = {
-                let mut state = ui.ctx.library_state.lock().unwrap();
+                let mut state = ui.ctx.library_state.lock();
                 state.apply_sort(sort_mode);
                 asset_objects_from_state(&state.assets, &ui.ctx)
             };
@@ -793,8 +786,8 @@ fn refresh_library_surfaces(ui: Rc<LibraryWindowUi>, include_current_source: boo
     ui.explore.populated.set(false);
     if include_current_source {
         let request = {
-            let source = ui.ctx.library_state.lock().unwrap().source.clone();
-            ui.ctx.library_state.lock().unwrap().switch_source(source)
+            let source = ui.ctx.library_state.lock().source.clone();
+            ui.ctx.library_state.lock().switch_source(source)
         };
         load_source_page(ui, request, false);
     }
@@ -945,7 +938,7 @@ fn collect_selected_assets(ui: &Rc<LibraryWindowUi>) -> Vec<(String, String)> {
 
 fn should_refresh_after_download(ui: &LibraryWindowUi) -> bool {
     matches!(
-        ui.ctx.library_state.lock().unwrap().source,
+        ui.ctx.library_state.lock().source,
         LibrarySource::LocalAll
             | LibrarySource::LocalSearch { .. }
             | LibrarySource::Unified
@@ -1055,10 +1048,10 @@ fn connect_sidebar_handlers(ui: Rc<LibraryWindowUi>) {
 /// source, since the Albums grid moves the stack without changing source.
 fn sidebar_dispatch(ui: Rc<LibraryWindowUi>, source: LibrarySource) {
     let on_albums_grid = ui.content_stack.visible_child_name().as_deref() == Some("albums");
-    if !on_albums_grid && ui.ctx.library_state.lock().unwrap().source == source {
+    if !on_albums_grid && ui.ctx.library_state.lock().source == source {
         return;
     }
-    let request = ui.ctx.library_state.lock().unwrap().switch_source(source);
+    let request = ui.ctx.library_state.lock().switch_source(source);
     apply_timeline_ui_state(&ui, &request.1);
     load_source_page(ui.clone(), request, false);
 }
@@ -1113,12 +1106,7 @@ fn connect_grid_handlers(ui: Rc<LibraryWindowUi>) {
                     return;
                 }
 
-                let next = ui
-                    .ctx
-                    .library_state
-                    .lock()
-                    .unwrap()
-                    .load_next_page_if_needed();
+                let next = ui.ctx.library_state.lock().load_next_page_if_needed();
                 if let Some(request) = next {
                     load_source_page(ui.clone(), request, true);
                 }
@@ -1316,7 +1304,9 @@ async fn ensure_original_asset_path(
         .join("mimick")
         .join("open-in");
     let _ = std::fs::create_dir_all(&cache_dir);
-    let path = cache_dir.join(filename);
+    let safe_name =
+        crate::sanitize::safe_filename(filename).unwrap_or_else(|| asset_id.to_string());
+    let path = cache_dir.join(&safe_name);
     if path.exists() {
         return Ok(path);
     }
@@ -1416,7 +1406,7 @@ fn refresh_album_link_row(ui: &LibraryWindowUi, source: &LibrarySource) {
         parent.set_visible(true);
     }
 
-    let entries = ui.ctx.live_watch_paths.lock().unwrap().clone();
+    let entries = ui.ctx.live_watch_paths.lock().clone();
     match crate::config::watch_entry_for_album(name, &entries) {
         Some(entry) => {
             ui.album_link_row.set_title("Linked folder");
@@ -1448,7 +1438,7 @@ fn connect_album_link_row(ui: Rc<LibraryWindowUi>, _listbox: gtk::ListBox) {
 }
 
 fn handle_album_sync_click(ui: Rc<LibraryWindowUi>) {
-    let source = ui.ctx.library_state.lock().unwrap().source.clone();
+    let source = ui.ctx.library_state.lock().source.clone();
     let LibrarySource::Album {
         id: album_id,
         name: album_name,
@@ -1456,7 +1446,7 @@ fn handle_album_sync_click(ui: Rc<LibraryWindowUi>) {
     else {
         return;
     };
-    let entries = ui.ctx.live_watch_paths.lock().unwrap().clone();
+    let entries = ui.ctx.live_watch_paths.lock().clone();
     let Some(entry) = crate::config::watch_entry_for_album(&album_name, &entries) else {
         return;
     };
@@ -1614,7 +1604,7 @@ fn present_sync_dialog(
 }
 
 fn handle_album_link_click(ui: Rc<LibraryWindowUi>) {
-    let source = ui.ctx.library_state.lock().unwrap().source.clone();
+    let source = ui.ctx.library_state.lock().source.clone();
     let LibrarySource::Album {
         id: album_id,
         name: album_name,
@@ -1623,7 +1613,7 @@ fn handle_album_link_click(ui: Rc<LibraryWindowUi>) {
         return;
     };
 
-    let entries = ui.ctx.live_watch_paths.lock().unwrap().clone();
+    let entries = ui.ctx.live_watch_paths.lock().clone();
     let already_linked = crate::config::watch_entry_for_album(&album_name, &entries).is_some();
 
     if already_linked {
@@ -1650,17 +1640,19 @@ fn handle_album_link_click(ui: Rc<LibraryWindowUi>) {
 }
 
 fn unlink_album(ui: Rc<LibraryWindowUi>, album_name: &str) {
-    let mut config = Config::new();
-    config
-        .data
-        .watch_paths
-        .retain(|entry| entry.album_name() != Some(album_name));
-    if !config.save() {
-        log::error!("Failed to save config after unlink");
-        return;
+    {
+        let mut config = ui.ctx.config.write();
+        config
+            .data
+            .watch_paths
+            .retain(|entry| entry.album_name() != Some(album_name));
+        if !config.save() {
+            log::error!("Failed to save config after unlink");
+            return;
+        }
+        *ui.ctx.live_watch_paths.lock() = config.data.watch_paths.clone();
     }
-    *ui.ctx.live_watch_paths.lock().unwrap() = config.data.watch_paths.clone();
-    let source_after = ui.ctx.library_state.lock().unwrap().source.clone();
+    let source_after = ui.ctx.library_state.lock().source.clone();
     refresh_album_link_row(&ui, &source_after);
 }
 
@@ -1671,31 +1663,33 @@ fn link_album_to_path(
     path: std::path::PathBuf,
 ) {
     let path_string = path.to_string_lossy().to_string();
-    let mut config = Config::new();
-    config
-        .data
-        .watch_paths
-        .retain(|entry| entry.album_name() != Some(album_name.as_str()));
-    config
-        .data
-        .watch_paths
-        .push(crate::config::WatchPathEntry::WithConfig {
-            path: path_string,
-            album_id: Some(album_id),
-            album_name: Some(album_name),
-            rules: crate::config::FolderRules::default(),
-        });
-    if !config.save() {
-        log::error!("Failed to save config after link");
-        return;
+    {
+        let mut config = ui.ctx.config.write();
+        config
+            .data
+            .watch_paths
+            .retain(|entry| entry.album_name() != Some(album_name.as_str()));
+        config
+            .data
+            .watch_paths
+            .push(crate::config::WatchPathEntry::WithConfig {
+                path: path_string,
+                album_id: Some(album_id),
+                album_name: Some(album_name),
+                rules: crate::config::FolderRules::default(),
+            });
+        if !config.save() {
+            log::error!("Failed to save config after link");
+            return;
+        }
+        *ui.ctx.live_watch_paths.lock() = config.data.watch_paths.clone();
     }
-    *ui.ctx.live_watch_paths.lock().unwrap() = config.data.watch_paths.clone();
-    let source_after = ui.ctx.library_state.lock().unwrap().source.clone();
+    let source_after = ui.ctx.library_state.lock().source.clone();
     refresh_album_link_row(&ui, &source_after);
 }
 
 fn update_timeline_banner_if_active(ui: &Rc<LibraryWindowUi>, adj: &gtk::Adjustment) {
-    let state = ui.ctx.library_state.lock().unwrap();
+    let state = ui.ctx.library_state.lock();
     if !matches!(state.source, LibrarySource::Timeline) {
         return;
     }
@@ -1744,7 +1738,7 @@ fn load_albums(ui: Rc<LibraryWindowUi>) {
         async move {
             match ui.ctx.api_client.fetch_library_albums().await {
                 Ok(albums) => {
-                    ui.ctx.library_state.lock().unwrap().load_albums(albums);
+                    ui.ctx.library_state.lock().load_albums(albums);
                     reload_sidebar(&ui);
                 }
                 Err(err) => {
@@ -1767,7 +1761,7 @@ fn load_status(ui: Rc<LibraryWindowUi>) {
             let route = ui.ctx.api_client.active_route_label().await;
 
             {
-                let mut state = ui.ctx.library_state.lock().unwrap();
+                let mut state = ui.ctx.library_state.lock();
                 state.set_status(stats, about);
             }
             update_footer(&ui, route);
@@ -1796,7 +1790,7 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                     person_ids: Some(vec![id]),
                     ..Default::default()
                 };
-                let request = click_ui.ctx.library_state.lock().unwrap().switch_source(
+                let request = click_ui.ctx.library_state.lock().switch_source(
                     LibrarySource::AdvancedSearch {
                         filters: Box::new(filters),
                     },
@@ -1822,12 +1816,7 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                             query: value.clone(),
                         },
                     };
-                    let request = click_ui
-                        .ctx
-                        .library_state
-                        .lock()
-                        .unwrap()
-                        .switch_source(next);
+                    let request = click_ui.ctx.library_state.lock().switch_source(next);
                     click_ui.search_entry.set_text(&value);
                     apply_timeline_ui_state(&click_ui, &request.1);
                     load_source_page(click_ui.clone(), request, false);
@@ -1938,7 +1927,7 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
             match result {
                 Ok(items) => {
                     let outcome = {
-                        let mut state = ui.ctx.library_state.lock().unwrap();
+                        let mut state = ui.ctx.library_state.lock();
                         let prev_len = state.assets.len();
                         let applied = if append {
                             state.append_assets(generation, items)
@@ -1962,7 +1951,7 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                     update_timeline_banner_if_active(&ui, &ui.grid.scrolled.vadjustment());
                 }
                 Err(err) => {
-                    let mut state = ui.ctx.library_state.lock().unwrap();
+                    let mut state = ui.ctx.library_state.lock();
                     state.mark_error(generation, err.clone());
                     ui.error_label
                         .set_label(&format!("Could not load library assets: {}", err));
@@ -1978,8 +1967,8 @@ fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
         ui.sidebar.albums_list.remove(&row);
     }
 
-    let selected_source = ui.ctx.library_state.lock().unwrap().source.clone();
-    let albums = ui.ctx.library_state.lock().unwrap().albums.clone();
+    let selected_source = ui.ctx.library_state.lock().source.clone();
+    let albums = ui.ctx.library_state.lock().albums.clone();
     for album in albums {
         let subtitle = format!("{} asset(s)", album.asset_count);
         let action = libadwaita::ActionRow::builder()
@@ -2045,7 +2034,7 @@ fn select_fixed_row(list: &gtk::ListBox, key: &str) {
 }
 
 fn sync_content_state(ui: &LibraryWindowUi) {
-    match &ui.ctx.library_state.lock().unwrap().load_state {
+    match &ui.ctx.library_state.lock().load_state {
         LibraryLoadState::Idle | LibraryLoadState::Loading => {
             ui.content_stack.set_visible_child_name("loading");
         }
@@ -2063,7 +2052,7 @@ fn sync_content_state(ui: &LibraryWindowUi) {
 }
 
 fn update_footer(ui: &LibraryWindowUi, route: Option<String>) {
-    let state = ui.ctx.library_state.lock().unwrap();
+    let state = ui.ctx.library_state.lock();
     let route_subtitle = route
         .as_deref()
         .map(|route| match route {
@@ -2093,7 +2082,7 @@ fn update_footer(ui: &LibraryWindowUi, route: Option<String>) {
 
 fn update_transfer_ui(ui: &LibraryWindowUi) {
     let transfer = {
-        let mut state = ui.ctx.state.lock().unwrap();
+        let mut state = ui.ctx.state.lock();
         if state.transfer.active
             && state.transfer.active_uploads == 0
             && state.transfer.active_downloads == 0
@@ -2201,7 +2190,7 @@ fn immich_checksum_to_hex(b64: &str) -> Option<String> {
 }
 
 fn asset_objects_from_state(assets: &[LibraryAsset], ctx: &AppContext) -> Vec<AssetObject> {
-    let sync_index = ctx.sync_index.lock().unwrap();
+    let sync_index = ctx.sync_index.lock();
     assets
         .iter()
         .map(|asset| {
@@ -2395,7 +2384,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .vexpand(true)
         .hexpand(true)
         .build();
-    let initial_full = Config::new().data.library_preview_full_resolution;
+    let initial_full = ui.ctx.config.read().data.library_preview_full_resolution;
     let resolution_toggle = gtk::ToggleButton::builder()
         .label(if initial_full { "Original" } else { "Preview" })
         .tooltip_text("Toggle preview vs original full-resolution image")
@@ -2633,12 +2622,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 (*render)();
                 return;
             }
-            let next_request = ui
-                .ctx
-                .library_state
-                .lock()
-                .unwrap()
-                .load_next_page_if_needed();
+            let next_request = ui.ctx.library_state.lock().load_next_page_if_needed();
             let Some(req) = next_request else {
                 return;
             };
@@ -2763,7 +2747,9 @@ fn spawn_video_handoff(ui: Rc<LibraryWindowUi>, asset_id: String, filename: Stri
             return;
         };
         let _ = std::fs::create_dir_all(&cache_dir);
-        let path = cache_dir.join(&filename);
+        let safe_name =
+            crate::sanitize::safe_filename(&filename).unwrap_or_else(|| asset_id.clone());
+        let path = cache_dir.join(&safe_name);
         if !path.exists()
             && let Err(err) = {
                 begin_download_session(&ui.ctx, filename.clone());
@@ -2810,7 +2796,9 @@ fn start_download_with_session(
             let Some(target_dir) = ensure_download_target(&ui).await else {
                 return;
             };
-            let output_path = target_dir.join(&filename);
+            let safe_name =
+                crate::sanitize::safe_filename(&filename).unwrap_or_else(|| asset_id.clone());
+            let output_path = target_dir.join(&safe_name);
             if output_path.exists() {
                 let dialog = libadwaita::AlertDialog::builder()
                     .heading("File already exists")
@@ -2879,7 +2867,7 @@ fn spawn_download(
                 Ok(()) => {
                     let session_finished = {
                         finish_download_item(&ui.ctx, &asset_id);
-                        !ui.ctx.state.lock().unwrap().transfer.active
+                        !ui.ctx.state.lock().transfer.active
                     };
                     if should_refresh_after_download(&ui) && session_finished {
                         refresh_library_after_mutation(ui.clone(), true);
@@ -2912,8 +2900,8 @@ fn spawn_download(
 }
 
 async fn ensure_download_target(ui: &LibraryWindowUi) -> Option<PathBuf> {
-    let config = Config::new();
-    if let Some(path) = config.data.download_target_path {
+    let existing_target = ui.ctx.config.read().data.download_target_path.clone();
+    if let Some(path) = existing_target {
         return Some(PathBuf::from(path));
     }
 
@@ -2930,9 +2918,11 @@ async fn ensure_download_target(ui: &LibraryWindowUi) -> Option<PathBuf> {
     });
 
     let path = rx.await.ok().flatten()?;
-    let mut config = Config::new();
-    config.data.download_target_path = Some(path.to_string_lossy().to_string());
-    let _ = config.save();
+    {
+        let mut config = ui.ctx.config.write();
+        config.data.download_target_path = Some(path.to_string_lossy().to_string());
+        let _ = config.save();
+    }
     Some(path)
 }
 
@@ -2966,14 +2956,14 @@ async fn merge_unified_page(
         locals = filter_by_filename(locals, q);
     }
 
-    let synced_paths: std::collections::HashSet<String> = match ui.ctx.sync_index.lock() {
-        Ok(idx) => remote
+    let synced_paths: std::collections::HashSet<String> = {
+        let idx = ui.ctx.sync_index.lock();
+        remote
             .iter()
             .filter_map(|a| a.checksum.as_deref())
             .filter_map(immich_checksum_to_hex)
             .filter_map(|hex| idx.local_path_for_checksum(&hex))
-            .collect(),
-        Err(_) => std::collections::HashSet::new(),
+            .collect()
     };
 
     let mut local_rows: Vec<LibraryAsset> = locals
@@ -2988,7 +2978,7 @@ async fn merge_unified_page(
 
 /// Return the path of the watch entry linked to `album_name`, if any.
 fn linked_entry_path_for_album(ui: &Rc<LibraryWindowUi>, album_name: &str) -> Option<String> {
-    let entries = ui.ctx.live_watch_paths.lock().ok()?.clone();
+    let entries = ui.ctx.live_watch_paths.lock().clone();
     crate::config::watch_entry_for_album(album_name, &entries).map(|e| e.path().to_string())
 }
 
@@ -3011,14 +3001,14 @@ async fn merge_album_unified_page(
         None => Vec::new(),
     };
 
-    let synced_paths: std::collections::HashSet<String> = match ui.ctx.sync_index.lock() {
-        Ok(idx) => remote
+    let synced_paths: std::collections::HashSet<String> = {
+        let idx = ui.ctx.sync_index.lock();
+        remote
             .iter()
             .filter_map(|a| a.checksum.as_deref())
             .filter_map(immich_checksum_to_hex)
             .filter_map(|hex| idx.local_path_for_checksum(&hex))
-            .collect(),
-        Err(_) => std::collections::HashSet::new(),
+            .collect()
     };
 
     let mut local_rows: Vec<LibraryAsset> = locals
@@ -3242,7 +3232,6 @@ fn present_advanced_filters_dialog(ui: Rc<LibraryWindowUi>) {
                 ui.ctx
                     .library_state
                     .lock()
-                    .unwrap()
                     .switch_source(LibrarySource::AdvancedSearch {
                         filters: Box::new(filters),
                     });

@@ -86,7 +86,7 @@ async fn resolve_local_checksums(ctx: Arc<AppContext>, locals: Vec<LocalAsset>) 
     let mut to_compute: Vec<LocalAsset> = Vec::new();
 
     {
-        let index = ctx.sync_index.lock().unwrap();
+        let index = ctx.sync_index.lock();
         for asset in locals {
             let path_str = asset.path.to_string_lossy().to_string();
             match index.stored_checksum(&path_str) {
@@ -149,7 +149,7 @@ pub async fn execute_downloads(
     let mut ok = 0;
     let mut failed = 0;
     {
-        let mut state = ctx.state.lock().unwrap();
+        let mut state = ctx.state.lock();
         let route = state.active_server_route.clone();
         state.transfer.begin_group(
             TransferDirection::Download,
@@ -158,7 +158,9 @@ pub async fn execute_downloads(
         );
     }
     for asset in assets {
-        let dest = unique_destination(&watch_path, &asset.filename);
+        let safe_name =
+            crate::sanitize::safe_filename(&asset.filename).unwrap_or_else(|| asset.id.clone());
+        let dest = unique_destination(&watch_path, &safe_name);
         let progress = album_download_progress(&ctx, asset.id.clone(), asset.filename.clone());
         match ctx
             .api_client
@@ -180,7 +182,8 @@ pub async fn execute_downloads(
 }
 
 fn unique_destination(folder: &Path, filename: &str) -> PathBuf {
-    let mut candidate = folder.join(filename);
+    let safe = crate::sanitize::safe_filename(filename).unwrap_or_else(|| "download".to_string());
+    let mut candidate = folder.join(&safe);
     if !candidate.exists() {
         return candidate;
     }
@@ -213,7 +216,7 @@ fn album_download_progress(
 ) -> TransferProgressCallback {
     let state_ref = ctx.state.clone();
     {
-        let mut state = state_ref.lock().unwrap();
+        let mut state = state_ref.lock();
         let route = state.active_server_route.clone();
         state.transfer.register_item(
             TransferDirection::Download,
@@ -225,7 +228,7 @@ fn album_download_progress(
     }
 
     Arc::new(move |bytes_done, total_bytes| {
-        let mut state = state_ref.lock().unwrap();
+        let mut state = state_ref.lock();
         if let Some(total_bytes) = total_bytes {
             let current = state
                 .transfer
@@ -245,7 +248,7 @@ fn album_download_progress(
 }
 
 fn finish_album_download(ctx: &Arc<AppContext>, item_id: &str) {
-    let mut state = ctx.state.lock().unwrap();
+    let mut state = ctx.state.lock();
     let route = state.active_server_route.clone();
     state
         .transfer
