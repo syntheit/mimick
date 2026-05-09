@@ -18,19 +18,20 @@ use crate::library::albums_view::{
 };
 use crate::library::asset_object::AssetObject;
 use crate::library::explore_view::{ExploreViewParts, build_explore_view};
-use crate::library::grid_view::{GridViewParts, build_grid_view, extend_model, replace_model};
+use crate::library::grid_view::{GridViewParts, build_grid_view};
 use crate::library::local_source::{
-    LocalAsset, enumerate_local, enumerate_local_for_entry, filter_by_filename, local_sync_state,
+    LocalAsset, enumerate_local, enumerate_local_for_entry, filter_by_filename,
 };
 use crate::library::sidebar::{SidebarParts, build_sidebar};
 use crate::library::state::{LibraryLoadState, LibrarySortMode, LibrarySource};
 use crate::settings_window::{build_settings_window_with_parent, show_queue_inspector};
 use crate::state_manager::TransferDirection;
 
-const LOCAL_ID_PREFIX: &str = "local::";
+pub(super) const LOCAL_ID_PREFIX: &str = "local::";
 
 pub mod album_sync;
 pub mod albums_view;
+pub mod asset_model;
 pub mod asset_object;
 pub mod explore_view;
 pub mod grid_view;
@@ -770,12 +771,11 @@ fn connect_controls(
                 _ => LibrarySortMode::NewestFirst,
             };
 
-            let objects = {
-                let mut state = ui.ctx.library_state.lock();
-                state.apply_sort(sort_mode);
-                asset_objects_from_state(&state.assets, &ui.ctx)
-            };
-            replace_model(&ui.grid.model, &objects);
+            let mut state = ui.ctx.library_state.lock();
+            state.apply_sort(sort_mode);
+            ui.grid
+                .model
+                .reset(&ui.ctx, &state.assets, &state.sort_mode);
         }
     ));
 }
@@ -1101,7 +1101,7 @@ fn connect_grid_handlers(ui: Rc<LibraryWindowUi>) {
                 let adj = ui.grid.scrolled.vadjustment();
                 update_timeline_banner_if_active(&ui, &adj);
 
-                let threshold = (adj.upper() - adj.page_size()) * 0.75;
+                let threshold = (adj.upper() - adj.page_size()) * 0.50;
                 if adj.value() < threshold {
                     return;
                 }
@@ -1839,15 +1839,19 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
         ui,
         async move {
             let (generation, source, page) = request;
+            let order = ui.ctx.library_state.lock().sort_mode.server_order();
             let result: Result<Vec<LibraryAsset>, String> = match source.clone() {
                 LibrarySource::AllAssets | LibrarySource::Timeline => {
-                    ui.ctx.api_client.search_metadata("", page, PAGE_SIZE).await
+                    ui.ctx
+                        .api_client
+                        .search_metadata("", page, PAGE_SIZE, order)
+                        .await
                 }
                 LibrarySource::Explore => unreachable!("intercepted above"),
                 LibrarySource::Album { id, .. } => {
                     ui.ctx
                         .api_client
-                        .fetch_album_assets(&id, page, PAGE_SIZE)
+                        .fetch_album_assets(&id, page, PAGE_SIZE, order)
                         .await
                 }
                 LibrarySource::SmartSearch { query } => {
@@ -1857,15 +1861,20 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                         .await
                 }
                 LibrarySource::OcrSearch { query } => {
-                    ui.ctx.api_client.search_ocr(&query, page, PAGE_SIZE).await
+                    ui.ctx
+                        .api_client
+                        .search_ocr(&query, page, PAGE_SIZE, order)
+                        .await
                 }
                 LibrarySource::MetadataSearch { query } => {
                     ui.ctx
                         .api_client
-                        .search_metadata(&query, page, PAGE_SIZE)
+                        .search_metadata(&query, page, PAGE_SIZE, order)
                         .await
                 }
                 LibrarySource::AdvancedSearch { filters } => {
+                    let mut filters = (*filters).clone();
+                    filters.order = order;
                     ui.ctx
                         .api_client
                         .search_metadata_with_filters(&filters, page, PAGE_SIZE)
@@ -1890,14 +1899,18 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                     }
                 }
                 LibrarySource::Unified => {
-                    let remote = ui.ctx.api_client.search_metadata("", page, PAGE_SIZE).await;
+                    let remote = ui
+                        .ctx
+                        .api_client
+                        .search_metadata("", page, PAGE_SIZE, order)
+                        .await;
                     merge_unified_page(remote, page, &ui, None).await
                 }
                 LibrarySource::UnifiedSearch { query } => {
                     let remote = ui
                         .ctx
                         .api_client
-                        .search_metadata(&query, page, PAGE_SIZE)
+                        .search_metadata(&query, page, PAGE_SIZE, order)
                         .await;
                     merge_unified_page(remote, page, &ui, Some(&query)).await
                 }
@@ -1918,7 +1931,7 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                     let remote = ui
                         .ctx
                         .api_client
-                        .fetch_album_assets(&id, page, PAGE_SIZE)
+                        .fetch_album_assets(&id, page, PAGE_SIZE, order)
                         .await;
                     merge_album_unified_page(remote, page, &ui, &name).await
                 }
@@ -1926,9 +1939,8 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
 
             match result {
                 Ok(items) => {
-                    let outcome = {
+                    {
                         let mut state = ui.ctx.library_state.lock();
-                        let prev_len = state.assets.len();
                         let applied = if append {
                             state.append_assets(generation, items)
                         } else {
@@ -1937,14 +1949,15 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                         if !applied {
                             return;
                         }
-                        let objects = asset_objects_from_state(&state.assets, &ui.ctx);
-                        (objects, prev_len)
-                    };
-                    let (objects, prev_len) = outcome;
-                    if append && prev_len <= objects.len() {
-                        extend_model(&ui.grid.model, &objects[prev_len..]);
-                    } else {
-                        replace_model(&ui.grid.model, &objects);
+                        if append {
+                            ui.grid
+                                .model
+                                .extend(&ui.ctx, &state.assets, &state.sort_mode);
+                        } else {
+                            ui.grid
+                                .model
+                                .reset(&ui.ctx, &state.assets, &state.sort_mode);
+                        }
                     }
                     sync_content_state(&ui);
                     reload_sidebar(&ui);
@@ -2183,56 +2196,10 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
     container
 }
 
-fn immich_checksum_to_hex(b64: &str) -> Option<String> {
+pub(super) fn immich_checksum_to_hex(b64: &str) -> Option<String> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     Some(bytes.iter().map(|b| format!("{:02x}", b)).collect())
-}
-
-fn asset_objects_from_state(assets: &[LibraryAsset], ctx: &AppContext) -> Vec<AssetObject> {
-    assets
-        .iter()
-        .map(|asset| {
-            if let Some(local_path) = asset.id.strip_prefix(LOCAL_ID_PREFIX) {
-                let sync_state =
-                    local_sync_state(&ctx.sync_index, std::path::Path::new(local_path));
-                let object = AssetObject::new_local(
-                    &asset.id,
-                    &asset.filename,
-                    &asset.mime_type,
-                    &asset.created_at,
-                    &asset.asset_type,
-                    local_path,
-                );
-                if sync_state != 1 {
-                    object.set_property("sync-state", sync_state);
-                }
-                return object;
-            }
-            // Remote rows: 2 = "both" when a sibling local copy exists, else 0 (remote-only).
-            // Immich returns checksum as base64 SHA-1; SyncIndex stores hex SHA-1.
-            let local_match = asset
-                .checksum
-                .as_deref()
-                .and_then(immich_checksum_to_hex)
-                .as_deref()
-                .and_then(|hex| ctx.sync_index.local_path_for_checksum(hex));
-            let sync_state = if local_match.is_some() { 2 } else { 0 };
-            let object = AssetObject::new(
-                &asset.id,
-                &asset.filename,
-                &asset.mime_type,
-                &asset.created_at,
-                &asset.asset_type,
-                sync_state,
-                asset.thumbhash.as_deref(),
-            );
-            if let Some(path) = local_match {
-                object.set_property("local-path", path);
-            }
-            object
-        })
-        .collect()
 }
 
 fn fill_exif_box(container: &gtk::Box, exif: &crate::api_client::ExifInfo) {
@@ -3225,6 +3192,7 @@ fn present_advanced_filters_dialog(ui: Rc<LibraryWindowUi>) {
                 with_deleted: None,
                 person_ids: None,
                 tag_ids: None,
+                order: None,
             };
             let request =
                 ui.ctx

@@ -72,8 +72,21 @@ impl LibrarySource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LibrarySortMode {
     NewestFirst,
+    OldestFirst,
     Filename,
     FileType,
+}
+
+impl LibrarySortMode {
+    /// Server-side date order for paged remote sources, or `None` when the
+    /// mode is purely client-side (filename/filetype sort over loaded pages).
+    pub fn server_order(&self) -> Option<crate::api_client::SortOrder> {
+        match self {
+            LibrarySortMode::NewestFirst => Some(crate::api_client::SortOrder::Desc),
+            LibrarySortMode::OldestFirst => Some(crate::api_client::SortOrder::Asc),
+            LibrarySortMode::Filename | LibrarySortMode::FileType => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,6 +203,7 @@ impl LibraryState {
         self.page_in_flight = false;
         self.assets.extend(items);
         self.assets = dedup_assets(std::mem::take(&mut self.assets));
+
         if page_len > 0 {
             self.next_page = self.next_page.saturating_add(1);
         }
@@ -203,27 +217,12 @@ impl LibraryState {
         true
     }
 
+    /// Records the user's preferred sort mode. `LibraryState.assets` is always
+    /// stored in insertion (server) order so that the sliding-window FIFO
+    /// eviction is well-defined; the listmodel layer applies client-side sort
+    /// visually for `Filename`/`FileType`.
     pub fn apply_sort(&mut self, mode: LibrarySortMode) {
         self.sort_mode = mode;
-        match self.sort_mode {
-            LibrarySortMode::NewestFirst => self.assets.sort_by(|a, b| {
-                b.created_at
-                    .cmp(&a.created_at)
-                    .then_with(|| a.id.cmp(&b.id))
-            }),
-            LibrarySortMode::Filename => self.assets.sort_by(|a, b| {
-                a.filename
-                    .to_ascii_lowercase()
-                    .cmp(&b.filename.to_ascii_lowercase())
-                    .then_with(|| a.id.cmp(&b.id))
-            }),
-            LibrarySortMode::FileType => self.assets.sort_by(|a, b| {
-                a.mime_type
-                    .cmp(&b.mime_type)
-                    .then_with(|| a.filename.cmp(&b.filename))
-                    .then_with(|| a.id.cmp(&b.id))
-            }),
-        }
     }
 
     pub fn clear_search_restore_previous_source(&mut self) -> Option<(u64, LibrarySource, u32)> {
@@ -318,6 +317,39 @@ mod tests {
         state.page_in_flight = false;
         assert!(state.load_next_page_if_needed().is_some());
         assert!(state.load_next_page_if_needed().is_none());
+    }
+
+    #[test]
+    fn test_dedup_drops_duplicates_across_appends() {
+        let mut state = LibraryState::new();
+        let (generation, _, _) = state.load_initial_source();
+        let mk_page = |start: u32| -> Vec<LibraryAsset> {
+            (0..50)
+                .map(|i| asset(&format!("{}", start + i), "a.jpg"))
+                .collect()
+        };
+        state.append_assets(generation, mk_page(0));
+        state.append_assets(generation, mk_page(50));
+        // Re-append the second page; ids must not appear twice.
+        state.append_assets(generation, mk_page(50));
+        let unique: std::collections::HashSet<_> =
+            state.assets.iter().map(|a| a.id.clone()).collect();
+        assert_eq!(unique.len(), state.assets.len());
+        assert_eq!(state.assets.len(), 100);
+    }
+
+    #[test]
+    fn test_sort_mode_server_order_mapping() {
+        assert!(matches!(
+            LibrarySortMode::NewestFirst.server_order(),
+            Some(crate::api_client::SortOrder::Desc)
+        ));
+        assert!(matches!(
+            LibrarySortMode::OldestFirst.server_order(),
+            Some(crate::api_client::SortOrder::Asc)
+        ));
+        assert!(LibrarySortMode::Filename.server_order().is_none());
+        assert!(LibrarySortMode::FileType.server_order().is_none());
     }
 
     #[test]

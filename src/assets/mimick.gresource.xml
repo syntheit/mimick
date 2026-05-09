@@ -7,5 +7,17 @@
     <file alias="scalable/actions/mimick-download-symbolic.svg"
           compressed="true"
           preprocess="xml-stripblanks">scalable/actions/mimick-download-symbolic.svg</file>
+    <file alias="scalable/actions/mimick-cloud-symbolic.svg"
+          compressed="true"
+          preprocess="xml-stripblanks">scalable/actions/mimick-cloud-symbolic.svg</file>
+    <file alias="scalable/actions/mimick-computer-symbolic.svg"
+          compressed="true"
+          preprocess="xml-stripblanks">scalable/actions/mimick-computer-symbolic.svg</file>
+    <file alias="scalable/actions/mimick-check-circle-symbolic.svg"
+          compressed="true"
+          preprocess="xml-stripblanks">scalable/actions/mimick-check-circle-symbolic.svg</file>
+    <file alias="scalable/actions/mimick-video-symbolic.svg"
+          compressed="true"
+          preprocess="xml-stripblanks">scalable/actions/mimick-video-symbolic.svg</file>
   </gresource>
 </gresources>

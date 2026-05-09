@@ -9,13 +9,14 @@ use gdk4::Texture;
 use gtk::prelude::*;
 
 use crate::app_context::AppContext;
+use crate::library::asset_model::LibraryAssetModel;
 use crate::library::asset_object::AssetObject;
 
 const POS_DATA_KEY: &str = "mimick-cell-pos";
 pub type AssetContextMenuHandler = Rc<RefCell<Option<Box<dyn Fn(u32, f64, f64)>>>>;
 
 pub struct GridViewParts {
-    pub model: gtk::gio::ListStore,
+    pub model: LibraryAssetModel,
     pub scrolled: gtk::ScrolledWindow,
     pub view: gtk::GridView,
     pub selection: gtk::MultiSelection,
@@ -23,7 +24,7 @@ pub struct GridViewParts {
 }
 
 pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -> GridViewParts {
-    let model = gtk::gio::ListStore::new::<AssetObject>();
+    let model = LibraryAssetModel::new();
     let selection = gtk::MultiSelection::new(Some(model.clone()));
     let factory = gtk::SignalListItemFactory::new();
     let context_menu_handler: AssetContextMenuHandler = Rc::new(RefCell::new(None));
@@ -112,10 +113,10 @@ pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -
             .css_classes(vec!["mimick-status-badge".to_string()])
             .build();
         let video_badge = gtk::Image::builder()
-            .icon_name("media-playback-start-symbolic")
+            .icon_name("mimick-video-symbolic")
             .halign(gtk::Align::Center)
             .valign(gtk::Align::Center)
-            .pixel_size(28)
+            .pixel_size(32)
             .visible(false)
             .css_classes(vec!["mimick-video-badge".to_string()])
             .build();
@@ -170,8 +171,8 @@ pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -
         let in_timeline = ctx
             .library_timeline_active
             .load(std::sync::atomic::Ordering::Relaxed);
-        status.set_visible(!in_timeline);
-        video_badge.set_visible(!in_timeline && asset_type.eq_ignore_ascii_case("VIDEO"));
+        status.set_visible(true);
+        video_badge.set_visible(asset_type.eq_ignore_ascii_case("VIDEO"));
         set_square_class(&picture, in_timeline);
 
         let generation = bump_generation(&picture);
@@ -203,6 +204,8 @@ pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -
             local_path,
             generation,
         );
+
+        prefetch_thumbnails_around(ctx.clone(), &selection_for_bind, position);
     });
 
     factory.connect_unbind(|_, list_item| {
@@ -361,19 +364,6 @@ fn sync_checkbox_state(checkbox: &gtk::CheckButton, position: u32, selected: boo
     suppress.set(false);
 }
 
-pub fn replace_model(model: &gtk::gio::ListStore, objects: &[AssetObject]) {
-    model.remove_all();
-    for object in objects {
-        model.append(object);
-    }
-}
-
-pub fn extend_model(model: &gtk::gio::ListStore, objects: &[AssetObject]) {
-    for object in objects {
-        model.append(object);
-    }
-}
-
 fn sync_state_label(sync_state: u32) -> &'static str {
     match sync_state {
         2 => "On Immich and locally",
@@ -384,9 +374,9 @@ fn sync_state_label(sync_state: u32) -> &'static str {
 
 fn sync_icon_name(sync_state: u32) -> &'static str {
     match sync_state {
-        2 => "emblem-default-symbolic",
-        1 => "folder-symbolic",
-        _ => "network-server-symbolic",
+        2 => "mimick-check-circle-symbolic",
+        1 => "mimick-computer-symbolic",
+        _ => "mimick-cloud-symbolic",
     }
 }
 
@@ -513,6 +503,42 @@ fn bump_generation(picture: &gtk::Picture) -> u64 {
     let next = cell.get().wrapping_add(1);
     cell.set(next);
     next
+}
+
+fn prefetch_thumbnails_around(
+    ctx: Arc<AppContext>,
+    model: &impl IsA<gtk::gio::ListModel>,
+    position: u32,
+) {
+    let total = model.n_items();
+    let start = position.saturating_add(5);
+    let end = position.saturating_add(15).min(total);
+    for pos in start..end {
+        let Some(item) = model.item(pos).and_downcast::<AssetObject>() else {
+            continue;
+        };
+        let local_path = item.property::<String>("local-path");
+        if !local_path.is_empty() {
+            continue;
+        }
+        let asset_id = item.property::<String>("id");
+        if asset_id.is_empty() || asset_id.starts_with(super::LOCAL_ID_PREFIX) {
+            continue;
+        }
+        if ctx
+            .thumbnail_cache
+            .get_cached(&asset_id, crate::api_client::ThumbnailSize::Thumbnail)
+            .is_some()
+        {
+            continue;
+        }
+        let cache = ctx.thumbnail_cache.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let _ = cache
+                .load_thumbnail(&asset_id, crate::api_client::ThumbnailSize::Thumbnail)
+                .await;
+        });
+    }
 }
 
 fn decode_thumbhash_texture(thumbhash_b64: &str) -> Option<Texture> {
