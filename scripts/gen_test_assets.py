@@ -355,7 +355,7 @@ def parse_args() -> argparse.Namespace:
         "--formats",
         type=str,
         default="jpg,png,webp,bmp",
-        help="Comma-separated subset of formats. Supports all formats from api_client.rs (e.g. jpg, png, heic, arw, mp4, mkv). Default: jpg,png,webp,bmp.",
+        help="Comma-separated subset of formats, or 'all'. Supports all formats from api_client.rs (e.g. jpg, png, heic, arw, mp4, mkv). Default: jpg,png,webp,bmp.",
     )
     p.add_argument(
         "--duplicate-ratio",
@@ -414,7 +414,10 @@ def main() -> int:
         return 2
 
     registry = build_format_registry()
-    requested = [f.strip().lower() for f in args.formats.split(",") if f.strip()]
+    if args.formats.strip().lower() == "all":
+        requested = list(registry.keys())
+    else:
+        requested = [f.strip().lower() for f in args.formats.split(",") if f.strip()]
     formats = resolve_formats(requested, registry)
     if not formats:
         print("error: no usable formats after resolving dependencies", file=sys.stderr)
