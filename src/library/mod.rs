@@ -1939,22 +1939,26 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
 
             match result {
                 Ok(items) => {
-                    let mutation = {
+                    {
                         let mut state = ui.ctx.library_state.lock();
-                        let mutation = if append {
+                        let applied = if append {
                             state.append_assets(generation, items)
                         } else {
                             state.replace_assets(generation, items)
                         };
-                        let Some(mutation) = mutation else {
+                        if !applied {
                             return;
-                        };
-                        ui.grid
-                            .model
-                            .apply(&ui.ctx, &state.assets, &state.sort_mode, mutation);
-                        mutation
-                    };
-                    let _ = mutation;
+                        }
+                        if append {
+                            ui.grid
+                                .model
+                                .extend(&ui.ctx, &state.assets, &state.sort_mode);
+                        } else {
+                            ui.grid
+                                .model
+                                .reset(&ui.ctx, &state.assets, &state.sort_mode);
+                        }
+                    }
                     sync_content_state(&ui);
                     reload_sidebar(&ui);
                     update_timeline_banner_if_active(&ui, &ui.grid.scrolled.vadjustment());

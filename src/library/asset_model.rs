@@ -1,9 +1,10 @@
 //! Custom `gio::ListModel` backing the library grid.
 //!
 //! Replaces the previous `gio::ListStore`-of-`AssetObject` mirror. The model
-//! owns a `Vec<AssetObject>` reconciled from `LibraryState.assets` (which is
-//! itself capped at `WINDOW_CAP` via FIFO eviction). On each apply we emit a
-//! single `items_changed(0, prev_n, new_n)` reset.
+//! owns a `Vec<AssetObject>` reconciled from `LibraryState.assets`.
+//! `extend` is used for append-pagination (server-side date sort lets us emit
+//! a precise `items_changed(prev_n, 0, added)` so the visible viewport doesn't
+//! rebind); `reset` is used for source switches and client-side re-sorts.
 
 use std::cell::RefCell;
 
@@ -15,7 +16,7 @@ use gtk::subclass::prelude::*;
 use crate::api_client::LibraryAsset;
 use crate::app_context::AppContext;
 use crate::library::asset_object::AssetObject;
-use crate::library::state::{LibrarySortMode, PageMutation};
+use crate::library::state::LibrarySortMode;
 
 mod imp {
     use super::*;
@@ -68,22 +69,9 @@ impl LibraryAssetModel {
         glib::Object::new()
     }
 
-    /// Replace the model's items with `AssetObject`s built from `assets`,
-    /// apply the visual sort, and emit `items_changed(0, prev_n, new_n)`.
-    pub fn apply(
-        &self,
-        ctx: &AppContext,
-        assets: &[LibraryAsset],
-        sort_mode: &LibrarySortMode,
-        mutation: PageMutation,
-    ) {
-        let new_items = build_sorted_asset_objects(assets, ctx, sort_mode);
-        *self.imp().items.borrow_mut() = new_items;
-        self.items_changed(0, mutation.prev_n as u32, mutation.new_n as u32);
-    }
-
-    /// Replace items wholesale (used for client-side sort changes that don't
-    /// produce a `PageMutation`). Emits a `items_changed(0, prev, new)` reset.
+    /// Replace all items and emit a `items_changed(0, prev, new)` reset.
+    /// Use when the caller can't promise that existing positions are stable
+    /// (source switch, client-side sort change, dedup that affected the head).
     pub fn reset(&self, ctx: &AppContext, assets: &[LibraryAsset], sort_mode: &LibrarySortMode) {
         let prev_n = self.imp().items.borrow().len() as u32;
         let new_items = build_sorted_asset_objects(assets, ctx, sort_mode);
@@ -92,25 +80,30 @@ impl LibraryAssetModel {
         self.items_changed(0, prev_n, new_n);
     }
 
-    /// Returns the asset id at `position`, if any. Used by handlers that need
-    /// position-keyed lookups without going through GObject property access.
-    pub fn id_at(&self, position: u32) -> Option<String> {
-        self.imp()
-            .items
-            .borrow()
-            .get(position as usize)
-            .map(|o| o.property::<String>("id"))
-    }
+    /// Append-style update for paginated loads. For server-side date sort
+    /// (`NewestFirst`/`OldestFirst`) the existing positions are stable so we
+    /// emit a precise tail-only `items_changed(prev_n, 0, added)`. For
+    /// client-side sort modes the entire vec may have re-ordered, so we fall
+    /// back to a full reset.
+    pub fn extend(&self, ctx: &AppContext, assets: &[LibraryAsset], sort_mode: &LibrarySortMode) {
+        let prev_n = self.imp().items.borrow().len() as u32;
+        let new_items = build_sorted_asset_objects(assets, ctx, sort_mode);
+        let new_n = new_items.len() as u32;
+        let server_sorted = matches!(
+            sort_mode,
+            LibrarySortMode::NewestFirst | LibrarySortMode::OldestFirst
+        );
 
-    /// Snapshot the asset-id for every loaded position. Useful for the
-    /// timeline scrubber and other consumers that previously indexed
-    /// `LibraryState.assets`.
-    pub fn created_at_at(&self, position: u32) -> Option<String> {
-        self.imp()
-            .items
-            .borrow()
-            .get(position as usize)
-            .map(|o| o.property::<String>("created-at"))
+        *self.imp().items.borrow_mut() = new_items;
+
+        if server_sorted && new_n >= prev_n {
+            let added = new_n - prev_n;
+            if added > 0 {
+                self.items_changed(prev_n, 0, added);
+            }
+        } else {
+            self.items_changed(0, prev_n, new_n);
+        }
     }
 }
 
@@ -121,10 +114,6 @@ fn build_sorted_asset_objects(
 ) -> Vec<AssetObject> {
     let mut items = build_asset_objects(assets, ctx);
     match sort_mode {
-        // Server-side date sort: state.assets is already in server order; no
-        // client-side reorder. (This applies to `LocalAll`/`AlbumLocal` too —
-        // those sources only ever emit one synthetic page so insertion order
-        // matches the local enumeration.)
         LibrarySortMode::NewestFirst | LibrarySortMode::OldestFirst => {}
         LibrarySortMode::Filename => items.sort_by_cached_key(|o| {
             (

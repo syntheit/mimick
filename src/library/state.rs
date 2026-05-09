@@ -5,17 +5,6 @@ use crate::api_client::{
 };
 
 const PAGE_SIZE: usize = 50;
-const WINDOW_PAGES: usize = 8;
-pub const WINDOW_CAP: usize = WINDOW_PAGES * PAGE_SIZE;
-
-/// Outcome of an append/replace, used by the listmodel layer to emit a
-/// single `items_changed(0, prev_n, new_n)` reset signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageMutation {
-    pub generation: u64,
-    pub prev_n: usize,
-    pub new_n: usize,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LibrarySource {
@@ -187,16 +176,11 @@ impl LibraryState {
         Some((self.generation, self.source.clone(), self.next_page))
     }
 
-    pub fn replace_assets(
-        &mut self,
-        generation: u64,
-        items: Vec<LibraryAsset>,
-    ) -> Option<PageMutation> {
+    pub fn replace_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
         if generation != self.generation {
-            return None;
+            return false;
         }
 
-        let prev_n = self.assets.len();
         self.assets = dedup_assets(items);
         self.page_in_flight = false;
         self.next_page = 2;
@@ -207,33 +191,18 @@ impl LibraryState {
             LibraryLoadState::Loaded
         };
         self.apply_sort(self.sort_mode.clone());
-        Some(PageMutation {
-            generation,
-            prev_n,
-            new_n: self.assets.len(),
-        })
+        true
     }
 
-    pub fn append_assets(
-        &mut self,
-        generation: u64,
-        items: Vec<LibraryAsset>,
-    ) -> Option<PageMutation> {
+    pub fn append_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
         if generation != self.generation {
-            return None;
+            return false;
         }
 
         let page_len = items.len();
         self.page_in_flight = false;
-
-        let prev_n = self.assets.len();
         self.assets.extend(items);
         self.assets = dedup_assets(std::mem::take(&mut self.assets));
-
-        if self.assets.len() > WINDOW_CAP {
-            let drop = self.assets.len() - WINDOW_CAP;
-            self.assets.drain(..drop);
-        }
 
         if page_len > 0 {
             self.next_page = self.next_page.saturating_add(1);
@@ -245,12 +214,7 @@ impl LibraryState {
             LibraryLoadState::Loaded
         };
         self.apply_sort(self.sort_mode.clone());
-
-        Some(PageMutation {
-            generation,
-            prev_n,
-            new_n: self.assets.len(),
-        })
+        true
     }
 
     /// Records the user's preferred sort mode. `LibraryState.assets` is always
@@ -339,16 +303,8 @@ mod tests {
             query: "cats".into(),
         });
 
-        assert!(
-            state
-                .replace_assets(generation, vec![asset("1", "a.jpg")])
-                .is_none()
-        );
-        assert!(
-            state
-                .replace_assets(newer_generation.0, vec![asset("2", "b.jpg")])
-                .is_some()
-        );
+        assert!(!state.replace_assets(generation, vec![asset("1", "a.jpg")]));
+        assert!(state.replace_assets(newer_generation.0, vec![asset("2", "b.jpg")]));
         assert_eq!(state.assets.len(), 1);
         assert_eq!(state.assets[0].id, "2");
     }
@@ -364,34 +320,9 @@ mod tests {
     }
 
     #[test]
-    fn test_appending_past_window_cap_evicts_oldest() {
+    fn test_dedup_drops_duplicates_across_appends() {
         let mut state = LibraryState::new();
         let (generation, _, _) = state.load_initial_source();
-
-        let pages_to_load = (WINDOW_CAP / 50) + 2;
-        for page in 0..pages_to_load {
-            let chunk: Vec<LibraryAsset> = (0..50)
-                .map(|i| asset(&format!("{}", page * 50 + i), "a.jpg"))
-                .collect();
-            assert!(state.append_assets(generation, chunk).is_some());
-        }
-
-        assert_eq!(state.assets.len(), WINDOW_CAP);
-        let ids: std::collections::HashSet<String> =
-            state.assets.iter().map(|a| a.id.clone()).collect();
-        assert_eq!(ids.len(), WINDOW_CAP);
-        // After loading 10 pages (500 ids) into a 400-cap window, the oldest
-        // 100 must have been dropped.
-        assert!(!ids.contains("0"));
-        assert!(!ids.contains("99"));
-    }
-
-    #[test]
-    fn test_dedup_after_eviction_does_not_duplicate() {
-        let mut state = LibraryState::new();
-        let (generation, _, _) = state.load_initial_source();
-        // Load three pages, then re-append page 2's content — its ids must
-        // not appear twice in the window even though they get re-inserted.
         let mk_page = |start: u32| -> Vec<LibraryAsset> {
             (0..50)
                 .map(|i| asset(&format!("{}", start + i), "a.jpg"))
@@ -399,10 +330,12 @@ mod tests {
         };
         state.append_assets(generation, mk_page(0));
         state.append_assets(generation, mk_page(50));
+        // Re-append the second page; ids must not appear twice.
         state.append_assets(generation, mk_page(50));
         let unique: std::collections::HashSet<_> =
             state.assets.iter().map(|a| a.id.clone()).collect();
         assert_eq!(unique.len(), state.assets.len());
+        assert_eq!(state.assets.len(), 100);
     }
 
     #[test]
