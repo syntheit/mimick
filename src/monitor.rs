@@ -1,6 +1,7 @@
 //! Provides live filesystem monitoring, file-settling checks, and checksum generation for watched paths.
 
 use crate::config::{WatchPathEntry, best_matching_watch_entry};
+use crate::media_kinds;
 use crate::watch_path_display::display_watch_path;
 use notify::{Config as NotifyConfig, EventKind, PollWatcher, RecursiveMode, Watcher};
 use sha1::{Digest, Sha1};
@@ -10,19 +11,6 @@ use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-
-/// List of allowed media file extensions accepted for upload.
-///
-/// Sorted alphabetically. Includes still-image formats (incl. RAW),
-/// video formats, and high-bit-depth/professional formats supported by Immich.
-pub(crate) const MEDIA_EXTENSIONS: &[&str] = &[
-    "3fr", "3gp", "3gpp", "ari", "arw", "avi", "avif", "bmp", "cap", "cin", "cr2", "cr3", "crw",
-    "dcr", "dng", "erf", "fff", "flv", "gif", "heic", "heif", "hif", "iiq", "insp", "insv", "jp2",
-    "jpe", "jpeg", "jpg", "jxl", "k25", "kdc", "m2t", "m2ts", "m4v", "mkv", "mov", "mp4", "mpe",
-    "mpeg", "mpg", "mpo", "mrw", "mts", "mxf", "nef", "nrw", "orf", "ori", "pef", "png", "psd",
-    "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "svg", "tif", "tiff", "ts", "vob", "webm",
-    "webp", "wmv", "x3f",
-];
 
 /// Number of consecutive stable size checks required before a file is considered complete.
 const REQUIRED_STABLE_COUNTS: u32 = 3;
@@ -182,7 +170,7 @@ impl Monitor {
                                     path.extension().map(|e| e.to_string_lossy().to_lowercase());
                                 let ext_str = ext.as_deref().unwrap_or("");
 
-                                if !MEDIA_EXTENSIONS.contains(&ext_str) {
+                                if !media_kinds::is_supported_ext(ext_str) {
                                     continue;
                                 }
 
@@ -370,13 +358,7 @@ pub(crate) fn compute_sha1_chunked(path: &str) -> io::Result<String> {
 
 /// Return whether a path points to a supported media file rather than a directory.
 pub(crate) fn is_supported_media_path(path: &Path) -> bool {
-    if path.is_dir() {
-        return false;
-    }
-
-    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
-    let ext_str = ext.as_deref().unwrap_or("");
-    MEDIA_EXTENSIONS.contains(&ext_str)
+    media_kinds::is_supported_path(path)
 }
 
 pub(crate) fn is_temporary_file(path: &Path) -> bool {

@@ -10,9 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Configurable test-asset generator script for reproducing deduplication and startup scan benchmarks across all supported API asset formats (#101).
+- Graceful shutdown for in-flight uploads. Quitting the app now stops accepting new tasks, waits up to 5 seconds for active uploads to finish cleanly, then cancels anything still in flight via a cancellation token. Uploads cancelled at the deadline are persisted to the retry queue and resumed on the next launch instead of leaving partial assets on the server.
 
 ### Changed
 
+- Disk thumbnail cache is now pruned on a 10-minute background interval instead of only at startup, and its cap was raised from 500 MB to 1 GB so long sessions no longer grow unbounded.
+- Consolidated the three previously hand-maintained extension/MIME tables (file watcher, upload client, library enumerator) into a single `phf` perfect-hash registry. Eliminates table drift and turns the watcher's hot-path extension check from a 68-entry linear scan into an O(1) lookup.
 - Hardened security by adding strict path sanitization against directory traversal on downloads, and enforcing `http`/`https` scheme validation for server URLs (#98).
 - Centralized read/write lock configuration access into `AppContext`, eliminating redundant disk parsing and streamlining context usage across modules (#98).
 - Replaced standard non-async locks (Mutex/RwLock) with `parking_lot` for faster operations, and added `atomic_write()` for crash-safe file persistence (#98).

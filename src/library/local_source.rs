@@ -114,11 +114,10 @@ fn build_asset(path: &Path) -> Option<LocalAsset> {
     let filename = path.file_name()?.to_string_lossy().into_owned();
     let metadata = std::fs::metadata(path).ok()?;
     let created_at = format_modified(&metadata);
-    let mime = mime_for_extension(path);
-    let asset_type = if mime.starts_with("video/") {
-        "VIDEO"
-    } else {
-        "IMAGE"
+    let mime = crate::media_kinds::mime_for_path(path);
+    let asset_type = match crate::media_kinds::asset_kind(mime) {
+        crate::media_kinds::AssetKind::Video => "VIDEO",
+        _ => "IMAGE",
     };
     Some(LocalAsset {
         path: path.to_path_buf(),
@@ -127,47 +126,6 @@ fn build_asset(path: &Path) -> Option<LocalAsset> {
         asset_type,
         created_at,
     })
-}
-
-fn mime_for_extension(path: &Path) -> &'static str {
-    // Subset of `api_client::mime_for_path` relevant to local browsing.
-    // Vendor-specific RAW MIMEs are collapsed to "image/x-raw" because the
-    // library view only uses the asset_type bucket; the per-vendor mapping
-    // continues to live in api_client for upload paths.
-    match path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .as_deref()
-    {
-        Some("avif") => "image/avif",
-        Some("bmp") => "image/bmp",
-        Some("gif") => "image/gif",
-        Some("heic") => "image/heic",
-        Some("heif" | "hif") => "image/heif",
-        Some("jpe" | "jpeg" | "jpg" | "insp" | "mpo") => "image/jpeg",
-        Some("jp2") => "image/jp2",
-        Some("jxl") => "image/jxl",
-        Some("png") => "image/png",
-        Some("psd") => "image/vnd.adobe.photoshop",
-        Some("svg") => "image/svg+xml",
-        Some("tif" | "tiff") => "image/tiff",
-        Some("webp") => "image/webp",
-        Some("3gp" | "3gpp") => "video/3gpp",
-        Some("avi") => "video/x-msvideo",
-        Some("flv") => "video/x-flv",
-        Some("insv" | "mp4") => "video/mp4",
-        Some("m2t" | "m2ts" | "mts" | "ts") => "video/mp2t",
-        Some("m4v") => "video/x-m4v",
-        Some("mkv") => "video/x-matroska",
-        Some("mpe" | "mpeg" | "mpg") => "video/mpeg",
-        Some("mov") => "video/quicktime",
-        Some("mxf") => "application/mxf",
-        Some("vob") => "video/dvd",
-        Some("webm") => "video/webm",
-        Some("wmv") => "video/x-ms-wmv",
-        Some(_) => "image/x-raw",
-        None => "application/octet-stream",
-    }
 }
 
 fn format_modified(meta: &std::fs::Metadata) -> String {
