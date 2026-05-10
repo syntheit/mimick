@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Closing the settings window no longer also closes the library window when background sync is disabled. The "quit when settings closes" path now checks for other open application windows first and only quits when settings was the only window left.
+- Settings: the "Enable Library View" toggle, "Open Originals in Lightbox" toggle, and "Thumbnail Memory Cache (MB)" spinner now save immediately on change instead of requiring a click on the connection-save button. Each handler skips the disk write when the value matches the existing config (avoids redundant writes during initial population).
+- Settings: the connection-save button has been renamed from "Save Connection Settings" to "Save Credentials" so the action label matches what the field group is actually about (URL + API key).
 - Concurrent workers racing to create the same album on first run now serialize via a per-album-name lock with double-checked cache lookup, preventing N duplicate albums being created simultaneously (one per queued file).
 - `fetch_all_albums` now collapses concurrent callers into a single network request via a fetch lock with double-checked `albums_fetched` flag. Previously, concurrent startup-scan workers each fired an independent `GET /api/albums`, then re-inserted the same entries and reported every album as a false-positive duplicate.
 - Duplicate album detection now compares IDs within a single server response (built into a fresh map before replacing the cache), so "same name, same ID" entries from a re-fetch are ignored silently while genuine server-side duplicates (same name, different ID) still warn and keep the first.
