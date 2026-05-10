@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Search pagination — particularly OCR search — now uses Immich's `nextPage` field as the source of truth instead of a "did we get a full page?" heuristic. Previously, when Immich's search response post-filtered results (for visibility, archive, library scope) it returned short pages even with more matches available, causing pagination to stop early and hide the rest. Applies to all four search endpoints (Smart, OCR, Metadata, Advanced) and to album/unified variants that route through the same endpoint.
 - Concurrent workers racing to create the same album on first run now serialize via a per-album-name lock with double-checked cache lookup, preventing N duplicate albums being created simultaneously (one per queued file).
 - `fetch_all_albums` now collapses concurrent callers into a single network request via a fetch lock with double-checked `albums_fetched` flag. Previously, concurrent startup-scan workers each fired an independent `GET /api/albums`, then re-inserted the same entries and reported every album as a false-positive duplicate.
 - Duplicate album detection now compares IDs within a single server response (built into a fresh map before replacing the cache), so "same name, same ID" entries from a re-fetch are ignored silently while genuine server-side duplicates (same name, different ID) still warn and keep the first.
