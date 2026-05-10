@@ -2301,6 +2301,26 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
+/// Apply the current zoom level to the given Picture by overriding its size
+/// request when zoomed in, or letting it fit naturally at 1.0.
+fn apply_lightbox_zoom(picture: &gtk::Picture, zoom: f64) {
+    if zoom <= 1.001 {
+        picture.set_size_request(-1, -1);
+        return;
+    }
+    let Some(paintable) = picture.paintable() else {
+        return;
+    };
+    let nw = paintable.intrinsic_width();
+    let nh = paintable.intrinsic_height();
+    if nw > 0 && nh > 0 {
+        picture.set_size_request(
+            (nw as f64 * zoom) as i32,
+            (nh as f64 * zoom) as i32,
+        );
+    }
+}
+
 fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let Some(item) = ui.grid.model.item(position).and_downcast::<AssetObject>() else {
         return;
@@ -2345,11 +2365,34 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .margin_end(8)
         .hexpand(true)
         .build();
-    let picture = gtk::Picture::builder()
+    // Two picture widgets in a stack so navigation can slide between them.
+    let picture_a = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Contain)
         .vexpand(true)
         .hexpand(true)
         .build();
+    let picture_b = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Contain)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    let pic_stack = gtk::Stack::builder()
+        .transition_duration(180)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    pic_stack.add_named(&picture_a, Some("a"));
+    pic_stack.add_named(&picture_b, Some("b"));
+    pic_stack.set_visible_child_name("a");
+    let scrolled_picture = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .child(&pic_stack)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    let active_a = Rc::new(Cell::new(true));
+    let zoom_level = Rc::new(Cell::new(1.0_f64));
     let initial_full = ui.ctx.config.read().data.library_preview_full_resolution;
     let resolution_toggle = gtk::ToggleButton::builder()
         .label(if initial_full { "Original" } else { "Preview" })
@@ -2364,7 +2407,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .build();
     actions.append(&resolution_toggle);
     actions.append(&download);
-    viewer.append(&picture);
+    viewer.append(&scrolled_picture);
     viewer.append(&actions);
 
     let details_inner = gtk::Box::builder()
@@ -2423,15 +2466,13 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let pos_cell = Rc::new(Cell::new(position));
     let load_into_picture = Rc::new({
         let ui = ui.clone();
-        let picture = picture.clone();
-        move |asset_id: String, local_path: String, full_res: bool| {
+        move |target: gtk::Picture, asset_id: String, local_path: String, full_res: bool| {
             let ui = ui.clone();
-            let picture = picture.clone();
             glib::MainContext::default().spawn_local(async move {
                 if !local_path.is_empty() {
                     if let Some(texture) = load_texture_oriented(std::path::Path::new(&local_path))
                     {
-                        picture.set_paintable(Some(&texture));
+                        target.set_paintable(Some(&texture));
                     }
                     return;
                 }
@@ -2462,7 +2503,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                             return;
                         }
                         if let Some(texture) = load_texture_oriented(&temp) {
-                            picture.set_paintable(Some(&texture));
+                            target.set_paintable(Some(&texture));
                         }
                     }
                 } else if let Ok(texture) = ui
@@ -2471,12 +2512,14 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     .load_thumbnail(&asset_id, ThumbnailSize::Preview)
                     .await
                 {
-                    picture.set_paintable(Some(&texture));
+                    target.set_paintable(Some(&texture));
                 }
             });
         }
     });
 
+    // -1 = back/prev (slide right), +1 = forward/next (slide left), 0 = no transition
+    let nav_dir = Rc::new(Cell::new(0i8));
     let render = Rc::new({
         let ui = ui.clone();
         let page = page.clone();
@@ -2490,6 +2533,12 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let details_summary = details_summary.clone();
         let details_loading = details_loading.clone();
         let details_exif = details_exif.clone();
+        let pic_stack = pic_stack.clone();
+        let picture_a = picture_a.clone();
+        let picture_b = picture_b.clone();
+        let active_a = active_a.clone();
+        let zoom_level = zoom_level.clone();
+        let nav_dir = nav_dir.clone();
         move || {
             let pos = pos_cell.get();
             let n = ui.grid.model.n_items();
@@ -2524,7 +2573,25 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             resolution_toggle.set_visible(!is_local);
             download.set_visible(!is_local);
 
-            (*load_into_picture)(asset_id.clone(), local_path, resolution_toggle.is_active());
+            // Pick the *inactive* picture to load into, then transition to it.
+            let target_is_a = !active_a.get();
+            let target = if target_is_a { picture_a.clone() } else { picture_b.clone() };
+            zoom_level.set(1.0);
+            apply_lightbox_zoom(&target, 1.0);
+            pic_stack.set_transition_type(match nav_dir.get() {
+                1 => gtk::StackTransitionType::SlideLeft,
+                -1 => gtk::StackTransitionType::SlideRight,
+                _ => gtk::StackTransitionType::None,
+            });
+            (*load_into_picture)(
+                target,
+                asset_id.clone(),
+                local_path,
+                resolution_toggle.is_active(),
+            );
+            pic_stack.set_visible_child_name(if target_is_a { "a" } else { "b" });
+            active_a.set(target_is_a);
+            nav_dir.set(0);
 
             if is_local {
                 details_loading.set_visible(false);
@@ -2563,10 +2630,13 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         pos_cell,
         #[strong]
         render,
+        #[strong]
+        nav_dir,
         move |_| {
             let pos = pos_cell.get();
             if pos > 0 {
                 pos_cell.set(pos - 1);
+                nav_dir.set(-1);
                 (*render)();
             }
         }
@@ -2580,10 +2650,13 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         render,
         #[strong]
         next_btn,
+        #[strong]
+        nav_dir,
         move || {
             let pos = pos_cell.get();
             if pos + 1 < ui.grid.model.n_items() {
                 pos_cell.set(pos + 1);
+                nav_dir.set(1);
                 (*render)();
                 return;
             }
@@ -2596,6 +2669,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let pos_cell_h = pos_cell.clone();
             let render_h = render.clone();
             let next_btn_h = next_btn.clone();
+            let nav_dir_h = nav_dir.clone();
             let prev_count = model.n_items();
             let handler_id = Rc::new(std::cell::RefCell::new(None::<glib::SignalHandlerId>));
             let handler_id_clone = handler_id.clone();
@@ -2606,6 +2680,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 let pos = pos_cell_h.get();
                 if pos + 1 < m.n_items() {
                     pos_cell_h.set(pos + 1);
+                    nav_dir_h.set(1);
                     (*render_h)();
                 }
                 next_btn_h.set_sensitive(true);
@@ -2624,6 +2699,41 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         move |_| (*goto_next)()
     ));
 
+    let active_picture = clone!(
+        #[strong]
+        active_a,
+        #[strong]
+        picture_a,
+        #[strong]
+        picture_b,
+        move || -> gtk::Picture {
+            if active_a.get() { picture_a.clone() } else { picture_b.clone() }
+        }
+    );
+
+    let zoom_by = Rc::new(clone!(
+        #[strong]
+        zoom_level,
+        #[strong]
+        active_picture,
+        move |factor: f64| {
+            let new_zoom = (zoom_level.get() * factor).clamp(0.1, 10.0);
+            zoom_level.set(new_zoom);
+            apply_lightbox_zoom(&active_picture(), new_zoom);
+        }
+    ));
+
+    let zoom_reset = Rc::new(clone!(
+        #[strong]
+        zoom_level,
+        #[strong]
+        active_picture,
+        move || {
+            zoom_level.set(1.0);
+            apply_lightbox_zoom(&active_picture(), 1.0);
+        }
+    ));
+
     let key_controller = gtk::EventControllerKey::new();
     key_controller.connect_key_pressed(clone!(
         #[strong]
@@ -2636,31 +2746,72 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         details_btn,
         #[strong]
         goto_next,
-        move |_, key, _, _| match key {
-            gtk::gdk::Key::Left => {
-                let pos = pos_cell.get();
-                if pos > 0 {
-                    pos_cell.set(pos - 1);
-                    (*render)();
+        #[strong]
+        nav_dir,
+        #[strong]
+        zoom_by,
+        #[strong]
+        zoom_reset,
+        move |_, key, _, mods| {
+            let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            match (ctrl, key) {
+                (true, gtk::gdk::Key::plus) | (true, gtk::gdk::Key::equal) | (true, gtk::gdk::Key::KP_Add) => {
+                    (*zoom_by)(1.2);
+                    glib::Propagation::Stop
                 }
-                glib::Propagation::Stop
+                (true, gtk::gdk::Key::minus) | (true, gtk::gdk::Key::KP_Subtract) => {
+                    (*zoom_by)(1.0 / 1.2);
+                    glib::Propagation::Stop
+                }
+                (true, gtk::gdk::Key::_0) | (true, gtk::gdk::Key::KP_0) => {
+                    (*zoom_reset)();
+                    glib::Propagation::Stop
+                }
+                (false, gtk::gdk::Key::Left) => {
+                    let pos = pos_cell.get();
+                    if pos > 0 {
+                        pos_cell.set(pos - 1);
+                        nav_dir.set(-1);
+                        (*render)();
+                    }
+                    glib::Propagation::Stop
+                }
+                (false, gtk::gdk::Key::Right) => {
+                    (*goto_next)();
+                    glib::Propagation::Stop
+                }
+                (false, gtk::gdk::Key::i) | (false, gtk::gdk::Key::I) => {
+                    details_btn.set_active(!details_btn.is_active());
+                    glib::Propagation::Stop
+                }
+                (false, gtk::gdk::Key::Escape) => {
+                    ui.nav.pop();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
             }
-            gtk::gdk::Key::Right => {
-                (*goto_next)();
-                glib::Propagation::Stop
-            }
-            gtk::gdk::Key::i | gtk::gdk::Key::I => {
-                details_btn.set_active(!details_btn.is_active());
-                glib::Propagation::Stop
-            }
-            gtk::gdk::Key::Escape => {
-                ui.nav.pop();
-                glib::Propagation::Stop
-            }
-            _ => glib::Propagation::Proceed,
         }
     ));
     page.add_controller(key_controller);
+
+    // Ctrl+wheel zoom on the picture area, captured before the scrolled window
+    // can use it for panning.
+    let zoom_scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    zoom_scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+    zoom_scroll.connect_scroll(clone!(
+        #[strong]
+        zoom_by,
+        move |ctrl, _dx, dy| {
+            let mods = ctrl.current_event_state();
+            if !mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            let factor = if dy < 0.0 { 1.1 } else { 1.0 / 1.1 };
+            (*zoom_by)(factor);
+            glib::Propagation::Stop
+        }
+    ));
+    scrolled_picture.add_controller(zoom_scroll);
 
     download.connect_clicked(clone!(
         #[strong]
