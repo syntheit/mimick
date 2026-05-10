@@ -412,6 +412,9 @@ impl QueueManager {
                                     };
                                     s.progress = 100;
                                     log::info!("All {} file(s) processed. Idle.", s.total_queued);
+                                    if let Err(err) = sync_index_ref.flush() {
+                                        log::warn!("Failed to flush sync index on idle: {}", err);
+                                    }
                                     let mut batch_state = batch_notify_ref.lock();
                                     if batch_state.active
                                         && batch_state.current_batch_id

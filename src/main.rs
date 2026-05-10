@@ -607,6 +607,45 @@ async fn main() {
     });
 
     log::info!("GTK application starting up");
+
+    if is_primary_instance.load(Ordering::SeqCst) {
+        let quit_requested = Arc::new(AtomicBool::new(false));
+        let qr_signal = quit_requested.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        log::warn!("Could not install SIGTERM handler: {}", err);
+                        return;
+                    }
+                };
+            tokio::select! {
+                res = tokio::signal::ctrl_c() => {
+                    if let Err(err) = res {
+                        log::warn!("SIGINT handler error: {}", err);
+                        return;
+                    }
+                    log::info!("Received SIGINT; requesting graceful shutdown.");
+                }
+                _ = sigterm.recv() => {
+                    log::info!("Received SIGTERM; requesting graceful shutdown.");
+                }
+            }
+            qr_signal.store(true, Ordering::SeqCst);
+        });
+
+        let app_for_quit = app.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            if quit_requested.load(Ordering::SeqCst) {
+                app_for_quit.quit();
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
+
     app.run();
 
     // Persist final state and any pending retries on graceful shutdown.
@@ -616,6 +655,9 @@ async fn main() {
                 .shutdown(std::time::Duration::from_secs(5))
                 .await;
             ctx.queue_manager.flush_retries();
+            if let Err(err) = ctx.sync_index.flush() {
+                log::warn!("Failed to flush sync index on shutdown: {}", err);
+            }
         }
         let state = APP_CONTEXT
             .get()

@@ -155,15 +155,7 @@ impl ShardedSyncIndex {
             .checksum_to_path
             .insert(checksum.to_string(), path.to_string());
         shard.dirty = true;
-
-        // Auto-flush when any shard accumulates enough changes.
-        let dirty_count = shard.entries.len();
-        drop(shard);
-        if dirty_count.is_multiple_of(50) {
-            self.flush()
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     /// Drop records for files that no longer exist under any configured watch path.
@@ -210,23 +202,28 @@ impl ShardedSyncIndex {
     }
 
     /// Force a flush to disk if there are unwritten changes.
+    /// Dirty markers are only cleared after a successful write, so a failed
+    /// write leaves the data marked dirty for the next flush attempt.
     pub fn flush(&self) -> io::Result<()> {
         let mut merged = HashMap::new();
         let mut any_dirty = false;
         for lock in &self.shards {
-            let mut shard = lock.write().unwrap();
+            let shard = lock.read().unwrap();
             if shard.dirty {
                 any_dirty = true;
-                shard.dirty = false;
             }
             merged.extend(shard.entries.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
-        if any_dirty {
-            let content = serde_json::to_string_pretty(&SyncIndexDataRef { files: &merged })?;
-            crate::util::atomic_write(&self.index_file, content.as_bytes())
-        } else {
-            Ok(())
+        if !any_dirty {
+            return Ok(());
         }
+        let content = serde_json::to_string_pretty(&SyncIndexDataRef { files: &merged })?;
+        crate::util::atomic_write(&self.index_file, content.as_bytes())?;
+        for lock in &self.shards {
+            let mut shard = lock.write().unwrap();
+            shard.dirty = false;
+        }
+        Ok(())
     }
 }
 
