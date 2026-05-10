@@ -136,6 +136,7 @@ struct LibraryWindowUi {
     timeline_banner: gtk::Label,
     source_mode_suppressed: Cell<bool>,
     sidebar_suppressed: Cell<bool>,
+    back_button: gtk::Button,
     select_toggle: gtk::ToggleButton,
     bulk_bar: gtk::Revealer,
     bulk_count_label: gtk::Label,
@@ -166,6 +167,11 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .tooltip_text("Toggle sidebar (F9)")
         .active(true)
         .build();
+    let back_button = gtk::Button::builder()
+        .icon_name("go-previous-symbolic")
+        .tooltip_text("Back (Alt+Left)")
+        .sensitive(false)
+        .build();
     let prefs_button = gtk::Button::builder()
         .icon_name("emblem-system-symbolic")
         .tooltip_text("Open Settings")
@@ -179,6 +185,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .tooltip_text("Refresh")
         .build();
     header.pack_start(&sidebar_toggle);
+    header.pack_start(&back_button);
     header.pack_end(&prefs_button);
     header.pack_end(&queue_button);
     header.pack_end(&refresh_button);
@@ -444,6 +451,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         timeline_banner,
         source_mode_suppressed: Cell::new(false),
         sidebar_suppressed: Cell::new(false),
+        back_button: back_button.clone(),
         select_toggle: select_toggle.clone(),
         bulk_bar: bulk_bar.clone(),
         bulk_count_label: bulk_count_label.clone(),
@@ -630,6 +638,33 @@ fn connect_controls(
         }
     ));
 
+    ui.back_button.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            navigate_back(ui.clone());
+        }
+    ));
+
+    // Alt+Left → back. Attached to the window so it works regardless of focus.
+    let alt_left = gtk::Shortcut::builder()
+        .trigger(&gtk::ShortcutTrigger::parse_string("<Alt>Left").unwrap())
+        .action(&gtk::CallbackAction::new(clone!(
+            #[strong]
+            ui,
+            move |_, _| {
+                if navigate_back(ui.clone()) {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            }
+        )))
+        .build();
+    let alt_left_controller = gtk::ShortcutController::new();
+    alt_left_controller.add_shortcut(alt_left);
+    ui.window.add_controller(alt_left_controller);
+
     let f5_controller = gtk::EventControllerKey::new();
     f5_controller.connect_key_pressed({
         let refresh_button = refresh_button.clone();
@@ -674,9 +709,10 @@ fn connect_controls(
             // Searching while switching sources would require thread-safe
             // re-routing of the search field; clear it on source change.
             ui.search_entry.set_text("");
-            let request = ui.ctx.library_state.lock().switch_source(source);
+            let request = ui.ctx.library_state.lock().navigate_to(source);
             apply_timeline_ui_state(&ui, &request.1);
             load_source_page(ui.clone(), request, false);
+            update_back_button(&ui);
         }
     ));
 
@@ -701,9 +737,10 @@ fn connect_controls(
             } else {
                 LibrarySource::AllAssets
             };
-            let request = ui.ctx.library_state.lock().switch_source(next_source);
+            let request = ui.ctx.library_state.lock().navigate_to(next_source);
             apply_timeline_ui_state(&ui, &request.1);
             load_source_page(ui.clone(), request, false);
+            update_back_button(&ui);
         }
     ));
 
@@ -725,9 +762,10 @@ fn connect_controls(
                     _ => LibrarySource::MetadataSearch { query },
                 },
             };
-            let request = ui.ctx.library_state.lock().switch_source(source);
+            let request = ui.ctx.library_state.lock().navigate_to(source);
             apply_timeline_ui_state(&ui, &request.1);
             load_source_page(ui.clone(), request, false);
+            update_back_button(&ui);
         }
     ));
 
@@ -1042,6 +1080,26 @@ fn connect_sidebar_handlers(ui: Rc<LibraryWindowUi>) {
     ));
 }
 
+fn update_back_button(ui: &Rc<LibraryWindowUi>) {
+    let can_go_back = ui.ctx.library_state.lock().can_go_back();
+    ui.back_button.set_sensitive(can_go_back);
+}
+
+/// Pop the navigation history and switch to the previous source. Returns
+/// true if a back-step was taken, false when the history was empty.
+fn navigate_back(ui: Rc<LibraryWindowUi>) -> bool {
+    ui.search_entry.set_text("");
+    let request = ui.ctx.library_state.lock().navigate_back();
+    if let Some(request) = request {
+        apply_timeline_ui_state(&ui, &request.1);
+        load_source_page(ui.clone(), request, false);
+        update_back_button(&ui);
+        true
+    } else {
+        false
+    }
+}
+
 /// Common path for sidebar selections. Skips redundant dispatches so the
 /// `reload_sidebar` programmatic re-selection doesn't loop into another
 /// fetch — but only when the content stack is already showing the current
@@ -1051,9 +1109,10 @@ fn sidebar_dispatch(ui: Rc<LibraryWindowUi>, source: LibrarySource) {
     if !on_albums_grid && ui.ctx.library_state.lock().source == source {
         return;
     }
-    let request = ui.ctx.library_state.lock().switch_source(source);
+    let request = ui.ctx.library_state.lock().navigate_to(source);
     apply_timeline_ui_state(&ui, &request.1);
     load_source_page(ui.clone(), request, false);
+    update_back_button(&ui);
 }
 
 fn connect_grid_handlers(ui: Rc<LibraryWindowUi>) {
@@ -1845,7 +1904,7 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
         async move {
             let (generation, source, page) = request;
             let order = ui.ctx.library_state.lock().sort_mode.server_order();
-            let result: Result<Vec<LibraryAsset>, String> = match source.clone() {
+            let result: Result<(Vec<LibraryAsset>, bool), String> = match source.clone() {
                 LibrarySource::AllAssets | LibrarySource::Timeline => {
                     ui.ctx
                         .api_client
@@ -1888,19 +1947,25 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                 LibrarySource::LocalAll => {
                     // Local enumeration is bounded — single synthetic page.
                     if page > 1 {
-                        Ok(Vec::new())
+                        Ok((Vec::new(), false))
                     } else {
                         let locals = enumerate_local(ui.ctx.clone()).await;
-                        Ok(locals.into_iter().map(local_to_library_asset).collect())
+                        Ok((
+                            locals.into_iter().map(local_to_library_asset).collect(),
+                            false,
+                        ))
                     }
                 }
                 LibrarySource::LocalSearch { query } => {
                     if page > 1 {
-                        Ok(Vec::new())
+                        Ok((Vec::new(), false))
                     } else {
                         let locals = enumerate_local(ui.ctx.clone()).await;
                         let filtered = filter_by_filename(locals, &query);
-                        Ok(filtered.into_iter().map(local_to_library_asset).collect())
+                        Ok((
+                            filtered.into_iter().map(local_to_library_asset).collect(),
+                            false,
+                        ))
                     }
                 }
                 LibrarySource::Unified => {
@@ -1921,14 +1986,17 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                 }
                 LibrarySource::AlbumLocal { name, .. } => {
                     if page > 1 {
-                        Ok(Vec::new())
+                        Ok((Vec::new(), false))
                     } else {
                         match linked_entry_path_for_album(&ui, &name) {
                             Some(path) => {
                                 let locals = enumerate_local_for_entry(ui.ctx.clone(), path).await;
-                                Ok(locals.into_iter().map(local_to_library_asset).collect())
+                                Ok((
+                                    locals.into_iter().map(local_to_library_asset).collect(),
+                                    false,
+                                ))
                             }
-                            None => Ok(Vec::new()),
+                            None => Ok((Vec::new(), false)),
                         }
                     }
                 }
@@ -1943,13 +2011,13 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
             };
 
             match result {
-                Ok(items) => {
+                Ok((items, has_more)) => {
                     {
                         let mut state = ui.ctx.library_state.lock();
                         let applied = if append {
-                            state.append_assets(generation, items)
+                            state.append_assets_with_more(generation, items, has_more)
                         } else {
-                            state.replace_assets(generation, items)
+                            state.replace_assets_with_more(generation, items, has_more)
                         };
                         if !applied {
                             return;
@@ -3291,14 +3359,14 @@ fn local_to_library_asset(local: LocalAsset) -> LibraryAsset {
 }
 
 async fn merge_unified_page(
-    remote: Result<Vec<LibraryAsset>, String>,
+    remote: Result<(Vec<LibraryAsset>, bool), String>,
     page: u32,
     ui: &Rc<LibraryWindowUi>,
     query: Option<&str>,
-) -> Result<Vec<LibraryAsset>, String> {
-    let mut remote = remote?;
+) -> Result<(Vec<LibraryAsset>, bool), String> {
+    let (mut remote, has_more) = remote?;
     if page > 1 {
-        return Ok(remote);
+        return Ok((remote, has_more));
     }
 
     let mut locals = enumerate_local(ui.ctx.clone()).await;
@@ -3322,7 +3390,7 @@ async fn merge_unified_page(
         .collect();
 
     local_rows.append(&mut remote);
-    Ok(local_rows)
+    Ok((local_rows, has_more))
 }
 
 /// Return the path of the watch entry linked to `album_name`, if any.
@@ -3335,14 +3403,14 @@ fn linked_entry_path_for_album(ui: &Rc<LibraryWindowUi>, album_name: &str) -> Op
 /// page from the remote API and overlays sync state from the album's
 /// linked local folder only — never from siblings.
 async fn merge_album_unified_page(
-    remote: Result<Vec<LibraryAsset>, String>,
+    remote: Result<(Vec<LibraryAsset>, bool), String>,
     page: u32,
     ui: &Rc<LibraryWindowUi>,
     album_name: &str,
-) -> Result<Vec<LibraryAsset>, String> {
-    let mut remote = remote?;
+) -> Result<(Vec<LibraryAsset>, bool), String> {
+    let (mut remote, has_more) = remote?;
     if page > 1 {
-        return Ok(remote);
+        return Ok((remote, has_more));
     }
 
     let locals = match linked_entry_path_for_album(ui, album_name) {
@@ -3366,7 +3434,7 @@ async fn merge_album_unified_page(
         .collect();
 
     local_rows.append(&mut remote);
-    Ok(local_rows)
+    Ok((local_rows, has_more))
 }
 
 fn connect_filters_button(ui: Rc<LibraryWindowUi>, filters_button: gtk::Button) {

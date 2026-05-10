@@ -238,6 +238,11 @@ struct SearchResponse {
 #[derive(Debug, serde::Deserialize)]
 struct SearchAssetSection {
     items: Vec<LibraryAsset>,
+    /// Authoritative pagination signal from Immich. Some(page) when more
+    /// results exist, None when the search is exhausted. We only need its
+    /// presence — has_more is computed as `next_page.is_some()`.
+    #[serde(rename = "nextPage", default)]
+    next_page: Option<String>,
 }
 
 pub struct ImmichApiClient {
@@ -1122,7 +1127,7 @@ impl ImmichApiClient {
         page: u32,
         size: u32,
         order: Option<SortOrder>,
-    ) -> Result<Vec<LibraryAsset>, String> {
+    ) -> Result<(Vec<LibraryAsset>, bool), String> {
         let mut body = serde_json::json!({
             "albumIds": [album_id],
             "page": page,
@@ -1441,7 +1446,7 @@ impl ImmichApiClient {
         query: &str,
         page: u32,
         size: u32,
-    ) -> Result<Vec<LibraryAsset>, String> {
+    ) -> Result<(Vec<LibraryAsset>, bool), String> {
         let body = serde_json::json!({
             "query": query,
             "page": page,
@@ -1462,7 +1467,7 @@ impl ImmichApiClient {
         page: u32,
         size: u32,
         order: Option<SortOrder>,
-    ) -> Result<Vec<LibraryAsset>, String> {
+    ) -> Result<(Vec<LibraryAsset>, bool), String> {
         let mut body = serde_json::json!({
             "ocr": query,
             "page": page,
@@ -1491,7 +1496,7 @@ impl ImmichApiClient {
         page: u32,
         size: u32,
         order: Option<SortOrder>,
-    ) -> Result<Vec<LibraryAsset>, String> {
+    ) -> Result<(Vec<LibraryAsset>, bool), String> {
         let filters = MetadataSearchFilters {
             original_file_name: Some(query.to_string()),
             order,
@@ -1506,7 +1511,7 @@ impl ImmichApiClient {
         filters: &MetadataSearchFilters,
         page: u32,
         size: u32,
-    ) -> Result<Vec<LibraryAsset>, String> {
+    ) -> Result<(Vec<LibraryAsset>, bool), String> {
         let mut body = serde_json::to_value(filters).map_err(|err| err.to_string())?;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("page".into(), serde_json::json!(page));
@@ -1614,7 +1619,7 @@ impl ImmichApiClient {
         body: serde_json::Value,
         context: RequestContext,
         subject: Option<&str>,
-    ) -> Result<Vec<LibraryAsset>, String> {
+    ) -> Result<(Vec<LibraryAsset>, bool), String> {
         let base_url = self
             .get_active_url()
             .await
@@ -1639,7 +1644,8 @@ impl ImmichApiClient {
                     .await
                     .map_err(|err| err.to_string())?;
                 self.clear_issue().await;
-                Ok(response.assets.items)
+                let has_more = response.assets.next_page.is_some();
+                Ok((response.assets.items, has_more))
             }
             Ok(resp) => {
                 self.set_issue(classify_http_issue(
@@ -2055,6 +2061,19 @@ mod tests {
 
         assert_eq!(response.assets.items.len(), 1);
         assert_eq!(response.assets.items[0].filename, "IMG_0001.JPG");
+        assert!(response.assets.next_page.is_none());
+    }
+
+    #[test]
+    fn test_search_response_parses_next_page() {
+        let response: SearchResponse = serde_json::from_value(serde_json::json!({
+            "assets": {
+                "items": [],
+                "nextPage": "2"
+            }
+        }))
+        .unwrap();
+        assert_eq!(response.assets.next_page.as_deref(), Some("2"));
     }
 
     #[test]

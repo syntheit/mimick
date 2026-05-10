@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Back navigation in the library window. The header bar now includes a back button (Alt+Left) that returns to the previously visited view (Photos, Album, Explore, etc.). A nav-history stack is maintained per library source — searches are not pushed since they're ephemeral, and consecutive duplicates are coalesced. The button is disabled when there's no history to return to.
 - Lightbox image zoom support via Ctrl+scroll wheel, trackpad pinch gesture, on-screen `−` / `+` / `100%` button group, and Ctrl+`+` / Ctrl+`-` / Ctrl+`0` keyboard shortcuts. The current zoom percentage is shown in the centre button (click it to reset to fit). The zoomed image scrolls within the viewer for panning. Zoom level resets to fit-to-window when navigating between assets.
 - Lightbox slide animation when navigating between images. Forward navigation (next button or Right arrow) slides the new image in from the right; backward navigation slides it in from the left. Falls back gracefully when GTK animations are disabled in system settings.
 - Configurable test-asset generator script for reproducing deduplication and startup scan benchmarks across all supported API asset formats (#101).
@@ -36,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Search pagination — particularly OCR search — now uses Immich's `nextPage` field as the source of truth instead of a "did we get a full page?" heuristic. Previously, when Immich's search response post-filtered results (for visibility, archive, library scope) it returned short pages even with more matches available, causing pagination to stop early and hide the rest. Applies to all four search endpoints (Smart, OCR, Metadata, Advanced) and to album/unified variants that route through the same endpoint.
 - Concurrent workers racing to create the same album on first run now serialize via a per-album-name lock with double-checked cache lookup, preventing N duplicate albums being created simultaneously (one per queued file).
 - `fetch_all_albums` now collapses concurrent callers into a single network request via a fetch lock with double-checked `albums_fetched` flag. Previously, concurrent startup-scan workers each fired an independent `GET /api/albums`, then re-inserted the same entries and reported every album as a false-positive duplicate.
 - Duplicate album detection now compares IDs within a single server response (built into a fresh map before replacing the cache), so "same name, same ID" entries from a re-fetch are ignored silently while genuine server-side duplicates (same name, different ID) still warn and keep the first.

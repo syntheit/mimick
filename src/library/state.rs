@@ -108,6 +108,9 @@ pub struct LibraryStatus {
 pub struct LibraryState {
     pub source: LibrarySource,
     pub previous_non_search_source: LibrarySource,
+    /// Stack of past sources for back-navigation. Pushed by `navigate_to`,
+    /// popped by `navigate_back`. Searches are not pushed (they are ephemeral).
+    pub nav_history: Vec<LibrarySource>,
     pub sort_mode: LibrarySortMode,
     pub load_state: LibraryLoadState,
     pub selected_asset_id: Option<String>,
@@ -125,6 +128,7 @@ impl Default for LibraryState {
         Self {
             source: LibrarySource::AllAssets,
             previous_non_search_source: LibrarySource::AllAssets,
+            nav_history: Vec::new(),
             sort_mode: LibrarySortMode::NewestFirst,
             load_state: LibraryLoadState::Idle,
             selected_asset_id: None,
@@ -167,6 +171,33 @@ impl LibraryState {
         (self.generation, source, 1)
     }
 
+    /// Switch to `source`, recording the current source in nav_history first
+    /// so back-navigation can return to it. Searches are not pushed (they're
+    /// ephemeral). No-ops when navigating to the source we're already on.
+    pub fn navigate_to(&mut self, source: LibrarySource) -> (u64, LibrarySource, u32) {
+        if self.source != source
+            && !self.source.is_search()
+            && self.nav_history.last() != Some(&self.source)
+        {
+            self.nav_history.push(self.source.clone());
+            if self.nav_history.len() > 50 {
+                self.nav_history.remove(0);
+            }
+        }
+        self.switch_source(source)
+    }
+
+    /// Pop one entry from nav_history and switch to it. Does not push to
+    /// history. Returns None when there's nowhere to go back to.
+    pub fn navigate_back(&mut self) -> Option<(u64, LibrarySource, u32)> {
+        let prev = self.nav_history.pop()?;
+        Some(self.switch_source(prev))
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        !self.nav_history.is_empty()
+    }
+
     pub fn load_next_page_if_needed(&mut self) -> Option<(u64, LibrarySource, u32)> {
         if self.page_in_flight || !self.has_more {
             return None;
@@ -177,6 +208,25 @@ impl LibraryState {
     }
 
     pub fn replace_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
+        let has_more = items.len() >= PAGE_SIZE;
+        self.replace_assets_with_more(generation, items, has_more)
+    }
+
+    pub fn append_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
+        let has_more = items.len() >= PAGE_SIZE;
+        self.append_assets_with_more(generation, items, has_more)
+    }
+
+    /// `replace_assets` with an explicit has_more signal — used by search
+    /// endpoints that return Immich's `nextPage` field, since the page-size
+    /// heuristic is wrong when the server returns short pages due to
+    /// post-filtering (visibility, archive, etc.).
+    pub fn replace_assets_with_more(
+        &mut self,
+        generation: u64,
+        items: Vec<LibraryAsset>,
+        has_more: bool,
+    ) -> bool {
         if generation != self.generation {
             return false;
         }
@@ -184,7 +234,7 @@ impl LibraryState {
         self.assets = dedup_assets(items);
         self.page_in_flight = false;
         self.next_page = 2;
-        self.has_more = self.assets.len() >= PAGE_SIZE;
+        self.has_more = has_more;
         self.load_state = if self.assets.is_empty() {
             LibraryLoadState::Empty
         } else {
@@ -194,7 +244,12 @@ impl LibraryState {
         true
     }
 
-    pub fn append_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
+    pub fn append_assets_with_more(
+        &mut self,
+        generation: u64,
+        items: Vec<LibraryAsset>,
+        has_more: bool,
+    ) -> bool {
         if generation != self.generation {
             return false;
         }
@@ -207,7 +262,7 @@ impl LibraryState {
         if page_len > 0 {
             self.next_page = self.next_page.saturating_add(1);
         }
-        self.has_more = page_len >= PAGE_SIZE;
+        self.has_more = has_more;
         self.load_state = if self.assets.is_empty() {
             LibraryLoadState::Empty
         } else {
@@ -366,5 +421,47 @@ mod tests {
         let (_, source, page) = state.clear_search_restore_previous_source().unwrap();
         assert!(matches!(source, LibrarySource::Album { .. }));
         assert_eq!(page, 1);
+    }
+
+    #[test]
+    fn test_navigate_back_pops_history() {
+        let mut state = LibraryState::new();
+        state.navigate_to(LibrarySource::AllAssets);
+        state.navigate_to(LibrarySource::Album {
+            id: "a1".into(),
+            name: "Trips".into(),
+        });
+        state.navigate_to(LibrarySource::Explore);
+
+        assert!(state.can_go_back());
+        let (_, source, _) = state.navigate_back().unwrap();
+        assert!(matches!(source, LibrarySource::Album { .. }));
+        let (_, source, _) = state.navigate_back().unwrap();
+        assert!(matches!(source, LibrarySource::AllAssets));
+        assert!(!state.can_go_back());
+        assert!(state.navigate_back().is_none());
+    }
+
+    #[test]
+    fn test_navigate_skips_searches_in_history() {
+        let mut state = LibraryState::new();
+        state.navigate_to(LibrarySource::AllAssets);
+        state.navigate_to(LibrarySource::SmartSearch {
+            query: "sunset".into(),
+        });
+        // Going from a search to another non-search must NOT push the search.
+        state.navigate_to(LibrarySource::Explore);
+        // History should be [AllAssets], not [AllAssets, SmartSearch].
+        let (_, source, _) = state.navigate_back().unwrap();
+        assert!(matches!(source, LibrarySource::AllAssets));
+        assert!(!state.can_go_back());
+    }
+
+    #[test]
+    fn test_navigate_to_same_source_is_noop_for_history() {
+        let mut state = LibraryState::new();
+        state.navigate_to(LibrarySource::AllAssets);
+        state.navigate_to(LibrarySource::AllAssets);
+        assert!(!state.can_go_back());
     }
 }

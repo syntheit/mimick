@@ -32,13 +32,12 @@ pub async fn diff_album_vs_folder(
     let mut remote = Vec::new();
     let mut page: u32 = 1;
     loop {
-        let chunk = ctx
+        let (chunk, has_more) = ctx
             .api_client
             .fetch_album_assets(album_id, page, 1000, None)
             .await?;
-        let len = chunk.len();
         remote.extend(chunk);
-        if len < 1000 {
+        if !has_more {
             break;
         }
         page += 1;
