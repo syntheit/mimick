@@ -1,5 +1,7 @@
 //! Library runtime state used by the built-in asset browser.
 
+use std::collections::VecDeque;
+
 use crate::api_client::{
     LibraryAlbum, LibraryAsset, MetadataSearchFilters, ServerAbout, ServerStats,
 };
@@ -110,7 +112,8 @@ pub struct LibraryState {
     pub previous_non_search_source: LibrarySource,
     /// Stack of past sources for back-navigation. Pushed by `navigate_to`,
     /// popped by `navigate_back`. Searches are not pushed (they are ephemeral).
-    pub nav_history: Vec<LibrarySource>,
+    /// `VecDeque` for O(1) front pops when the 50-entry cap is hit.
+    pub nav_history: VecDeque<LibrarySource>,
     pub sort_mode: LibrarySortMode,
     pub load_state: LibraryLoadState,
     pub selected_asset_id: Option<String>,
@@ -128,7 +131,7 @@ impl Default for LibraryState {
         Self {
             source: LibrarySource::AllAssets,
             previous_non_search_source: LibrarySource::AllAssets,
-            nav_history: Vec::new(),
+            nav_history: VecDeque::new(),
             sort_mode: LibrarySortMode::NewestFirst,
             load_state: LibraryLoadState::Idle,
             selected_asset_id: None,
@@ -177,11 +180,11 @@ impl LibraryState {
     pub fn navigate_to(&mut self, source: LibrarySource) -> (u64, LibrarySource, u32) {
         if self.source != source
             && !self.source.is_search()
-            && self.nav_history.last() != Some(&self.source)
+            && self.nav_history.back() != Some(&self.source)
         {
-            self.nav_history.push(self.source.clone());
+            self.nav_history.push_back(self.source.clone());
             if self.nav_history.len() > 50 {
-                self.nav_history.remove(0);
+                self.nav_history.pop_front();
             }
         }
         self.switch_source(source)
@@ -190,7 +193,7 @@ impl LibraryState {
     /// Pop one entry from nav_history and switch to it. Does not push to
     /// history. Returns None when there's nowhere to go back to.
     pub fn navigate_back(&mut self) -> Option<(u64, LibrarySource, u32)> {
-        let prev = self.nav_history.pop()?;
+        let prev = self.nav_history.pop_back()?;
         Some(self.switch_source(prev))
     }
 

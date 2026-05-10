@@ -293,7 +293,7 @@ pub fn build_settings_window_with_parent(
     conn_group.add(&test_btn);
 
     let save_btn = Button::builder()
-        .label("Save Connection Settings")
+        .label("Save Credentials")
         .css_classes(vec!["suggested-action".to_string()])
         .margin_top(6)
         .build();
@@ -445,15 +445,23 @@ pub fn build_settings_window_with_parent(
 
     // Surface a clear "restart required" hint the moment the user flips the
     // toggle, since the running window is still the old one until next launch.
+    // Also auto-save: this is a pure preference with no validation needed.
     let initial_library_view = config.data.library_view_enabled;
+    let ctx_for_lib_view = ctx.clone();
     library_view_row.connect_active_notify(move |row| {
-        let needs_restart = row.is_active() != initial_library_view;
+        let active = row.is_active();
+        let needs_restart = active != initial_library_view;
         let subtitle = if needs_restart {
             "Restart Mimick to apply the new window layout."
         } else {
             "Turn on the in-app library browser. Restart Mimick to switch which window opens."
         };
         row.set_subtitle(subtitle);
+        let mut cfg = ctx_for_lib_view.config.write();
+        if cfg.data.library_view_enabled != active {
+            cfg.data.library_view_enabled = active;
+            cfg.save();
+        }
     });
 
     let catchup_model = gtk::StringList::new(&["Full Scan", "Recent Only (7d)", "New Files Only"]);
@@ -521,6 +529,16 @@ pub fn build_settings_window_with_parent(
         .build();
     library_group.add(&preview_full_row);
 
+    let ctx_for_preview = ctx.clone();
+    preview_full_row.connect_active_notify(move |row| {
+        let active = row.is_active();
+        let mut cfg = ctx_for_preview.config.write();
+        if cfg.data.library_preview_full_resolution != active {
+            cfg.data.library_preview_full_resolution = active;
+            cfg.save();
+        }
+    });
+
     let cache_adj = gtk::Adjustment::new(80.0, 16.0, 1024.0, 16.0, 64.0, 0.0);
     let cache_size_row = adw::SpinRow::builder()
         .title("Thumbnail Memory Cache (MB)")
@@ -528,6 +546,30 @@ pub fn build_settings_window_with_parent(
         .adjustment(&cache_adj)
         .build();
     library_group.add(&cache_size_row);
+
+    // Debounce the spinner save: a held-down arrow fires connect_value_notify
+    // many times per second, and each save takes the config write lock + does
+    // synchronous JSON serialise + atomic_write on the UI thread. We coalesce
+    // bursts by scheduling the save after 400 ms of quiet.
+    let pending_cache_save: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
+    let ctx_for_cache = ctx.clone();
+    cache_size_row.connect_value_notify(move |row| {
+        let new_value = row.value() as u32;
+        if let Some(id) = pending_cache_save.take() {
+            id.remove();
+        }
+        let ctx_for_save = ctx_for_cache.clone();
+        let pending = pending_cache_save.clone();
+        let id = glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            pending.set(None);
+            let mut cfg = ctx_for_save.config.write();
+            if cfg.data.library_thumbnail_cache_mb != new_value {
+                cfg.data.library_thumbnail_cache_mb = new_value;
+                cfg.save();
+            }
+        });
+        pending_cache_save.set(Some(id));
+    });
 
     // --- WATCH FOLDERS GROUP ---
     let folders_group = adw::PreferencesGroup::builder()
@@ -1347,14 +1389,26 @@ pub fn build_settings_window_with_parent(
         }
     ));
 
-    // If background sync is disabled, closing the settings window should exit the app.
+    // If background sync is disabled AND this is the only open window, closing
+    // settings should exit the app. When the library window is also open we
+    // must not quit — the user explicitly opened settings *from* the library
+    // and expects the library to stay around after dismissing settings.
     window.connect_close_request(clone!(
         #[strong]
         app_clone,
         #[strong]
-        background_sync_state,
+        ctx,
         move |_| {
-            if !*background_sync_state.borrow() {
+            // Read current background-sync state directly from config rather
+            // than from a shadow RefCell, so any code path that mutates the
+            // config (apply_settings, future autosave, etc.) is reflected
+            // here without a separate book-keeping step.
+            // The closing window is still in app.windows() at this point, so
+            // a count of 1 means we're the only window left — quit the app.
+            // > 1 means another window (typically the library) is open and
+            // should keep running.
+            let bg_sync = ctx.config.read().data.background_sync_enabled;
+            if !bg_sync && app_clone.windows().len() <= 1 {
                 app_clone.quit();
                 return glib::Propagation::Stop;
             }
