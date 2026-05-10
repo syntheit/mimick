@@ -2879,9 +2879,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     // Ctrl+wheel zoom on the picture area, captured before the scrolled window
     // can use it for panning. Listening on both axes so trackpad two-finger
     // scrolls (which sometimes emit horizontal deltas) still trigger zoom.
-    let zoom_scroll = gtk::EventControllerScroll::new(
-        gtk::EventControllerScrollFlags::BOTH_AXES,
-    );
+    let zoom_scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
     zoom_scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
     zoom_scroll.connect_scroll(clone!(
         #[strong]
