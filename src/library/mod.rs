@@ -1950,7 +1950,10 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                         Ok((Vec::new(), false))
                     } else {
                         let locals = enumerate_local(ui.ctx.clone()).await;
-                        Ok((locals.into_iter().map(local_to_library_asset).collect(), false))
+                        Ok((
+                            locals.into_iter().map(local_to_library_asset).collect(),
+                            false,
+                        ))
                     }
                 }
                 LibrarySource::LocalSearch { query } => {
@@ -1959,7 +1962,10 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                     } else {
                         let locals = enumerate_local(ui.ctx.clone()).await;
                         let filtered = filter_by_filename(locals, &query);
-                        Ok((filtered.into_iter().map(local_to_library_asset).collect(), false))
+                        Ok((
+                            filtered.into_iter().map(local_to_library_asset).collect(),
+                            false,
+                        ))
                     }
                 }
                 LibrarySource::Unified => {
@@ -1985,7 +1991,10 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                         match linked_entry_path_for_album(&ui, &name) {
                             Some(path) => {
                                 let locals = enumerate_local_for_entry(ui.ctx.clone(), path).await;
-                                Ok((locals.into_iter().map(local_to_library_asset).collect(), false))
+                                Ok((
+                                    locals.into_iter().map(local_to_library_asset).collect(),
+                                    false,
+                                ))
                             }
                             None => Ok((Vec::new(), false)),
                         }
