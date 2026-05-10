@@ -547,14 +547,28 @@ pub fn build_settings_window_with_parent(
         .build();
     library_group.add(&cache_size_row);
 
+    // Debounce the spinner save: a held-down arrow fires connect_value_notify
+    // many times per second, and each save takes the config write lock + does
+    // synchronous JSON serialise + atomic_write on the UI thread. We coalesce
+    // bursts by scheduling the save after 400 ms of quiet.
+    let pending_cache_save: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
     let ctx_for_cache = ctx.clone();
     cache_size_row.connect_value_notify(move |row| {
         let new_value = row.value() as u32;
-        let mut cfg = ctx_for_cache.config.write();
-        if cfg.data.library_thumbnail_cache_mb != new_value {
-            cfg.data.library_thumbnail_cache_mb = new_value;
-            cfg.save();
+        if let Some(id) = pending_cache_save.take() {
+            id.remove();
         }
+        let ctx_for_save = ctx_for_cache.clone();
+        let pending = pending_cache_save.clone();
+        let id = glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            pending.set(None);
+            let mut cfg = ctx_for_save.config.write();
+            if cfg.data.library_thumbnail_cache_mb != new_value {
+                cfg.data.library_thumbnail_cache_mb = new_value;
+                cfg.save();
+            }
+        });
+        pending_cache_save.set(Some(id));
     });
 
     // --- WATCH FOLDERS GROUP ---
@@ -1383,13 +1397,18 @@ pub fn build_settings_window_with_parent(
         #[strong]
         app_clone,
         #[strong]
-        background_sync_state,
+        ctx,
         move |_| {
+            // Read current background-sync state directly from config rather
+            // than from a shadow RefCell, so any code path that mutates the
+            // config (apply_settings, future autosave, etc.) is reflected
+            // here without a separate book-keeping step.
             // The closing window is still in app.windows() at this point, so
             // a count of 1 means we're the only window left — quit the app.
             // > 1 means another window (typically the library) is open and
             // should keep running.
-            if !*background_sync_state.borrow() && app_clone.windows().len() <= 1 {
+            let bg_sync = ctx.config.read().data.background_sync_enabled;
+            if !bg_sync && app_clone.windows().len() <= 1 {
                 app_clone.quit();
                 return glib::Propagation::Stop;
             }
