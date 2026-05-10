@@ -2314,10 +2314,7 @@ fn apply_lightbox_zoom(picture: &gtk::Picture, zoom: f64) {
     let nw = paintable.intrinsic_width();
     let nh = paintable.intrinsic_height();
     if nw > 0 && nh > 0 {
-        picture.set_size_request(
-            (nw as f64 * zoom) as i32,
-            (nh as f64 * zoom) as i32,
-        );
+        picture.set_size_request((nw as f64 * zoom) as i32, (nh as f64 * zoom) as i32);
     }
 }
 
@@ -2575,7 +2572,11 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
 
             // Pick the *inactive* picture to load into, then transition to it.
             let target_is_a = !active_a.get();
-            let target = if target_is_a { picture_a.clone() } else { picture_b.clone() };
+            let target = if target_is_a {
+                picture_a.clone()
+            } else {
+                picture_b.clone()
+            };
             zoom_level.set(1.0);
             apply_lightbox_zoom(&target, 1.0);
             pic_stack.set_transition_type(match nav_dir.get() {
@@ -2707,7 +2708,11 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         picture_b,
         move || -> gtk::Picture {
-            if active_a.get() { picture_a.clone() } else { picture_b.clone() }
+            if active_a.get() {
+                picture_a.clone()
+            } else {
+                picture_b.clone()
+            }
         }
     );
 
@@ -2755,7 +2760,9 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         move |_, key, _, mods| {
             let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             match (ctrl, key) {
-                (true, gtk::gdk::Key::plus) | (true, gtk::gdk::Key::equal) | (true, gtk::gdk::Key::KP_Add) => {
+                (true, gtk::gdk::Key::plus)
+                | (true, gtk::gdk::Key::equal)
+                | (true, gtk::gdk::Key::KP_Add) => {
                     (*zoom_by)(1.2);
                     glib::Propagation::Stop
                 }
