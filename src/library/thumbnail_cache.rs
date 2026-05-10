@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use gdk4::Texture;
 use gdk4::prelude::TextureExt;
@@ -106,6 +107,8 @@ pub struct ThumbnailCache {
 
 impl ThumbnailCache {
     const DEFAULT_MAX_BYTES: usize = 80 * 1024 * 1024;
+    const DISK_CAP_BYTES: u64 = 1024 * 1024 * 1024;
+    const DISK_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
 
     pub fn with_capacity_mb(api_client: std::sync::Arc<ImmichApiClient>, mb: u32) -> Self {
         let cache_dir = dirs::cache_dir()
@@ -126,8 +129,29 @@ impl ThumbnailCache {
             load_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_LOADS)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
         };
-        let _ = cache.prune_disk_cache(500 * 1024 * 1024);
+        let _ = cache.prune_disk_cache(Self::DISK_CAP_BYTES);
         cache
+    }
+
+    /// Spawn a background task that prunes the on-disk thumbnail cache on an
+    /// interval. The task holds only a `Weak<Self>` so the cache can drop
+    /// normally; the loop exits as soon as the upgrade fails.
+    pub fn spawn_disk_prune_task(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Self::DISK_PRUNE_INTERVAL);
+            ticker.tick().await; // skip the immediate first tick (constructor already pruned)
+            loop {
+                ticker.tick().await;
+                let Some(cache) = Weak::upgrade(&weak) else {
+                    break;
+                };
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = cache.prune_disk_cache(Self::DISK_CAP_BYTES);
+                })
+                .await;
+            }
+        });
     }
 
     #[cfg(test)]

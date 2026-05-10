@@ -10,9 +10,10 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 
 fn upload_progress_callback(
     shared_state: &Arc<parking_lot::Mutex<AppState>>,
@@ -72,6 +73,8 @@ pub struct QueueManager {
     policy: Arc<parking_lot::Mutex<EnvironmentPolicy>>,
     worker_limit: Arc<AtomicUsize>,
     batch_notify_state: Arc<parking_lot::Mutex<BatchNotifyState>>,
+    accepting_new: Arc<AtomicBool>,
+    shutdown_token: CancellationToken,
 }
 
 #[derive(Debug, Default)]
@@ -138,6 +141,8 @@ impl QueueManager {
         let batch_notify_state = Arc::new(parking_lot::Mutex::new(BatchNotifyState::default()));
         let connectivity_lost_notified = Arc::new(parking_lot::Mutex::new(false));
         let consecutive_failures = Arc::new(parking_lot::Mutex::new(0usize));
+        let accepting_new = Arc::new(AtomicBool::new(true));
+        let shutdown_token = CancellationToken::new();
 
         let qm = Self {
             sender: tx,
@@ -148,6 +153,8 @@ impl QueueManager {
             policy: policy_ref.clone(),
             worker_limit: worker_limit.clone(),
             batch_notify_state: batch_notify_state.clone(),
+            accepting_new: accepting_new.clone(),
+            shutdown_token: shutdown_token.clone(),
         };
 
         for i in 0..MAX_WORKERS {
@@ -163,17 +170,26 @@ impl QueueManager {
             let consec_fail_ref = consecutive_failures.clone();
             let policy_ref = policy_ref.clone();
             let worker_limit_ref = worker_limit.clone();
+            let cancel = shutdown_token.clone();
 
             tokio::spawn(async move {
                 log::debug!("Worker {} started", i);
                 loop {
                     while i >= worker_limit_ref.load(Ordering::Relaxed) {
+                        if cancel.is_cancelled() {
+                            log::debug!("Worker {} cancelled while throttled, exiting.", i);
+                            return;
+                        }
                         tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                     }
 
-                    let task = {
-                        let mut receiver = rx_clone.lock().await;
-                        receiver.recv().await
+                    let task = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => None,
+                        msg = async {
+                            let mut receiver = rx_clone.lock().await;
+                            receiver.recv().await
+                        } => msg,
                     };
 
                     match task {
@@ -222,12 +238,21 @@ impl QueueManager {
                             );
 
                             let t_start = std::time::Instant::now();
-                            let sync_target = handle_upload(
-                                &api,
-                                &file_task,
-                                upload_progress_callback(&state_ref, file_task.path.clone()),
-                            )
-                            .await;
+                            let sync_target = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    log::warn!(
+                                        "Upload cancelled by shutdown: {}",
+                                        file_task.path
+                                    );
+                                    None
+                                }
+                                res = handle_upload(
+                                    &api,
+                                    &file_task,
+                                    upload_progress_callback(&state_ref, file_task.path.clone()),
+                                ) => res,
+                            };
                             let success = sync_target.is_some();
                             let elapsed = t_start.elapsed().as_secs_f32();
                             let active_route = api.active_route_label().await;
@@ -494,6 +519,10 @@ impl QueueManager {
 
     /// Add a file task to the upload queue and return whether it was accepted.
     pub async fn add_to_queue(&self, task: FileTask) -> bool {
+        if !self.accepting_new.load(Ordering::Relaxed) {
+            log::debug!("Refusing new task during shutdown: {}", task.path);
+            return false;
+        }
         log::debug!("Queuing: {}", task.path);
         {
             let mut pending = self.pending_paths.lock();
@@ -637,6 +666,45 @@ impl QueueManager {
         } else {
             false
         }
+    }
+
+    /// Stop accepting new tasks, wait up to `deadline` for active uploads
+    /// to finish, then hard-cancel anything still in flight.
+    ///
+    /// In-flight uploads that get cancelled at the deadline land in the retry
+    /// list (treated as failures) so `flush_retries` will persist them for the
+    /// next session.
+    pub async fn shutdown(&self, deadline: Duration) {
+        self.accepting_new.store(false, Ordering::Relaxed);
+        let active_now = self.shared_state.lock().active_workers;
+        if active_now == 0 {
+            self.shutdown_token.cancel();
+            return;
+        }
+        log::info!(
+            "Draining {} active upload(s); waiting up to {:?}...",
+            active_now,
+            deadline
+        );
+
+        let start = Instant::now();
+        while start.elapsed() < deadline {
+            if self.shared_state.lock().active_workers == 0 {
+                log::info!("All active uploads finished within deadline.");
+                self.shutdown_token.cancel();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let stuck = self.shared_state.lock().active_workers;
+        log::warn!(
+            "Shutdown deadline exceeded; cancelling {} in-flight upload(s).",
+            stuck
+        );
+        self.shutdown_token.cancel();
+        // Brief grace so cancelled futures can record themselves as failed before flush.
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
     /// Persist any in-memory retry items so they survive a clean shutdown.
@@ -983,6 +1051,8 @@ mod tests {
                 })),
                 worker_limit: Arc::new(AtomicUsize::new(1)),
                 batch_notify_state: Arc::new(Mutex::new(BatchNotifyState::default())),
+                accepting_new: Arc::new(AtomicBool::new(true)),
+                shutdown_token: CancellationToken::new(),
             },
             rx,
             shared_state,

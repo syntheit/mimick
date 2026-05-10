@@ -1713,72 +1713,7 @@ fn classify_network_issue(context: RequestContext, error: &reqwest::Error) -> Ap
 }
 
 fn mime_for_path(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .as_deref()
-    {
-        // Standard image formats
-        Some("avif") => "image/avif",
-        Some("bmp") => "image/bmp",
-        Some("gif") => "image/gif",
-        Some("heic") => "image/heic",
-        Some("heif" | "hif") => "image/heif",
-        Some("insp" | "jpe" | "jpeg" | "jpg") => "image/jpeg",
-        Some("jp2") => "image/jp2",
-        Some("jxl") => "image/jxl",
-        Some("png") => "image/png",
-        Some("mpo") => "image/jpeg",
-        Some("psd") => "image/vnd.adobe.photoshop",
-        Some("svg") => "image/svg+xml",
-        Some("tif" | "tiff") => "image/tiff",
-        Some("webp") => "image/webp",
-        // RAW camera formats — Immich treats most as image/x-<vendor>; fall through to
-        // application/octet-stream is safe but vendor-specific MIME helps the server pick
-        // the right pipeline (libraw vs. dcraw) on older Immich builds.
-        Some("3fr") => "image/x-hasselblad-3fr",
-        Some("ari") => "image/x-arriflex-ari",
-        Some("arw") => "image/x-sony-arw",
-        Some("cap") => "image/x-phaseone-cap",
-        Some("cin") => "image/cineon",
-        Some("cr2") => "image/x-canon-cr2",
-        Some("cr3") => "image/x-canon-cr3",
-        Some("crw") => "image/x-canon-crw",
-        Some("dcr") => "image/x-kodak-dcr",
-        Some("dng") => "image/x-adobe-dng",
-        Some("erf") => "image/x-epson-erf",
-        Some("fff") => "image/x-hasselblad-fff",
-        Some("iiq") => "image/x-phaseone-iiq",
-        Some("k25") => "image/x-kodak-k25",
-        Some("kdc") => "image/x-kodak-kdc",
-        Some("mrw") => "image/x-minolta-mrw",
-        Some("nef") => "image/x-nikon-nef",
-        Some("nrw") => "image/x-nikon-nrw",
-        Some("orf" | "ori") => "image/x-olympus-orf",
-        Some("pef") => "image/x-pentax-pef",
-        Some("raf") => "image/x-fuji-raf",
-        Some("raw") => "image/x-panasonic-raw",
-        Some("rw2") => "image/x-panasonic-rw2",
-        Some("rwl") => "image/x-leica-rwl",
-        Some("sr2" | "srf") => "image/x-sony-sr2",
-        Some("srw") => "image/x-samsung-srw",
-        Some("x3f") => "image/x-sigma-x3f",
-        // Video formats
-        Some("3gp" | "3gpp") => "video/3gpp",
-        Some("avi") => "video/x-msvideo",
-        Some("flv") => "video/x-flv",
-        Some("insv" | "mp4") => "video/mp4",
-        Some("m2t" | "m2ts" | "mts" | "ts") => "video/mp2t",
-        Some("m4v") => "video/x-m4v",
-        Some("mkv") => "video/x-matroska",
-        Some("mpe" | "mpeg" | "mpg") => "video/mpeg",
-        Some("mov") => "video/quicktime",
-        Some("mxf") => "application/mxf",
-        Some("vob") => "video/dvd",
-        Some("webm") => "video/webm",
-        Some("wmv") => "video/x-ms-wmv",
-        _ => "application/octet-stream",
-    }
+    crate::media_kinds::mime_for_path(path)
 }
 
 async fn apply_asset_timezone_fixup(

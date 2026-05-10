@@ -14,6 +14,7 @@ mod autostart;
 mod config;
 mod diagnostics;
 mod library;
+mod media_kinds;
 mod monitor;
 mod notifications;
 mod queue_manager;
@@ -291,6 +292,7 @@ async fn main() {
             api_client.clone(),
             config.data.library_thumbnail_cache_mb,
         ));
+        thumbnail_cache.spawn_disk_prune_task();
         let library_state = Arc::new(parking_lot::Mutex::new(LibraryState::new()));
         let shared_config = Arc::new(parking_lot::RwLock::new(config));
         let ctx = Arc::new(AppContext {
@@ -602,6 +604,9 @@ async fn main() {
     // Persist final state and any pending retries on graceful shutdown.
     if is_primary_instance.load(Ordering::SeqCst) {
         if let Some(ctx) = APP_CONTEXT.get() {
+            ctx.queue_manager
+                .shutdown(std::time::Duration::from_secs(5))
+                .await;
             ctx.queue_manager.flush_retries();
         }
         let state = APP_CONTEXT
