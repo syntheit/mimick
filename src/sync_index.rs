@@ -89,9 +89,8 @@ impl ShardedSyncIndex {
     /// from the old cache location on first run so users who clear the
     /// system cache don't lose sync state and trigger a full re-upload.
     pub fn new() -> Self {
-        let index_file = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("mimick")
+        let index_file = crate::profile::data_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp").join(crate::profile::dir_segment()))
             .join("synced_index.json");
 
         migrate_from_cache_dir(&index_file);
@@ -239,8 +238,7 @@ fn migrate_from_cache_dir(new_path: &Path) {
     if new_path.exists() {
         return;
     }
-    let Some(old_path) = dirs::cache_dir().map(|d| d.join("mimick").join("synced_index.json"))
-    else {
+    let Some(old_path) = crate::profile::cache_dir().map(|d| d.join("synced_index.json")) else {
         return;
     };
     if !old_path.exists() {

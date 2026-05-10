@@ -111,9 +111,8 @@ impl ThumbnailCache {
     const DISK_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
 
     pub fn with_capacity_mb(api_client: std::sync::Arc<ImmichApiClient>, mb: u32) -> Self {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("mimick")
+        let cache_dir = crate::profile::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp").join(crate::profile::dir_segment()))
             .join("thumbnails");
 
         let max_bytes = if mb == 0 {

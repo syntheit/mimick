@@ -54,7 +54,9 @@ Tests in Rust are written inline within identical files to the logic they test, 
 | `src/library/state.rs` | `mod tests` | Tests pagination reset rules, search clearing behaviors, and duplicate request suppression. |
 | `src/library/thumbnail_cache.rs` | `mod tests` | Tests ThumbHash hit/miss logic, memory eviction budgets, and disk removal. |
 | `src/main.rs` | `mod tests` | Tests live-queue watch-path selection so nested folders use the most specific configured target. |
+| `src/media_kinds.rs` | `mod tests` | Tests that every supported extension maps to a MIME entry, that uppercase extensions normalise correctly, and that unknown extensions fall back to `application/octet-stream`. |
 | `src/monitor.rs` | `mod tests` | Tests monitor-side filtering such as temporary-file detection, media extension matching, and SHA-1 checksum computation. |
+| `src/profile.rs` | `mod tests` | Tests profile name sanitisation: valid names, path-traversal rejection, D-Bus letter-start requirement, length cap, and whitespace trimming. |
 | `src/queue_manager.rs` | `mod tests` | Tests duplicate queue prevention, retry persistence, failed-queue clearing, and manual retry requeueing. |
 | `src/runtime_env.rs` | `mod tests` | Tests metered-network parsing and battery-power decision logic without depending on the host system. |
 | `src/settings_window.rs` | `mod tests` | Tests pure-logic helpers used by the settings UI such as config field validation. |

@@ -14,12 +14,10 @@ pub fn export_bundle(
     state: &AppState,
     config: &Config,
 ) -> io::Result<PathBuf> {
-    let cache_root = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("mimick");
-    let data_root = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("mimick");
+    let cache_root = crate::profile::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp").join(crate::profile::dir_segment()));
+    let data_root = crate::profile::data_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp").join(crate::profile::dir_segment()));
     export_bundle_with_paths(destination_root, state, config, &cache_root, &data_root)
 }
 

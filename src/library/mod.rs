@@ -1299,9 +1299,8 @@ async fn ensure_original_asset_path(
     } else {
         asset_id
     };
-    let cache_dir = dirs::cache_dir()
+    let cache_dir = crate::profile::cache_dir()
         .ok_or_else(|| "Could not locate a cache directory.".to_string())?
-        .join("mimick")
         .join("open-in");
     let _ = std::fs::create_dir_all(&cache_dir);
     let safe_name =
@@ -2437,8 +2436,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     return;
                 }
                 if full_res {
-                    if let Some(cache_dir) =
-                        dirs::cache_dir().map(|p| p.join("mimick").join("preview"))
+                    if let Some(cache_dir) = crate::profile::cache_dir().map(|p| p.join("preview"))
                     {
                         let _ = std::fs::create_dir_all(&cache_dir);
                         let temp = cache_dir.join(format!("{}.bin", asset_id));
@@ -2710,7 +2708,7 @@ fn open_local_with_default_app(path: &str) {
 
 fn spawn_video_handoff(ui: Rc<LibraryWindowUi>, asset_id: String, filename: String) {
     glib::MainContext::default().spawn_local(async move {
-        let Some(cache_dir) = dirs::cache_dir().map(|p| p.join("mimick").join("video")) else {
+        let Some(cache_dir) = crate::profile::cache_dir().map(|p| p.join("video")) else {
             return;
         };
         let _ = std::fs::create_dir_all(&cache_dir);
