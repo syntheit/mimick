@@ -2301,21 +2301,40 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
-/// Apply the current zoom level to the given Picture by overriding its size
-/// request when zoomed in, or letting it fit naturally at 1.0.
-fn apply_lightbox_zoom(picture: &gtk::Picture, zoom: f64) {
-    if zoom <= 1.001 {
+/// Apply zoom to a lightbox Picture. Zoom is fit-relative: 1.0 = the size the
+/// texture would occupy inside `viewer` under Contain layout. < 1.0 leaves
+/// margin around the picture; > 1.0 overflows the viewer for panning. At
+/// exactly 1.0 we restore (-1, -1) and re-enable hexpand so the picture
+/// auto-resizes with the window.
+fn apply_lightbox_zoom(picture: &gtk::Picture, viewer: &gtk::ScrolledWindow, zoom: f64) {
+    if (zoom - 1.0).abs() < 0.001 {
+        picture.set_hexpand(true);
+        picture.set_vexpand(true);
         picture.set_size_request(-1, -1);
         return;
     }
     let Some(paintable) = picture.paintable() else {
+        picture.set_hexpand(true);
+        picture.set_vexpand(true);
+        picture.set_size_request(-1, -1);
         return;
     };
-    let nw = paintable.intrinsic_width();
-    let nh = paintable.intrinsic_height();
-    if nw > 0 && nh > 0 {
-        picture.set_size_request((nw as f64 * zoom) as i32, (nh as f64 * zoom) as i32);
-    }
+    let nw = paintable.intrinsic_width().max(1) as f64;
+    let nh = paintable.intrinsic_height().max(1) as f64;
+    let viewer_w = viewer.width().max(1) as f64;
+    let viewer_h = viewer.height().max(1) as f64;
+    let texture_aspect = nw / nh;
+    let viewer_aspect = viewer_w / viewer_h;
+    let (fit_w, fit_h) = if viewer_aspect > texture_aspect {
+        (viewer_h * texture_aspect, viewer_h)
+    } else {
+        (viewer_w, viewer_w / texture_aspect)
+    };
+    // Disable expansion so a sub-100% size_request actually shrinks the
+    // picture (with halign/valign Center keeping it centred in the viewer).
+    picture.set_hexpand(false);
+    picture.set_vexpand(false);
+    picture.set_size_request((fit_w * zoom) as i32, (fit_h * zoom) as i32);
 }
 
 fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
@@ -2367,11 +2386,15 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .content_fit(gtk::ContentFit::Contain)
         .vexpand(true)
         .hexpand(true)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
         .build();
     let picture_b = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Contain)
         .vexpand(true)
         .hexpand(true)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
         .build();
     let pic_stack = gtk::Stack::builder()
         .transition_duration(180)
@@ -2557,6 +2580,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let pic_stack = pic_stack.clone();
         let picture_a = picture_a.clone();
         let picture_b = picture_b.clone();
+        let scrolled_picture = scrolled_picture.clone();
         let active_a = active_a.clone();
         let zoom_level = zoom_level.clone();
         let zoom_reset_btn = zoom_reset_btn.clone();
@@ -2603,7 +2627,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 picture_b.clone()
             };
             zoom_level.set(1.0);
-            apply_lightbox_zoom(&target, 1.0);
+            apply_lightbox_zoom(&target, &scrolled_picture, 1.0);
             zoom_reset_btn.set_label("100%");
             pic_stack.set_transition_type(match nav_dir.get() {
                 1 => gtk::StackTransitionType::SlideLeft,
@@ -2742,18 +2766,71 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         }
     );
 
+    // Track cursor position over the picture area so zoom can be focal-point
+    // aware. None when the cursor is outside the viewer; falls back to centre.
+    let cursor_pos: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_motion(clone!(
+        #[strong]
+        cursor_pos,
+        move |_, x, y| {
+            cursor_pos.set(Some((x, y)));
+        }
+    ));
+    motion.connect_leave(clone!(
+        #[strong]
+        cursor_pos,
+        move |_| {
+            cursor_pos.set(None);
+        }
+    ));
+    scrolled_picture.add_controller(motion);
+
     let set_zoom = Rc::new(clone!(
         #[strong]
         zoom_level,
         #[strong]
         active_picture,
         #[strong]
+        scrolled_picture,
+        #[strong]
         zoom_reset_btn,
+        #[strong]
+        cursor_pos,
         move |z: f64| {
-            let z = z.clamp(0.1, 10.0);
-            zoom_level.set(z);
-            apply_lightbox_zoom(&active_picture(), z);
-            zoom_reset_btn.set_label(&format!("{}%", (z * 100.0).round() as i32));
+            let z_new = z.clamp(0.1, 10.0);
+            let z_old = zoom_level.get();
+            if (z_new - z_old).abs() < 0.0001 {
+                zoom_reset_btn.set_label(&format!("{}%", (z_new * 100.0).round() as i32));
+                return;
+            }
+
+            // Pick the focal point: cursor if inside the viewer, else centre.
+            let viewer_w = scrolled_picture.width().max(1) as f64;
+            let viewer_h = scrolled_picture.height().max(1) as f64;
+            let (fx, fy) = cursor_pos
+                .get()
+                .filter(|&(x, y)| x >= 0.0 && y >= 0.0 && x <= viewer_w && y <= viewer_h)
+                .unwrap_or((viewer_w / 2.0, viewer_h / 2.0));
+
+            let hadj = scrolled_picture.hadjustment();
+            let vadj = scrolled_picture.vadjustment();
+            let scroll_x = hadj.value();
+            let scroll_y = vadj.value();
+            let ratio = z_new / z_old.max(0.0001);
+            let target_scroll_x = (scroll_x + fx) * ratio - fx;
+            let target_scroll_y = (scroll_y + fy) * ratio - fy;
+
+            zoom_level.set(z_new);
+            apply_lightbox_zoom(&active_picture(), &scrolled_picture, z_new);
+            zoom_reset_btn.set_label(&format!("{}%", (z_new * 100.0).round() as i32));
+
+            // Defer scroll-position update until after layout has run, so the
+            // ScrolledWindow's adjustment ranges reflect the new picture size.
+            glib::idle_add_local_once(move || {
+                hadj.set_value(target_scroll_x);
+                vadj.set_value(target_scroll_y);
+            });
         }
     ));
 
