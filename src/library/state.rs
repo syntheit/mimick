@@ -208,6 +208,25 @@ impl LibraryState {
     }
 
     pub fn replace_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
+        let has_more = items.len() >= PAGE_SIZE;
+        self.replace_assets_with_more(generation, items, has_more)
+    }
+
+    pub fn append_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
+        let has_more = items.len() >= PAGE_SIZE;
+        self.append_assets_with_more(generation, items, has_more)
+    }
+
+    /// `replace_assets` with an explicit has_more signal — used by search
+    /// endpoints that return Immich's `nextPage` field, since the page-size
+    /// heuristic is wrong when the server returns short pages due to
+    /// post-filtering (visibility, archive, etc.).
+    pub fn replace_assets_with_more(
+        &mut self,
+        generation: u64,
+        items: Vec<LibraryAsset>,
+        has_more: bool,
+    ) -> bool {
         if generation != self.generation {
             return false;
         }
@@ -215,7 +234,7 @@ impl LibraryState {
         self.assets = dedup_assets(items);
         self.page_in_flight = false;
         self.next_page = 2;
-        self.has_more = self.assets.len() >= PAGE_SIZE;
+        self.has_more = has_more;
         self.load_state = if self.assets.is_empty() {
             LibraryLoadState::Empty
         } else {
@@ -225,7 +244,12 @@ impl LibraryState {
         true
     }
 
-    pub fn append_assets(&mut self, generation: u64, items: Vec<LibraryAsset>) -> bool {
+    pub fn append_assets_with_more(
+        &mut self,
+        generation: u64,
+        items: Vec<LibraryAsset>,
+        has_more: bool,
+    ) -> bool {
         if generation != self.generation {
             return false;
         }
@@ -238,7 +262,7 @@ impl LibraryState {
         if page_len > 0 {
             self.next_page = self.next_page.saturating_add(1);
         }
-        self.has_more = page_len >= PAGE_SIZE;
+        self.has_more = has_more;
         self.load_state = if self.assets.is_empty() {
             LibraryLoadState::Empty
         } else {

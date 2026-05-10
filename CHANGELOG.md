@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Search pagination — particularly OCR search — now uses Immich's `nextPage` field as the source of truth instead of a "did we get a full page?" heuristic. Previously, when Immich's search response post-filtered results (for visibility, archive, library scope) it returned short pages even with more matches available, causing pagination to stop early and hide the rest. Applies to all four search endpoints (Smart, OCR, Metadata, Advanced) and to album/unified variants that route through the same endpoint.
 - Closing the settings window no longer also closes the library window when background sync is disabled. The "quit when settings closes" path now checks for other open application windows first and only quits when settings was the only window left.
 - Settings: the "Enable Library View" toggle, "Open Originals in Lightbox" toggle, and "Thumbnail Memory Cache (MB)" spinner now save immediately on change instead of requiring a click on the connection-save button. Each handler skips the disk write when the value matches the existing config (avoids redundant writes during initial population).
 - Settings: the connection-save button has been renamed from "Save Connection Settings" to "Save Credentials" so the action label matches what the field group is actually about (URL + API key).

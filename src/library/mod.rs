@@ -1904,7 +1904,7 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
         async move {
             let (generation, source, page) = request;
             let order = ui.ctx.library_state.lock().sort_mode.server_order();
-            let result: Result<Vec<LibraryAsset>, String> = match source.clone() {
+            let result: Result<(Vec<LibraryAsset>, bool), String> = match source.clone() {
                 LibrarySource::AllAssets | LibrarySource::Timeline => {
                     ui.ctx
                         .api_client
@@ -1947,19 +1947,25 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                 LibrarySource::LocalAll => {
                     // Local enumeration is bounded — single synthetic page.
                     if page > 1 {
-                        Ok(Vec::new())
+                        Ok((Vec::new(), false))
                     } else {
                         let locals = enumerate_local(ui.ctx.clone()).await;
-                        Ok(locals.into_iter().map(local_to_library_asset).collect())
+                        Ok((
+                            locals.into_iter().map(local_to_library_asset).collect(),
+                            false,
+                        ))
                     }
                 }
                 LibrarySource::LocalSearch { query } => {
                     if page > 1 {
-                        Ok(Vec::new())
+                        Ok((Vec::new(), false))
                     } else {
                         let locals = enumerate_local(ui.ctx.clone()).await;
                         let filtered = filter_by_filename(locals, &query);
-                        Ok(filtered.into_iter().map(local_to_library_asset).collect())
+                        Ok((
+                            filtered.into_iter().map(local_to_library_asset).collect(),
+                            false,
+                        ))
                     }
                 }
                 LibrarySource::Unified => {
@@ -1980,14 +1986,17 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                 }
                 LibrarySource::AlbumLocal { name, .. } => {
                     if page > 1 {
-                        Ok(Vec::new())
+                        Ok((Vec::new(), false))
                     } else {
                         match linked_entry_path_for_album(&ui, &name) {
                             Some(path) => {
                                 let locals = enumerate_local_for_entry(ui.ctx.clone(), path).await;
-                                Ok(locals.into_iter().map(local_to_library_asset).collect())
+                                Ok((
+                                    locals.into_iter().map(local_to_library_asset).collect(),
+                                    false,
+                                ))
                             }
-                            None => Ok(Vec::new()),
+                            None => Ok((Vec::new(), false)),
                         }
                     }
                 }
@@ -2002,13 +2011,13 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
             };
 
             match result {
-                Ok(items) => {
+                Ok((items, has_more)) => {
                     {
                         let mut state = ui.ctx.library_state.lock();
                         let applied = if append {
-                            state.append_assets(generation, items)
+                            state.append_assets_with_more(generation, items, has_more)
                         } else {
-                            state.replace_assets(generation, items)
+                            state.replace_assets_with_more(generation, items, has_more)
                         };
                         if !applied {
                             return;
@@ -3350,14 +3359,14 @@ fn local_to_library_asset(local: LocalAsset) -> LibraryAsset {
 }
 
 async fn merge_unified_page(
-    remote: Result<Vec<LibraryAsset>, String>,
+    remote: Result<(Vec<LibraryAsset>, bool), String>,
     page: u32,
     ui: &Rc<LibraryWindowUi>,
     query: Option<&str>,
-) -> Result<Vec<LibraryAsset>, String> {
-    let mut remote = remote?;
+) -> Result<(Vec<LibraryAsset>, bool), String> {
+    let (mut remote, has_more) = remote?;
     if page > 1 {
-        return Ok(remote);
+        return Ok((remote, has_more));
     }
 
     let mut locals = enumerate_local(ui.ctx.clone()).await;
@@ -3381,7 +3390,7 @@ async fn merge_unified_page(
         .collect();
 
     local_rows.append(&mut remote);
-    Ok(local_rows)
+    Ok((local_rows, has_more))
 }
 
 /// Return the path of the watch entry linked to `album_name`, if any.
@@ -3394,14 +3403,14 @@ fn linked_entry_path_for_album(ui: &Rc<LibraryWindowUi>, album_name: &str) -> Op
 /// page from the remote API and overlays sync state from the album's
 /// linked local folder only — never from siblings.
 async fn merge_album_unified_page(
-    remote: Result<Vec<LibraryAsset>, String>,
+    remote: Result<(Vec<LibraryAsset>, bool), String>,
     page: u32,
     ui: &Rc<LibraryWindowUi>,
     album_name: &str,
-) -> Result<Vec<LibraryAsset>, String> {
-    let mut remote = remote?;
+) -> Result<(Vec<LibraryAsset>, bool), String> {
+    let (mut remote, has_more) = remote?;
     if page > 1 {
-        return Ok(remote);
+        return Ok((remote, has_more));
     }
 
     let locals = match linked_entry_path_for_album(ui, album_name) {
@@ -3425,7 +3434,7 @@ async fn merge_album_unified_page(
         .collect();
 
     local_rows.append(&mut remote);
-    Ok(local_rows)
+    Ok((local_rows, has_more))
 }
 
 fn connect_filters_button(ui: Rc<LibraryWindowUi>, filters_button: gtk::Button) {
