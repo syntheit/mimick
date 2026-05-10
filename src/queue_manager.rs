@@ -110,9 +110,8 @@ impl QueueManager {
         let rx = Arc::new(Mutex::new(rx));
 
         let retry_path = {
-            let mut p = dirs::cache_dir()
-                .unwrap_or_else(|| PathBuf::from("~/.cache"))
-                .join("mimick");
+            let mut p = crate::profile::cache_dir()
+                .unwrap_or_else(|| PathBuf::from("~/.cache").join(crate::profile::dir_segment()));
             p.push("retries.json");
             p
         };

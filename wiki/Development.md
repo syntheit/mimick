@@ -40,12 +40,71 @@ cargo run
 cargo run -- --settings
 ```
 
+## Profile Switcher
+
+Mimick supports isolated runtime profiles via the `MIMICK_PROFILE` environment
+variable. Each profile gets its own config, sync index, retry queue, thumbnail
+cache, and keyring entry — letting you run a dev Immich instance without
+touching your personal library.
+
+### Rules
+
+| Rule | Detail |
+|---|---|
+| **Name format** | `[A-Za-z][A-Za-z0-9_-]{0,31}` — must start with a letter (D-Bus name requirement) |
+| **Default** | No env var → uses `mimick/` dirs and `api_key` keyring entry |
+| **Named** | `MIMICK_PROFILE=dev` → uses `mimick-dev/` dirs and `api_key-dev` keyring entry |
+
+### State isolation
+
+| State | Default path | Named-profile path |
+|---|---|---|
+| Config | `~/.config/mimick/config.json` | `~/.config/mimick-dev/config.json` |
+| Sync index | `~/.local/share/mimick/synced_index.json` | `~/.local/share/mimick-dev/synced_index.json` |
+| Retries | `~/.cache/mimick/retries.json` | `~/.cache/mimick-dev/retries.json` |
+| Logs | `~/.cache/mimick/mimick.log` | `~/.cache/mimick-dev/mimick.log` |
+| Thumbnails | `~/.cache/mimick/thumbnails/` | `~/.cache/mimick-dev/thumbnails/` |
+| Keyring entry | `account=api_key` | `account=api_key-dev` |
+
+Inside the Flatpak all paths sit under `~/.var/app/dev.nicx.mimick/` — the
+table above shows relative structure within that root.
+
+### Running a named profile
+
+```bash
+# Local build
+MIMICK_PROFILE=dev cargo run
+
+# Installed Flatpak
+flatpak run --env=MIMICK_PROFILE=dev dev.nicx.mimick
+```
+
+Both profiles can run simultaneously. The GTK `application_id` is set to
+`dev.nicx.mimick.{profile}` for named profiles, so they register as separate
+D-Bus instances and don't activate each other's windows.
+
+### What is NOT isolated
+
+| Resource | Behaviour |
+|---|---|
+| **Portal folder grants** | Shared by Flatpak app-id (`dev.nicx.mimick`). A folder granted to prod is accessible to dev — convenient, not a security boundary. |
+| **XDG autostart entry** | Always refers to the default profile's launch command. |
+| **Installed icons / resources** | Both profiles read from the same Flatpak `/app/` mount. |
+
+A startup log line confirms the active profile:
+
+```
+Active profile: dev (state dirs use segment 'mimick-dev')
+```
+
+---
+
 ## Logging
 
 Mimick uses `flexi_logger` and writes logs to both:
 
 - stdout
-- `~/.cache/mimick/mimick.log`
+- `~/.cache/mimick/mimick.log` (or `~/.cache/mimick-{profile}/mimick.log` for named profiles)
 
 Detailed timestamps are enabled for both outputs.
 Console logs are colorized by level (error/warn/info/debug/trace).

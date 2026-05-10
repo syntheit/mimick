@@ -17,6 +17,7 @@ mod library;
 mod media_kinds;
 mod monitor;
 mod notifications;
+mod profile;
 mod queue_manager;
 mod runtime_env;
 mod sanitize;
@@ -91,9 +92,8 @@ fn detailed_colored_format(
 #[tokio::main]
 async fn main() {
     // Mirror logs to stdout and to a rotating cache file for easier support/debugging.
-    let log_dir = dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("mimick");
+    let log_dir = profile::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp").join(profile::dir_segment()));
 
     let _logger = Logger::try_with_env_or_str("info")
         .expect("Failed to parse log level")
@@ -117,11 +117,19 @@ async fn main() {
         .start()
         .expect("Failed to initialize logger");
 
+    if let Some(name) = profile::name() {
+        log::info!(
+            "Active profile: {} (state dirs use segment '{}')",
+            name,
+            profile::dir_segment()
+        );
+    }
+
     gtk::gio::resources_register_include!("mimick.gresource")
         .expect("Failed to register bundled GResource");
 
     let app = adw::Application::builder()
-        .application_id("dev.nicx.mimick")
+        .application_id(profile::application_id())
         .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Configurable test-asset generator script for reproducing deduplication and startup scan benchmarks across all supported API asset formats (#101).
 - Graceful shutdown for in-flight uploads. Quitting the app now stops accepting new tasks, waits up to 5 seconds for active uploads to finish cleanly, then cancels anything still in flight via a cancellation token. Uploads cancelled at the deadline are persisted to the retry queue and resumed on the next launch instead of leaving partial assets on the server.
+- Profile switcher for development and testing via the `MIMICK_PROFILE` environment variable. Each named profile (`MIMICK_PROFILE=dev`) gets fully isolated state: its own config file, sync index, retry queue, thumbnail cache, and keyring entry. The GTK application id is varied per profile so multiple profiles can run simultaneously without activating each other's windows. Portal folder grants are shared across profiles since they are scoped to the Flatpak app-id.
 
 ### Changed
 

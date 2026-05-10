@@ -226,9 +226,8 @@ pub struct Config {
 impl Config {
     /// Load the config from the standard Mimick config path, creating a default file if missing.
     pub fn new() -> Self {
-        let config_dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("~/.config"))
-            .join("mimick");
+        let config_dir = crate::profile::config_dir()
+            .unwrap_or_else(|| PathBuf::from("~/.config").join(crate::profile::dir_segment()));
 
         let config_file = config_dir.join("config.json");
 
@@ -292,7 +291,9 @@ impl Config {
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let keyring = oo7::Keyring::new().await?;
-                let attributes = vec![("service", "mimick"), ("account", "api_key")];
+                let account = crate::profile::keyring_account();
+                let attributes: Vec<(&str, &str)> =
+                    vec![("service", "mimick"), ("account", account.as_str())];
                 let items = keyring.search_items(&attributes).await?;
                 if let Some(item) = items.first() {
                     let secret = item.secret().await?;
@@ -325,9 +326,15 @@ impl Config {
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let keyring = oo7::Keyring::new().await?;
-                let attributes = vec![("service", "mimick"), ("account", "api_key")];
+                let account = crate::profile::keyring_account();
+                let attributes: Vec<(&str, &str)> =
+                    vec![("service", "mimick"), ("account", account.as_str())];
+                let label = match crate::profile::name() {
+                    Some(profile) => format!("Mimick API Key ({})", profile),
+                    None => "Mimick API Key".to_string(),
+                };
                 keyring
-                    .create_item("Mimick API Key", &attributes, secret.as_bytes(), true)
+                    .create_item(&label, &attributes, secret.as_bytes(), true)
                     .await?;
                 Ok::<(), oo7::Error>(())
             })

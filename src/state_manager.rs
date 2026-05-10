@@ -440,10 +440,9 @@ pub struct StateManager {
 impl StateManager {
     /// Point at the standard `status.json` cache path used by Mimick.
     pub fn new() -> Self {
-        // Match Python: ~/.cache/mimick/status.json
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("~/.cache"))
-            .join("mimick");
+        let cache_dir = crate::profile::cache_dir().unwrap_or_else(|| {
+            std::path::PathBuf::from("~/.cache").join(crate::profile::dir_segment())
+        });
 
         let state_file = cache_dir.join("status.json");
         Self { state_file }
