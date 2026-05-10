@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Back navigation in the library window. The header bar now includes a back button (Alt+Left) that returns to the previously visited view (Photos, Album, Explore, etc.). A nav-history stack is maintained per library source — searches are not pushed since they're ephemeral, and consecutive duplicates are coalesced. The button is disabled when there's no history to return to.
 - Lightbox image zoom support via Ctrl+scroll wheel, trackpad pinch gesture, on-screen `−` / `+` / `100%` button group, and Ctrl+`+` / Ctrl+`-` / Ctrl+`0` keyboard shortcuts. The current zoom percentage is shown in the centre button (click it to reset to fit). The zoomed image scrolls within the viewer for panning. Zoom level resets to fit-to-window when navigating between assets.
 - Lightbox slide animation when navigating between images. Forward navigation (next button or Right arrow) slides the new image in from the right; backward navigation slides it in from the left. Falls back gracefully when GTK animations are disabled in system settings.
 - Configurable test-asset generator script for reproducing deduplication and startup scan benchmarks across all supported API asset formats (#101).
