@@ -2397,11 +2397,35 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .active(initial_full)
         .build();
     let download = gtk::Button::builder().label("Download").build();
+    let zoom_out_btn = gtk::Button::builder()
+        .icon_name("zoom-out-symbolic")
+        .tooltip_text("Zoom out (Ctrl+-)")
+        .build();
+    let zoom_in_btn = gtk::Button::builder()
+        .icon_name("zoom-in-symbolic")
+        .tooltip_text("Zoom in (Ctrl++)")
+        .build();
+    let zoom_reset_btn = gtk::Button::builder()
+        .label("100%")
+        .tooltip_text("Reset zoom (Ctrl+0)")
+        .build();
+    let zoom_group = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .css_classes(vec!["linked".to_string()])
+        .build();
+    zoom_group.append(&zoom_out_btn);
+    zoom_group.append(&zoom_reset_btn);
+    zoom_group.append(&zoom_in_btn);
     let actions = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
-        .halign(gtk::Align::End)
         .build();
+    let actions_spacer = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .hexpand(true)
+        .build();
+    actions.append(&zoom_group);
+    actions.append(&actions_spacer);
     actions.append(&resolution_toggle);
     actions.append(&download);
     viewer.append(&scrolled_picture);
@@ -2535,6 +2559,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let picture_b = picture_b.clone();
         let active_a = active_a.clone();
         let zoom_level = zoom_level.clone();
+        let zoom_reset_btn = zoom_reset_btn.clone();
         let nav_dir = nav_dir.clone();
         move || {
             let pos = pos_cell.get();
@@ -2579,6 +2604,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             };
             zoom_level.set(1.0);
             apply_lightbox_zoom(&target, 1.0);
+            zoom_reset_btn.set_label("100%");
             pic_stack.set_transition_type(match nav_dir.get() {
                 1 => gtk::StackTransitionType::SlideLeft,
                 -1 => gtk::StackTransitionType::SlideRight,
@@ -2716,28 +2742,77 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         }
     );
 
-    let zoom_by = Rc::new(clone!(
+    let set_zoom = Rc::new(clone!(
         #[strong]
         zoom_level,
         #[strong]
         active_picture,
+        #[strong]
+        zoom_reset_btn,
+        move |z: f64| {
+            let z = z.clamp(0.1, 10.0);
+            zoom_level.set(z);
+            apply_lightbox_zoom(&active_picture(), z);
+            zoom_reset_btn.set_label(&format!("{}%", (z * 100.0).round() as i32));
+        }
+    ));
+
+    let zoom_by = Rc::new(clone!(
+        #[strong]
+        zoom_level,
+        #[strong]
+        set_zoom,
         move |factor: f64| {
-            let new_zoom = (zoom_level.get() * factor).clamp(0.1, 10.0);
-            zoom_level.set(new_zoom);
-            apply_lightbox_zoom(&active_picture(), new_zoom);
+            (*set_zoom)(zoom_level.get() * factor);
         }
     ));
 
     let zoom_reset = Rc::new(clone!(
         #[strong]
-        zoom_level,
-        #[strong]
-        active_picture,
+        set_zoom,
         move || {
-            zoom_level.set(1.0);
-            apply_lightbox_zoom(&active_picture(), 1.0);
+            (*set_zoom)(1.0);
         }
     ));
+
+    zoom_in_btn.connect_clicked(clone!(
+        #[strong]
+        zoom_by,
+        move |_| (*zoom_by)(1.2)
+    ));
+    zoom_out_btn.connect_clicked(clone!(
+        #[strong]
+        zoom_by,
+        move |_| (*zoom_by)(1.0 / 1.2)
+    ));
+    zoom_reset_btn.connect_clicked(clone!(
+        #[strong]
+        zoom_reset,
+        move |_| (*zoom_reset)()
+    ));
+
+    // Trackpad pinch-to-zoom.
+    let pinch = gtk::GestureZoom::new();
+    let pinch_start = Rc::new(Cell::new(1.0_f64));
+    pinch.connect_begin(clone!(
+        #[strong]
+        zoom_level,
+        #[strong]
+        pinch_start,
+        move |_, _| {
+            pinch_start.set(zoom_level.get());
+        }
+    ));
+    pinch.connect_scale_changed(clone!(
+        #[strong]
+        pinch_start,
+        #[strong]
+        set_zoom,
+        move |_, scale| {
+            (*set_zoom)(pinch_start.get() * scale);
+        }
+    ));
+    scrolled_picture.add_controller(pinch);
 
     let key_controller = gtk::EventControllerKey::new();
     key_controller.connect_key_pressed(clone!(
@@ -2802,18 +2877,25 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     page.add_controller(key_controller);
 
     // Ctrl+wheel zoom on the picture area, captured before the scrolled window
-    // can use it for panning.
-    let zoom_scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    // can use it for panning. Listening on both axes so trackpad two-finger
+    // scrolls (which sometimes emit horizontal deltas) still trigger zoom.
+    let zoom_scroll = gtk::EventControllerScroll::new(
+        gtk::EventControllerScrollFlags::BOTH_AXES,
+    );
     zoom_scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
     zoom_scroll.connect_scroll(clone!(
         #[strong]
         zoom_by,
-        move |ctrl, _dx, dy| {
+        move |ctrl, dx, dy| {
             let mods = ctrl.current_event_state();
             if !mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
                 return glib::Propagation::Proceed;
             }
-            let factor = if dy < 0.0 { 1.1 } else { 1.0 / 1.1 };
+            let delta = if dy != 0.0 { dy } else { dx };
+            if delta == 0.0 {
+                return glib::Propagation::Proceed;
+            }
+            let factor = if delta < 0.0 { 1.1 } else { 1.0 / 1.1 };
             (*zoom_by)(factor);
             glib::Propagation::Stop
         }
