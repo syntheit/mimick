@@ -456,7 +456,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         #[strong]
         ui,
         move |position, x, y| {
-            show_asset_context_menu(ui.clone(), position, x, y);
+            show_asset_context_menu(ui.clone(), &ui.grid.view, position, x, y);
         }
     )));
 
@@ -1115,7 +1115,13 @@ fn connect_grid_handlers(ui: Rc<LibraryWindowUi>) {
     ));
 }
 
-fn show_asset_context_menu(ui: Rc<LibraryWindowUi>, position: u32, x: f64, y: f64) {
+fn show_asset_context_menu(
+    ui: Rc<LibraryWindowUi>,
+    parent: &impl gtk::prelude::IsA<gtk::Widget>,
+    position: u32,
+    x: f64,
+    y: f64,
+) {
     let Some(item) = ui.grid.model.item(position).and_downcast::<AssetObject>() else {
         return;
     };
@@ -1132,7 +1138,7 @@ fn show_asset_context_menu(ui: Rc<LibraryWindowUi>, position: u32, x: f64, y: f6
         .has_arrow(true)
         .autohide(true)
         .build();
-    popover.set_parent(&ui.grid.view);
+    popover.set_parent(parent);
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
 
     let content = gtk::Box::builder()
@@ -2302,20 +2308,15 @@ fn format_bytes(n: u64) -> String {
 }
 
 /// Apply zoom to a lightbox Picture. Zoom is fit-relative: 1.0 = the size the
-/// texture would occupy inside `viewer` under Contain layout. < 1.0 leaves
-/// margin around the picture; > 1.0 overflows the viewer for panning. At
-/// exactly 1.0 we restore (-1, -1) and re-enable hexpand so the picture
+/// texture would occupy inside `viewer` under Contain layout. > 1.0 overflows
+/// the viewer for panning. At 1.0 we restore (-1, -1) so the picture
 /// auto-resizes with the window.
 fn apply_lightbox_zoom(picture: &gtk::Picture, viewer: &gtk::ScrolledWindow, zoom: f64) {
     if (zoom - 1.0).abs() < 0.001 {
-        picture.set_hexpand(true);
-        picture.set_vexpand(true);
         picture.set_size_request(-1, -1);
         return;
     }
     let Some(paintable) = picture.paintable() else {
-        picture.set_hexpand(true);
-        picture.set_vexpand(true);
         picture.set_size_request(-1, -1);
         return;
     };
@@ -2330,10 +2331,6 @@ fn apply_lightbox_zoom(picture: &gtk::Picture, viewer: &gtk::ScrolledWindow, zoo
     } else {
         (viewer_w, viewer_w / texture_aspect)
     };
-    // Disable expansion so a sub-100% size_request actually shrinks the
-    // picture (with halign/valign Center keeping it centred in the viewer).
-    picture.set_hexpand(false);
-    picture.set_vexpand(false);
     picture.set_size_request((fit_w * zoom) as i32, (fit_h * zoom) as i32);
 }
 
@@ -2386,15 +2383,11 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .content_fit(gtk::ContentFit::Contain)
         .vexpand(true)
         .hexpand(true)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
         .build();
     let picture_b = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Contain)
         .vexpand(true)
         .hexpand(true)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
         .build();
     let pic_stack = gtk::Stack::builder()
         .transition_duration(180)
@@ -2798,7 +2791,7 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         cursor_pos,
         move |z: f64| {
-            let z_new = z.clamp(0.1, 10.0);
+            let z_new = z.clamp(1.0, 10.0);
             let z_old = zoom_level.get();
             if (z_new - z_old).abs() < 0.0001 {
                 zoom_reset_btn.set_label(&format!("{}%", (z_new * 100.0).round() as i32));
@@ -2890,6 +2883,83 @@ fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         }
     ));
     scrolled_picture.add_controller(pinch);
+
+    // Click-and-drag panning: only acts when zoomed in (otherwise scrollbars
+    // have nowhere to scroll to). Snapshots scroll position on begin and
+    // applies cumulative offsets on each update.
+    let drag_start = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+    let drag = gtk::GestureDrag::new();
+    drag.set_button(gtk::gdk::BUTTON_PRIMARY);
+    drag.connect_drag_begin(clone!(
+        #[strong]
+        scrolled_picture,
+        #[strong]
+        drag_start,
+        move |_, _, _| {
+            let hadj = scrolled_picture.hadjustment();
+            let vadj = scrolled_picture.vadjustment();
+            drag_start.set((hadj.value(), vadj.value()));
+        }
+    ));
+    drag.connect_drag_update(clone!(
+        #[strong]
+        scrolled_picture,
+        #[strong]
+        drag_start,
+        move |_, off_x, off_y| {
+            let (sx0, sy0) = drag_start.get();
+            scrolled_picture.hadjustment().set_value(sx0 - off_x);
+            scrolled_picture.vadjustment().set_value(sy0 - off_y);
+        }
+    ));
+    scrolled_picture.add_controller(drag);
+
+    // Double-click on the picture: zoom in 2x toward the click position.
+    let double_click = gtk::GestureClick::new();
+    double_click.set_button(gtk::gdk::BUTTON_PRIMARY);
+    double_click.connect_pressed(clone!(
+        #[strong]
+        cursor_pos,
+        #[strong]
+        zoom_level,
+        #[strong]
+        set_zoom,
+        move |_, n_press, x, y| {
+            if n_press == 2 {
+                cursor_pos.set(Some((x, y)));
+                (*set_zoom)(zoom_level.get() * 2.0);
+            }
+        }
+    ));
+    scrolled_picture.add_controller(double_click);
+
+    // Middle-click: reset zoom to 100%.
+    let middle_click = gtk::GestureClick::new();
+    middle_click.set_button(gtk::gdk::BUTTON_MIDDLE);
+    middle_click.connect_pressed(clone!(
+        #[strong]
+        zoom_reset,
+        move |_, _, _, _| {
+            (*zoom_reset)();
+        }
+    ));
+    scrolled_picture.add_controller(middle_click);
+
+    // Right-click: open the standard asset context menu.
+    let right_click = gtk::GestureClick::new();
+    right_click.set_button(gtk::gdk::BUTTON_SECONDARY);
+    right_click.connect_pressed(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        pos_cell,
+        #[strong]
+        scrolled_picture,
+        move |_, _, x, y| {
+            show_asset_context_menu(ui.clone(), &scrolled_picture, pos_cell.get(), x, y);
+        }
+    ));
+    scrolled_picture.add_controller(right_click);
 
     let key_controller = gtk::EventControllerKey::new();
     key_controller.connect_key_pressed(clone!(
