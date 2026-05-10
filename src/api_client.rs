@@ -7,7 +7,7 @@ use reqwest::Client;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
 pub type TransferProgressCallback = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
@@ -249,6 +249,18 @@ pub struct ImmichApiClient {
     last_issue: Mutex<Option<ApiIssue>>,
     /// Caches album names to album IDs to avoid repeated list/create API calls.
     album_cache: Mutex<HashMap<String, String>>,
+    /// Per-album-name async locks that serialize concurrent get-or-create calls
+    /// for the *same* name, preventing duplicate-album creation under load.
+    album_create_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Serializes `fetch_all_albums` so concurrent callers don't all hit the
+    /// network and race writes into the cache.
+    album_fetch_lock: Mutex<()>,
+    /// Serializes `check_connection` so concurrent callers collapse into one
+    /// connectivity probe instead of each issuing their own LAN+WAN pings.
+    connection_check_lock: Mutex<()>,
+    /// Timestamp of the most recent successful connectivity probe. Used to
+    /// coalesce concurrent burst callers without suppressing periodic re-checks.
+    last_successful_check: Mutex<Option<Instant>>,
     albums_fetched: Mutex<bool>,
     thumbnail_semaphore: Arc<Semaphore>,
 }
@@ -281,6 +293,10 @@ impl ImmichApiClient {
             active_url: Mutex::new(None),
             last_issue: Mutex::new(None),
             album_cache: Mutex::new(HashMap::new()),
+            album_create_locks: Mutex::new(HashMap::new()),
+            album_fetch_lock: Mutex::new(()),
+            connection_check_lock: Mutex::new(()),
+            last_successful_check: Mutex::new(None),
             albums_fetched: Mutex::new(false),
             thumbnail_semaphore: Arc::new(Semaphore::new(8)),
         }
@@ -339,6 +355,18 @@ impl ImmichApiClient {
 
     /// Determine which base URL to use, preferring the internal address when reachable.
     pub async fn check_connection(&self) -> bool {
+        let _check_guard = self.connection_check_lock.lock().await;
+
+        // Coalesce burst callers: if another caller probed successfully within
+        // the last second, reuse that result. Periodic re-checks (e.g. the 5s
+        // library ping loop) still re-probe because their gap exceeds 1s.
+        if self.active_url.lock().await.is_some()
+            && let Some(when) = *self.last_successful_check.lock().await
+            && when.elapsed() < Duration::from_secs(1)
+        {
+            return true;
+        }
+
         log::debug!("Checking connectivity...");
         let settings = self.settings.read().clone();
         let was_active = self.active_url.lock().await.clone();
@@ -347,6 +375,7 @@ impl ImmichApiClient {
             let mut active = self.active_url.lock().await;
             let was_offline = was_active.is_none();
             *active = Some(settings.internal_url.clone());
+            *self.last_successful_check.lock().await = Some(Instant::now());
             self.clear_issue().await;
             if was_offline {
                 log::info!("Connected via LAN: {}", settings.internal_url);
@@ -360,6 +389,7 @@ impl ImmichApiClient {
             let mut active = self.active_url.lock().await;
             let was_offline = was_active.is_none();
             *active = Some(settings.external_url.clone());
+            *self.last_successful_check.lock().await = Some(Instant::now());
             self.clear_issue().await;
             if was_offline {
                 log::info!("Connected via WAN: {}", settings.external_url);
@@ -693,7 +723,18 @@ impl ImmichApiClient {
     }
 
     /// Get all albums from Immich, populating the local cache.
+    /// Acquires `album_fetch_lock`; do not call while already holding it.
     async fn fetch_all_albums(&self) {
+        let _fetch_guard = self.album_fetch_lock.lock().await;
+        if *self.albums_fetched.lock().await {
+            return;
+        }
+        self.fetch_all_albums_locked().await;
+    }
+
+    /// Inner fetch implementation. Assumes `album_fetch_lock` is held by the
+    /// caller and `albums_fetched` is already known to be false.
+    async fn fetch_all_albums_locked(&self) {
         let base_url = match self.get_active_url().await {
             Some(u) => u,
             None => {
@@ -723,13 +764,41 @@ impl ImmichApiClient {
         {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(albums) = resp.json::<Vec<AlbumSummary>>().await {
-                    let mut cache = self.album_cache.lock().await;
+                    let total = albums.len();
+                    let mut fresh: HashMap<String, String> = HashMap::with_capacity(total);
+                    let mut duplicates = 0usize;
                     for album in albums {
-                        cache.insert(album.album_name, album.id);
+                        match fresh.get(&album.album_name) {
+                            Some(existing_id) if existing_id != &album.id => {
+                                duplicates += 1;
+                                log::warn!(
+                                    "Duplicate album on server: '{}' has both id {} and {} (keeping first). Future syncs will use the first.",
+                                    album.album_name,
+                                    existing_id,
+                                    album.id
+                                );
+                            }
+                            Some(_) => {
+                                // Same name + same id: server returned an entry twice; ignore silently.
+                            }
+                            None => {
+                                fresh.insert(album.album_name, album.id);
+                            }
+                        }
+                    }
+                    let unique = fresh.len();
+                    {
+                        let mut cache = self.album_cache.lock().await;
+                        *cache = fresh;
                     }
                     *self.albums_fetched.lock().await = true;
                     self.clear_issue().await;
-                    log::info!("Cached {} albums.", cache.len());
+                    log::info!(
+                        "Cached {} unique album(s) from {} server entries ({} duplicate(s) ignored).",
+                        unique,
+                        total,
+                        duplicates
+                    );
                 }
             }
             Ok(resp) => {
@@ -752,12 +821,13 @@ impl ImmichApiClient {
     }
 
     pub async fn refresh_album_cache(&self) {
+        let _fetch_guard = self.album_fetch_lock.lock().await;
         {
             let mut cache = self.album_cache.lock().await;
             cache.clear();
         }
         *self.albums_fetched.lock().await = false;
-        self.fetch_all_albums().await;
+        self.fetch_all_albums_locked().await;
     }
 
     /// Return a snapshot of all cached albums as a list of (albumName, id)
@@ -848,10 +918,25 @@ impl ImmichApiClient {
             }
         }
         if !*self.albums_fetched.lock().await {
-            // Cannot fetch albums, so we shouldn't attempt to create one blindly, nor should we return Ok(None)
-            // which implies the album doesn't exist and can't be created. It's a network error.
             return Err("Cannot fetch albums to verify existence".to_string());
         }
+
+        let create_lock = {
+            let mut locks = self.album_create_locks.lock().await;
+            locks
+                .entry(album_name.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _guard = create_lock.lock().await;
+
+        {
+            let cache = self.album_cache.lock().await;
+            if let Some(id) = cache.get(album_name) {
+                return Ok(Some(id.clone()));
+            }
+        }
+
         self.create_album(album_name).await
     }
 

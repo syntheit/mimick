@@ -8,7 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-
 - Configurable test-asset generator script for reproducing deduplication and startup scan benchmarks across all supported API asset formats (#101).
 - Graceful shutdown for in-flight uploads. Quitting the app now stops accepting new tasks, waits up to 5 seconds for active uploads to finish cleanly, then cancels anything still in flight via a cancellation token. Uploads cancelled at the deadline are persisted to the retry queue and resumed on the next launch instead of leaving partial assets on the server.
 - Profile switcher for development and testing via the `MIMICK_PROFILE` environment variable. Each named profile (`MIMICK_PROFILE=dev`) gets fully isolated state: its own config file, sync index, retry queue, thumbnail cache, and keyring entry. The GTK application id is varied per profile so multiple profiles can run simultaneously without activating each other's windows. Portal folder grants are shared across profiles since they are scoped to the Flatpak app-id.
@@ -35,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Concurrent workers racing to create the same album on first run now serialize via a per-album-name lock with double-checked cache lookup, preventing N duplicate albums being created simultaneously (one per queued file).
+- `fetch_all_albums` now collapses concurrent callers into a single network request via a fetch lock with double-checked `albums_fetched` flag. Previously, concurrent startup-scan workers each fired an independent `GET /api/albums`, then re-inserted the same entries and reported every album as a false-positive duplicate.
+- Duplicate album detection now compares IDs within a single server response (built into a fresh map before replacing the cache), so "same name, same ID" entries from a re-fetch are ignored silently while genuine server-side duplicates (same name, different ID) still warn and keep the first.
+- `refresh_album_cache` now holds the fetch lock across its clear → reset → refetch sequence, closing a race where a concurrent in-flight fetch could populate the cache after the clear but before the reset, leaving the cache empty with the flag set to true.
+- Sync index state is now flushed to disk when the upload queue goes idle, ensuring a clean restart never re-queues already-uploaded files even after an immediate exit following a fast batch.
+- Sync index is now flushed on graceful shutdown (tray quit, window close) so records written since the last 10-second periodic flush are not lost.
+- SIGINT and SIGTERM signals now route through the GTK graceful shutdown path instead of killing the process immediately, so uploads drain, retries persist, and the sync index flushes before exit.
+- `flush()` in the sync index now clears dirty bits only after a successful write. Previously, a failed `atomic_write` (e.g. disk full) would silently mark shards clean, causing subsequent flush calls to skip them and permanently lose the unwritten records.
+- Removed a broken auto-flush trigger in `record_synced` that fired when `shard.entries.len()` was a multiple of 50 — this checked total entry count, not dirty-since-last-flush count, so it fired unpredictably and never for small datasets. Flush scheduling is now handled solely by the 10-second timer and idle-queue flush.
+- Concurrent `check_connection` callers (queue workers, library ping loop, main loop) now serialize via a single-flight lock. Callers that arrive while a probe is already in flight coalesce onto its result within a 1-second window, eliminating redundant LAN/WAN ping bursts at startup without suppressing the 5-second library re-check.
 - Escape key and Clear button now properly exit selection mode entirely instead of just clearing selected items.
 - Asset sync status in the lightbox details pane and thumbnail hover now reflects the asset's true state (local only, remote only, or both) instead of being implied by the active view. Root cause: Immich returns SHA-1 checksums as base64 in API responses while the sync index stores them as lowercase hex; the representations are now normalised on read so checksum-to-path reverse lookups resolve correctly across all views including unified and album-unified.
 - In-app symbolic icons (`mimick-upload-symbolic`, `mimick-download-symbolic`) are now compiled into the binary via `glib-build-tools::compile_resources` and registered at startup with `gtk::IconTheme::add_resource_path("/dev/nicx/mimick/icons")`, replacing a `theme.add_search_path(env!("CARGO_MANIFEST_DIR"))` call that resolved to a nonexistent path in all non-`cargo run` environments.
