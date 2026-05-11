@@ -128,9 +128,6 @@ jobs:
             "/repos/${GITHUB_REPOSITORY}/releases/${{ steps.draft_release.outputs.id }}" \
             --input release-payload.json
 
-          gh release upload "${GITHUB_REF_NAME}" \
-            --clobber
-
       - name: Publish GitHub release from changelog fallback
         if: steps.draft_release.outputs.found != 'true'
         env:
