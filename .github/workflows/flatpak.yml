@@ -41,9 +41,13 @@ jobs:
 
     - name: Check if non-local manifest changed
       id: check_manifest
-      uses: tj-actions/changed-files@v44
-      with:
-        files: dev.nicx.mimick.yml
+      run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        if git show --name-only --format="" HEAD | grep -q "^dev.nicx.mimick.yml$"; then
+          echo "any_changed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "any_changed=false" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Build Flatpak
       if: matrix.manifest == 'dev.nicx.mimick.local.yml' || steps.check_manifest.outputs.any_changed == 'true'
