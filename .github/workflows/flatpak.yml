@@ -43,9 +43,21 @@ jobs:
       id: check_manifest
       run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        if git show --name-only --format="" HEAD | grep -q "^dev.nicx.mimick.yml$"; then
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          git fetch origin "${{ github.event.pull_request.base.sha }}" --depth=1
+          CHANGED=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD)
+        else
+          CHANGED=$(git diff-tree --no-commit-id --name-only -r HEAD)
+        fi
+        
+        echo "Files changed:"
+        echo "$CHANGED"
+        
+        if echo "$CHANGED" | grep -q "^dev.nicx.mimick.yml$"; then
+          echo "Manifest was modified."
           echo "any_changed=true" >> "$GITHUB_OUTPUT"
         else
+          echo "Manifest was not modified."
           echo "any_changed=false" >> "$GITHUB_OUTPUT"
         fi
 
