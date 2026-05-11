@@ -89,13 +89,13 @@ jobs:
             $0 ~ "^## \\[" version "\\]" { capture=1; next }
             capture && /^## \[/ { exit }
             capture { print }
-          ' CHANGELOG.md | sed '/./,$!d' > dist/release-notes.md
+          ' CHANGELOG.md | sed '/./,$!d' > release-notes.md
 
       - name: Write draft release notes
         if: steps.draft_release.outputs.found == 'true'
         shell: bash
         run: |
-          cat <<'EOF' > dist/release-notes.md
+          cat <<'EOF' > release-notes.md
           ${{ steps.draft_release.outputs.body }}
           EOF
 
@@ -111,7 +111,7 @@ jobs:
             --arg tag_name "${GITHUB_REF_NAME}" \
             --arg target_commitish "${GITHUB_SHA}" \
             --arg name "${TAG_VERSION}" \
-            --rawfile body dist/release-notes.md \
+            --rawfile body release-notes.md \
             '{
               tag_name: $tag_name,
               target_commitish: $target_commitish,
@@ -120,13 +120,13 @@ jobs:
               draft: false,
               prerelease: false,
               make_latest: "true"
-            }' > dist/release-payload.json
+            }' > release-payload.json
 
           gh api \
             --method PATCH \
             -H "Accept: application/vnd.github+json" \
             "/repos/${GITHUB_REPOSITORY}/releases/${{ steps.draft_release.outputs.id }}" \
-            --input dist/release-payload.json
+            --input release-payload.json
 
           gh release upload "${GITHUB_REF_NAME}" \
             --clobber
@@ -140,4 +140,4 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           gh release create "${GITHUB_REF_NAME}" \
             --title "${TAG_VERSION}" \
-            --notes-file dist/release-notes.md
+            --notes-file release-notes.md
