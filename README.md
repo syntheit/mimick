@@ -1,4 +1,3 @@
-
 # Mimick - Immich Desktop Client for Linux
 
 <div align="center">
@@ -14,6 +13,12 @@
 
 </div>
 
+<div align="center">
+
+[![Flathub Version](https://img.shields.io/flathub/v/dev.nicx.mimick?style=for-the-badge&logoSize=auto&color=%23e9b24c)](https://flathub.org/en/apps/dev.nicx.mimick)
+[![Flathub Downloads](https://img.shields.io/flathub/downloads/dev.nicx.mimick?style=for-the-badge&color=%23e9b24c)](https://flathub.org/en/apps/dev.nicx.mimick)
+
+</div>
 
 Mimick is an unofficial Immich desktop client for Linux. It provides a GTK4/libadwaita interface for automatic background sync of local photo and video folders to a self-hosted Immich server, and an optional library browser for viewing, searching, and managing assets directly from the desktop.
 
@@ -27,18 +32,17 @@ Mimick is an unofficial Immich desktop client for Linux. It provides a GTK4/liba
 [![Troubleshooting](https://img.shields.io/badge/Troubleshooting-Help-CB4B16?style=for-the-badge&labelColor=CB4B16)](wiki/Troubleshooting.md)
 [![Project Wiki](https://img.shields.io/badge/Project-Wiki-444444?style=for-the-badge&labelColor=444444)](https://github.com/nicx17/mimick/wiki)
 
-
 </div>
 
 **Status:** Supports Immich v1.118+.
 
 ## Screenshots
 
-| Library View (Light) | Settings & Watch Folders |
-| :---: | :---: |
-| ![Photos page light](docs/screenshots/photos_page_view_sidebar_on.png) | ![Library settings](docs/screenshots/settings_pane_showing_library_settings_and_watch_folders.png) |
-| **Sync Status Dashboard** | **Desktop Integration** |
-| ![Status dashboard](docs/screenshots/status_pane_sync_status_health_dashboard_actions.png) | ![Tray icon](docs/screenshots/tray_icon_menu.png) |
+|                                    Library View (Light)                                    |                                                Explore View                                                |
+| :----------------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------------------------------: |
+|           ![Photos page light](docs/screenshots/photos_page_view_sidebar_on.png)           |          ![Explore View](docs/screenshots/explore_page_view_showing_people_places_sidebar_on.png)          |
+|                                 **Sync Status Dashboard**                                  |                                        **Settings & Watch Folders**                                        |
+| ![Status dashboard](docs/screenshots/status_pane_sync_status_health_dashboard_actions.png) | ![Settings & Watch Folders](docs/screenshots/settings_pane_showing_library_settings_and_watch_folders.png) |
 
 <div align="center">
 
@@ -46,22 +50,24 @@ Mimick is an unofficial Immich desktop client for Linux. It provides a GTK4/liba
 
 </div>
 
-
 ## Core Architecture & Features
 
 ### Sync Engine
+
 - **Asynchronous Concurrent Uploads**: Configurable parallel worker tasks (1–10 streams) stream files from disk, maintaining flat memory usage footprints.
 - **SHA-1 Deduplication**: Verifies files locally via checksum prior to upload, utilizing payload logic identical to official Immich mobile apps.
 - **Atomic File Monitoring**: Delays queuing until file sizes stabilize and physical write locks are released, preventing partial data uploads.
 - **One-Way Mirroring**: Maintains strictly read-only access to local system files.
 
 ### Reliability & State Management
+
 - **Persistent Offline Storage**: Upload network failures are safely serialized to disk (`~/.cache/mimick/retries.json`) and gracefully replayed during subsequent daemon lifecycles.
 - **Local State Indexing**: Unmodified, previously uploaded media is aggressively skipped during startup catch-up scans using local indexes to minimize disk I/O overhead.
 - **Queue Inspector**: Interactive UI module to interpret active error payloads, selectively retry specific dropped files, or flush the active failure queue.
 - **Dynamic Endpoint Resolution**: Automatically negotiates requests between configured Internal (LAN) and External (WAN) URI addresses based on immediate network topologies and heartbeat reachability.
 
 ### Environment & Desktop Integration
+
 - **Native Implementation**: Developed purely in Rust, utilizing GTK4 and Libadwaita bindings alongside an AppIndicator system tray for headless daemon control.
 - **Hardware Awareness**: Integrates with `nmcli` and `/sys/class/power_supply` to identify running states and optionally defer daemon I/O operations strictly during explicitly metered networks or active battery deployments.
 - **Sandbox Security**: Employs Flatpak desktop portal file-choosers to grant the application isolated, per-directory access without requesting system-wide filesystem permissons.
@@ -69,13 +75,16 @@ Mimick is an unofficial Immich desktop client for Linux. It provides a GTK4/liba
 - **Quiet Hours**: Configurable chronological barriers to globally suspend daemon uploads.
 
 ### Directory Scoping & Filtering
+
 Each watched directory operates with isolated logical constraints:
+
 - Static or dynamically generated Immich album targets.
 - Pre-flight omission of hidden paths (dotfiles).
 - Predetermined allowance lists strictly for explicit file extensions (e.g. `.avif`, `.mp4`).
 - Upper-bound maximum file size ceilings.
 
 ### Library View (Optional)
+
 - Built-in album browser with thumbnail grid and Explore landing page.
 - Search modes: filename/metadata, Smart (CLIP), and OCR text lookup.
 - Download originals and open full-resolution previews in the lightbox.
@@ -103,8 +112,7 @@ You can install Mimick directly from Flathub:
 flatpak install flathub dev.nicx.mimick
 ```
 
-*(Note: If you haven't setup Flathub yet, follow the setup guide for your distribution at [flathub.org/setup](https://flathub.org/setup).)*
----
+## _(Note: If you haven't setup Flathub yet, follow the setup guide for your distribution at [flathub.org/setup](https://flathub.org/setup).)_
 
 ## Usage & Configuration
 
@@ -114,13 +122,13 @@ Launch Mimick from your Application Launcher. The settings window opens automati
 
 The window is split into two pages:
 
-* **Settings** for server details, behavior switches, watch folders, and folder rules
-* **Status** for sync health, queue actions, manual sync, pause/resume, and diagnostics export
+- **Settings** for server details, behavior switches, watch folders, and folder rules
+- **Status** for sync health, queue actions, manual sync, pause/resume, and diagnostics export
 
 The UI is fully responsive and automatically adapts its layout for narrow widths (sub-360px), making it compatible with mobile Linux devices.
 
 1. **Internal URL** — LAN address (e.g., `http://192.168.1.50:2283`).
-2. **External URL** — WAN/Public address (e.g., `https://photos.example.com`). *At least one must be enabled.*
+2. **External URL** — WAN/Public address (e.g., `https://photos.example.com`). _At least one must be enabled._
 3. **API Key** — Generate in Immich Web UI under Account Settings > API Keys. Needs **Asset** read/create/update/download permissions and **Album** read/create/update permissions.
 4. **Watch Paths** — Add folders to monitor with the built-in folder picker. Each folder can be assigned a target Immich album.
 5. **Run on Startup** — Enable this in the **Behavior** section to start Mimick automatically when you log in.
@@ -137,33 +145,33 @@ The bottom footer keeps **Close**, **Quit**, and **Save Changes** visible even w
 
 Use the built-in **Run on Startup** switch in the settings window.
 
-* Flatpak builds request background/autostart permission through the desktop portal.
-* Native builds write an autostart desktop entry to `~/.config/autostart/dev.nicx.mimick.desktop`.
+- Flatpak builds request background/autostart permission through the desktop portal.
+- Native builds write an autostart desktop entry to `~/.config/autostart/dev.nicx.mimick.desktop`.
 
 ### Folder Access
 
 Mimick now uses selected-folder access instead of full home-directory access in Flatpak.
 
-* Add watch folders from the settings window so the file chooser portal can grant access.
-* If you are upgrading from an older build that had full home access, re-add your existing watch folders once so the new permission model can take effect.
-* Portal-backed folders may appear by name in the UI and logs instead of showing the raw `/run/user/.../doc/...` sandbox path.
+- Add watch folders from the settings window so the file chooser portal can grant access.
+- If you are upgrading from an older build that had full home access, re-add your existing watch folders once so the new permission model can take effect.
+- Portal-backed folders may appear by name in the UI and logs instead of showing the raw `/run/user/.../doc/...` sandbox path.
 
 ### Existing Files and Album Changes
 
 Mimick can process existing files and adapt to configuration changes automatically.
 
-* On startup (or when clicking **Sync Now**), Mimick rescans watched folders to queue missing media. You can constrain this with the **Startup Catch-up Mode** (e.g., "Recent Changed Only" or "New Files Only") to save disk I/O.
-* A local sync index (stored safely in the persistent data directory) ensures unchanged files that are already synced are skipped efficiently. Clearing the application cache will not wipe your sync state.
-* If you change a watch folder's target album, unchanged files are automatically reassociated to the new album on the next scan without requiring a full reupload.
-* If a previously targeted album is deleted, Mimick refreshes album resolution and recreates or rebinds the target album as needed.
-* For deeper manual synchronization, the **Library View** provides on-demand, bidirectional album syncing to download or upload differences between linked folders and remote albums.
+- On startup (or when clicking **Sync Now**), Mimick rescans watched folders to queue missing media. You can constrain this with the **Startup Catch-up Mode** (e.g., "Recent Changed Only" or "New Files Only") to save disk I/O.
+- A local sync index (stored safely in the persistent data directory) ensures unchanged files that are already synced are skipped efficiently. Clearing the application cache will not wipe your sync state.
+- If you change a watch folder's target album, unchanged files are automatically reassociated to the new album on the next scan without requiring a full reupload.
+- If a previously targeted album is deleted, Mimick refreshes album resolution and recreates or rebinds the target album as needed.
+- For deeper manual synchronization, the **Library View** provides on-demand, bidirectional album syncing to download or upload differences between linked folders and remote albums.
 
 ### Quitting vs Closing
 
 Mimick is a background app, so closing the settings window does not quit it.
 
-* Use **Close** in the settings window or the window close button to hide the window and keep Mimick running in the tray.
-* Use **Quit** from the tray menu, the settings window, or the launcher action to stop the app completely.
+- Use **Close** in the settings window or the window close button to hide the window and keep Mimick running in the tray.
+- Use **Quit** from the tray menu, the settings window, or the launcher action to stop the app completely.
 
 ### Queue and Diagnostics Tools
 
@@ -171,20 +179,20 @@ Mimick now includes a small control center for active troubleshooting and recove
 
 On the **Status** page:
 
-* **Sync Now** reruns the watched-folder scan immediately.
-* **Pause** toggles upload activity without quitting Mimick.
-* **Queue Inspector** shows failed items and recent queue activity from the current session.
-* **Retry All Failed** requeues everything currently stored in the failed list.
-* **Retry** on a single failed row requeues only that item.
-* **Clear Failed Queue** removes persisted failed items you no longer want Mimick to retry.
-* **Export Diagnostics** writes a bundle with `summary.txt`, `config.redacted.json`, `status.redacted.json`, `retries.redacted.json`, `synced_index.redacted.json`, and `privacy-note.txt`.
+- **Sync Now** reruns the watched-folder scan immediately.
+- **Pause** toggles upload activity without quitting Mimick.
+- **Queue Inspector** shows failed items and recent queue activity from the current session.
+- **Retry All Failed** requeues everything currently stored in the failed list.
+- **Retry** on a single failed row requeues only that item.
+- **Clear Failed Queue** removes persisted failed items you no longer want Mimick to retry.
+- **Export Diagnostics** writes a bundle with `summary.txt`, `config.redacted.json`, `status.redacted.json`, `retries.redacted.json`, `synced_index.redacted.json`, and `privacy-note.txt`.
 
 ### Network and Power-Aware Behavior
 
 If enabled in the **Behavior** section, Mimick can pause uploads automatically:
 
-* on metered connections, detected best-effort via `nmcli`
-* while running on battery power, detected best-effort from `/sys/class/power_supply`
+- on metered connections, detected best-effort via `nmcli`
+- while running on battery power, detected best-effort from `/sys/class/power_supply`
 
 These options defer uploads rather than changing your watch configuration, so syncing resumes when conditions improve or when you manually resume.
 
@@ -196,8 +204,8 @@ If you prefer to compile Mimick yourself, you can build it natively or package i
 
 ### Prerequisites (Native Build)
 
-* Rust toolchain (`cargo`): https://rustup.rs
-* GTK4 + Libadwaita development headers
+- Rust toolchain (`cargo`): https://rustup.rs
+- GTK4 + Libadwaita development headers
 
 **Ubuntu / Debian:**
 
@@ -266,11 +274,11 @@ flatpak run dev.nicx.mimick
 
 [![Wiki Home](https://img.shields.io/badge/Wiki-Home-444444?style=for-the-badge&labelColor=444444)](https://github.com/nicx17/mimick/wiki)
 [![Installation](https://img.shields.io/badge/Installation-Guide-1F6FEB?style=for-the-badge&labelColor=1F6FEB)](https://github.com/nicx17/mimick/wiki/Installation)
-[![User Guide](https://img.shields.io/badge/User-Guide-2E8B57?style=for-the-badge&labelColor=2E8B57)](wiki/Configuration-and-First-Run.md)
-[![Wiki](https://img.shields.io/badge/Wiki_Documentation-8A2BE2?style=for-the-badge&labelColor=8A2BE2)](wiki/Home.md)
-[![Development](https://img.shields.io/badge/Development-Guide-B8860B?style=for-the-badge&labelColor=B8860B)](wiki/Development.md)
-[![Testing](https://img.shields.io/badge/Testing-Guide-0E7490?style=for-the-badge&labelColor=0E7490)](wiki/Testing.md)
-[![Troubleshooting](https://img.shields.io/badge/Troubleshooting-Guide-CB4B16?style=for-the-badge&labelColor=CB4B16)](wiki/Troubleshooting.md)
+[![User Guide](https://img.shields.io/badge/User-Guide-2E8B57?style=for-the-badge&labelColor=2E8B57)](https://github.com/nicx17/mimick/wiki/Configuration-and-First-Run)
+[![Wiki](https://img.shields.io/badge/Wiki_Documentation-8A2BE2?style=for-the-badge&labelColor=8A2BE2)](https://github.com/nicx17/mimick/wiki/Home)
+[![Development](https://img.shields.io/badge/Development-Guide-B8860B?style=for-the-badge&labelColor=B8860B)](https://github.com/nicx17/mimick/wiki/Development)
+[![Testing](https://img.shields.io/badge/Testing-Guide-0E7490?style=for-the-badge&labelColor=0E7490)](https://github.com/nicx17/mimick/wiki/Testing)
+[![Troubleshooting](https://img.shields.io/badge/Troubleshooting-Guide-CB4B16?style=for-the-badge&labelColor=CB4B16)](https://github.com/nicx17/mimick/wiki/Troubleshooting)
 [![Security](https://img.shields.io/badge/Security-Policy-5B8C5A?style=for-the-badge&labelColor=5B8C5A)](SECURITY.md)
 
 </div>
@@ -289,7 +297,7 @@ Pull requests are welcome. See `CONTRIBUTING.md` for commit and style guidelines
 
 ## Acknowledgments
 
-* Application icon illustration by Round Icons on Unsplash.
+- Application icon illustration by Round Icons on Unsplash.
 
 ## License
 
