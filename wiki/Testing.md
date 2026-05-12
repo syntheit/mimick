@@ -86,3 +86,25 @@ When adding a new feature, always consider creating a corresponding inline `#[te
 *   **Never modify the real disk:** Use the `tempfile` crate (already in `[dev-dependencies]`) to create temporary, auto-cleaning directories for file I/O tests.
 *   **Keep them fast:** Do not inject artificial `tokio::time::sleep()` delays unless absolutely necessary for channel sync tests.
 *   **Prefer pure helpers for environment-sensitive logic:** Parse command output or power-supply state via helper functions so the behavior can be tested deterministically.
+
+## 6. Test Asset Generation
+
+For benchmarking the startup scan and sync indexing processes, you can use the configurable test-asset generator script located at `scripts/gen_test_assets.py`. This script generates synthetic media files in formats recognized by Mimick (such as `jpg`, `png`, `webp`, `mp4`, `mkv`, etc.) with deterministic, parameterizable content.
+
+It helps make dedup paths and performance characteristics reproducible across different benchmark runs without needing gigabytes of actual personal media.
+
+### Dependencies
+- **Pillow**: Required for generating standard images (`pip install Pillow`).
+- **ffmpeg**: Required on system `$PATH` for generating valid video files.
+
+### Usage Examples
+
+```bash
+# Generate 1,000 files spread across standard formats (totaling ~1GB max)
+python scripts/gen_test_assets.py --out /tmp/mimick-bench --count 1000 --cap-bytes 1073741824
+
+# Restrict to specific formats
+python scripts/gen_test_assets.py --out /tmp/mimick-bench --count 200 --formats jpg,mp4,arw
+```
+
+The script ensures files are generally parseable (e.g. padding to valid chunk sizes for video, injecting valid BMP headers into RAW dummy noise) without S108 SonarLint violations from empty blocks.
