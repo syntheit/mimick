@@ -1,0 +1,282 @@
+//! Library browsing: fetch albums, thumbnails, asset details, download originals, delete.
+
+use std::time::Duration;
+
+use super::errors::{RequestContext, classify_http_issue, classify_network_issue};
+use super::{
+    AssetDetails, ImmichApiClient, LibraryAlbum, LibraryAsset, SortOrder, ThumbnailSize,
+    TransferProgressCallback,
+};
+
+impl ImmichApiClient {
+    pub async fn fetch_library_albums(&self) -> Result<Vec<LibraryAlbum>, String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/albums", base_url);
+
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let albums = resp
+                    .json::<Vec<LibraryAlbum>>()
+                    .await
+                    .map_err(|err| err.to_string())?;
+                self.clear_issue().await;
+                Ok(albums)
+            }
+            Ok(resp) => {
+                self.set_issue(classify_http_issue(
+                    RequestContext::Albums,
+                    resp.status().as_u16(),
+                    None,
+                ))
+                .await;
+                Err(format!("HTTP {}", resp.status()))
+            }
+            Err(err) => {
+                *self.active_url.lock().await = None;
+                self.set_issue(classify_network_issue(RequestContext::Albums, &err))
+                    .await;
+                Err(err.to_string())
+            }
+        }
+    }
+
+    pub async fn fetch_album_assets(
+        &self,
+        album_id: &str,
+        page: u32,
+        size: u32,
+        order: Option<SortOrder>,
+    ) -> Result<(Vec<LibraryAsset>, bool), String> {
+        let mut body = serde_json::json!({
+            "albumIds": [album_id],
+            "page": page,
+            "size": size.max(1),
+        });
+        if let Some(order) = order
+            && let Some(obj) = body.as_object_mut()
+        {
+            obj.insert(
+                "order".into(),
+                serde_json::to_value(order).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        self.fetch_search_assets(
+            "/api/search/metadata",
+            body,
+            RequestContext::AssetList,
+            Some(album_id),
+        )
+        .await
+    }
+
+    pub async fn fetch_thumbnail(
+        &self,
+        asset_id: &str,
+        size: ThumbnailSize,
+    ) -> Result<Vec<u8>, String> {
+        let _permit = self
+            .thumbnail_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|err| err.to_string())?;
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!(
+            "{}/api/assets/{}/thumbnail?size={}",
+            base_url,
+            asset_id,
+            size.as_str()
+        );
+
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Accept", "application/octet-stream")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let bytes = resp.bytes().await.map_err(|err| err.to_string())?;
+                self.clear_issue().await;
+                Ok(bytes.to_vec())
+            }
+            Ok(resp) => {
+                self.set_issue(classify_http_issue(
+                    RequestContext::ThumbnailFetch,
+                    resp.status().as_u16(),
+                    Some(asset_id),
+                ))
+                .await;
+                Err(format!("HTTP {}", resp.status()))
+            }
+            Err(err) => {
+                *self.active_url.lock().await = None;
+                self.set_issue(classify_network_issue(RequestContext::ThumbnailFetch, &err))
+                    .await;
+                Err(err.to_string())
+            }
+        }
+    }
+
+    pub async fn fetch_asset_details(&self, asset_id: &str) -> Result<AssetDetails, String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/assets/{}", base_url, asset_id);
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp
+                .json::<AssetDetails>()
+                .await
+                .map_err(|err| err.to_string()),
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    pub async fn download_original_to_file(
+        &self,
+        asset_id: &str,
+        output_path: &std::path::Path,
+        progress: Option<TransferProgressCallback>,
+    ) -> Result<(), String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/assets/{}/original", base_url, asset_id);
+
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Accept", "application/octet-stream")
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await
+        {
+            Ok(mut resp) if resp.status().is_success() => {
+                use tokio::io::AsyncWriteExt;
+                let total_bytes = resp.content_length();
+                let mut written = 0_u64;
+                let mut file = tokio::fs::File::create(output_path)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+                    file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+                    written = written.saturating_add(chunk.len() as u64);
+                    if let Some(callback) = &progress {
+                        callback(written, total_bytes);
+                    }
+                }
+                self.clear_issue().await;
+                Ok(())
+            }
+            Ok(resp) => {
+                self.set_issue(classify_http_issue(
+                    RequestContext::AssetDownload,
+                    resp.status().as_u16(),
+                    Some(asset_id),
+                ))
+                .await;
+                Err(format!("HTTP {}", resp.status()))
+            }
+            Err(err) => {
+                *self.active_url.lock().await = None;
+                self.set_issue(classify_network_issue(RequestContext::AssetDownload, &err))
+                    .await;
+                Err(err.to_string())
+            }
+        }
+    }
+
+    pub async fn fetch_current_user_id(&self) -> Result<String, String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/users/me", base_url);
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let json: serde_json::Value = resp.json().await.map_err(|err| err.to_string())?;
+                json.get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| "Missing id in /users/me response".to_string())
+            }
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    pub async fn delete_assets(&self, asset_ids: &[String]) -> Result<(), String> {
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/assets", base_url);
+        let body = serde_json::json!({
+            "ids": asset_ids,
+            "force": false,
+        });
+        match self
+            .client
+            .delete(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(15))
+            .body(body.to_string())
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                self.clear_issue().await;
+                Ok(())
+            }
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
