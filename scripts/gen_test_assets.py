@@ -77,7 +77,10 @@ def _gen_pillow(fmt: str, save_kwargs: dict | None = None):
         # incompressible, so the resulting file's size scales with size_hint_px.
         seed = rng.getrandbits(64)
         local = random.Random(seed)
-        raw = bytes(local.getrandbits(8) for _ in range(w * h * 3))
+        if hasattr(local, "randbytes"):
+            raw = local.randbytes(w * h * 3)
+        else:
+            raw = bytes(local.getrandbits(8) for _ in range(w * h * 3))
         img = Image.frombytes("RGB", (w, h), raw)
         buf = io.BytesIO()
         img.save(buf, fmt, **(save_kwargs or {}))
@@ -93,7 +96,7 @@ def gen_svg(rng: random.Random, size_hint_px: int) -> bytes:
     body = (
         f'<?xml version="1.0" encoding="UTF-8"?>\n'
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
-        f'<!-- mimick-test-{nonce:032x} -->'
+        f"<!-- mimick-test-{nonce:032x} -->"
         f'<rect width="16" height="16" fill="#{rng.randrange(0, 0xFFFFFF):06x}"/>'
         f"</svg>\n"
     )
@@ -107,49 +110,92 @@ def gen_bmp(rng: random.Random, size_hint_px: int) -> bytes:
     pixel_data_size = row_padded * h
     file_size = 14 + 40 + pixel_data_size
     header = b"BM" + struct.pack("<IHHI", file_size, 0, 0, 14 + 40)
-    dib = struct.pack("<IIIHHIIIIII", 40, w, h, 1, 24, 0, pixel_data_size, 2835, 2835, 0, 0)
+    dib = struct.pack(
+        "<IiiHHIIIIII", 40, w, h, 1, 24, 0, pixel_data_size, 2835, 2835, 0, 0
+    )
     seed = rng.getrandbits(64)
     local = random.Random(seed)
+
+    use_randbytes = hasattr(local, "randbytes")
     rows = []
     for _ in range(h):
-        row = bytes(local.getrandbits(8) for _ in range(w * 3))
+        row = (
+            local.randbytes(w * 3)
+            if use_randbytes
+            else bytes(local.getrandbits(8) for _ in range(w * 3))
+        )
         rows.append(row + b"\x00" * (row_padded - len(row)))
     return header + dib + b"".join(rows)
 
 
-def gen_mp4(rng: random.Random, size_hint_px: int) -> bytes:
-    # Use ffmpeg to encode a 1-second monochrome noise video at the requested
-    # resolution. Returns None as a sentinel if ffmpeg isn't on PATH; the
-    # caller will skip the format.
-    if shutil.which("ffmpeg") is None:
-        return b""
-    w = h = max(16, size_hint_px)
-    seed = rng.getrandbits(31)
-    cmd = [
-        "ffmpeg",
-        "-loglevel", "error",
-        "-f", "lavfi",
-        "-i", f"nullsrc=size={w}x{h}:duration=1:rate=30",
-        "-vf", f"geq=random({seed}/255):128:128",
-        "-pix_fmt", "yuv420p",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-f", "mp4",
-        "-movflags", "+frag_keyframe+empty_moov",
-        "pipe:1",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, check=False)
-    if proc.returncode != 0:
-        return b""
-    return proc.stdout
+def gen_ffmpeg(fmt: str):
+    def inner(rng: random.Random, size_hint_px: int) -> bytes:
+        if shutil.which("ffmpeg") is None:
+            return b""
+        w = h = max(16, size_hint_px)
+        w = (w + 1) // 2 * 2  # h264 requires even dimensions
+        h = (h + 1) // 2 * 2
+        seed = rng.getrandbits(31)
+
+        import tempfile
+
+        tmp_name = os.path.join(tempfile.gettempdir(), f"mimick_bench_{seed:08x}.{fmt}")
+
+        cmd = [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"nullsrc=size={w}x{h}:duration=1:rate=30",
+            "-vf",
+            f"geq=random({seed}/255):128:128",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+            tmp_name,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, check=False)
+        if proc.returncode != 0:
+            if os.path.exists(tmp_name):
+                os.remove(tmp_name)
+            return b""
+
+        with open(tmp_name, "rb") as f:
+            data = f.read()
+        os.remove(tmp_name)
+        return data
+
+    return inner
 
 
 def gen_dummy(rng: random.Random, size_hint_px: int) -> bytes:
     # Generates reproducible random noise for formats where we don't have
     # a native builder. Mimick primarily relies on the extension and file size
     # for startup indexing, so dummy bytes work for scale benchmarking.
-    size = max(1024, size_hint_px * size_hint_px * 3)
-    return rng.randbytes(size)
+    # To prevent external tools from rejecting these as fully corrupted files,
+    # we prepend a minimal valid BMP header.
+    w = h = max(8, size_hint_px)
+    row_padded = (w * 3 + 3) & ~3
+    pixel_data_size = row_padded * h
+    file_size = 54 + pixel_data_size
+    if file_size < 1024:
+        pixel_data_size += 1024 - file_size
+        file_size = 1024
+
+    header = b"BM" + struct.pack("<IHHI", file_size, 0, 0, 54)
+    dib = struct.pack(
+        "<IiiHHIIIIII", 40, w, h, 1, 24, 0, pixel_data_size, 2835, 2835, 0, 0
+    )
+
+    use_randbytes = hasattr(rng, "randbytes")
+    noise = (
+        rng.randbytes(file_size - 54)
+        if use_randbytes
+        else bytes(rng.getrandbits(8) for _ in range(file_size - 54))
+    )
+    return header + dib + noise
 
 
 @dataclass(frozen=True)
@@ -164,25 +210,34 @@ def build_format_registry() -> dict[str, FormatSpec]:
     return {
         # Standard images
         "avif": FormatSpec("avif", gen_dummy),
-        "bmp":  FormatSpec("bmp",  gen_bmp),
-        "gif":  FormatSpec("gif",  _gen_pillow("GIF"),                   needs_pillow=True),
+        "bmp": FormatSpec("bmp", gen_bmp),
+        "gif": FormatSpec("gif", _gen_pillow("GIF"), needs_pillow=True),
         "heic": FormatSpec("heic", gen_dummy),
         "heif": FormatSpec("heif", gen_dummy),
-        "hif":  FormatSpec("hif",  gen_dummy),
+        "hif": FormatSpec("hif", gen_dummy),
         "insp": FormatSpec("insp", gen_dummy),
-        "jpe":  FormatSpec("jpe",  _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
-        "jpeg": FormatSpec("jpeg", _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
-        "jpg":  FormatSpec("jpg",  _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
-        "jp2":  FormatSpec("jp2",  gen_dummy),
-        "jxl":  FormatSpec("jxl",  gen_dummy),
-        "png":  FormatSpec("png",  _gen_pillow("PNG"),                   needs_pillow=True),
-        "mpo":  FormatSpec("mpo",  _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True),
-        "psd":  FormatSpec("psd",  gen_dummy),
-        "svg":  FormatSpec("svg",  gen_svg),
-        "tif":  FormatSpec("tif",  _gen_pillow("TIFF"),                  needs_pillow=True),
-        "tiff": FormatSpec("tiff", _gen_pillow("TIFF"),                  needs_pillow=True),
-        "webp": FormatSpec("webp", _gen_pillow("WebP", {"quality": 80}), needs_pillow=True),
-        
+        "jpe": FormatSpec(
+            "jpe", _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True
+        ),
+        "jpeg": FormatSpec(
+            "jpeg", _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True
+        ),
+        "jpg": FormatSpec(
+            "jpg", _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True
+        ),
+        "jp2": FormatSpec("jp2", gen_dummy),
+        "jxl": FormatSpec("jxl", gen_dummy),
+        "png": FormatSpec("png", _gen_pillow("PNG"), needs_pillow=True),
+        # "mpo": FormatSpec(
+        #     "mpo", _gen_pillow("JPEG", {"quality": 85}), needs_pillow=True
+        # ),
+        "psd": FormatSpec("psd", gen_dummy),
+        "svg": FormatSpec("svg", gen_svg),
+        "tif": FormatSpec("tif", _gen_pillow("TIFF"), needs_pillow=True),
+        "tiff": FormatSpec("tiff", _gen_pillow("TIFF"), needs_pillow=True),
+        "webp": FormatSpec(
+            "webp", _gen_pillow("WebP", {"quality": 80}), needs_pillow=True
+        ),
         # RAW Formats
         "3fr": FormatSpec("3fr", gen_dummy),
         "ari": FormatSpec("ari", gen_dummy),
@@ -213,28 +268,27 @@ def build_format_registry() -> dict[str, FormatSpec]:
         "srf": FormatSpec("srf", gen_dummy),
         "srw": FormatSpec("srw", gen_dummy),
         "x3f": FormatSpec("x3f", gen_dummy),
-
         # Video formats
-        "3gp":  FormatSpec("3gp",  gen_dummy),
-        "3gpp": FormatSpec("3gpp", gen_dummy),
-        "avi":  FormatSpec("avi",  gen_dummy),
-        "flv":  FormatSpec("flv",  gen_dummy),
+        "3gp": FormatSpec("3gp", gen_ffmpeg("3gp"), needs_ffmpeg=True),
+        "3gpp": FormatSpec("3gpp", gen_ffmpeg("3gp"), needs_ffmpeg=True),
+        "avi": FormatSpec("avi", gen_ffmpeg("avi"), needs_ffmpeg=True),
+        "flv": FormatSpec("flv", gen_ffmpeg("flv"), needs_ffmpeg=True),
         "insv": FormatSpec("insv", gen_dummy),
-        "mp4":  FormatSpec("mp4",  gen_mp4, needs_ffmpeg=True),
-        "m2t":  FormatSpec("m2t",  gen_dummy),
-        "m2ts": FormatSpec("m2ts", gen_dummy),
-        "mts":  FormatSpec("mts",  gen_dummy),
-        "ts":   FormatSpec("ts",   gen_dummy),
-        "m4v":  FormatSpec("m4v",  gen_dummy),
-        "mkv":  FormatSpec("mkv",  gen_dummy),
-        "mpe":  FormatSpec("mpe",  gen_dummy),
-        "mpeg": FormatSpec("mpeg", gen_dummy),
-        "mpg":  FormatSpec("mpg",  gen_dummy),
-        "mov":  FormatSpec("mov",  gen_dummy),
-        "mxf":  FormatSpec("mxf",  gen_dummy),
-        "vob":  FormatSpec("vob",  gen_dummy),
-        "webm": FormatSpec("webm", gen_dummy),
-        "wmv":  FormatSpec("wmv",  gen_dummy),
+        "mp4": FormatSpec("mp4", gen_ffmpeg("mp4"), needs_ffmpeg=True),
+        "m2t": FormatSpec("m2t", gen_ffmpeg("m2t"), needs_ffmpeg=True),
+        "m2ts": FormatSpec("m2ts", gen_ffmpeg("m2ts"), needs_ffmpeg=True),
+        "mts": FormatSpec("mts", gen_ffmpeg("mts"), needs_ffmpeg=True),
+        "ts": FormatSpec("ts", gen_ffmpeg("ts"), needs_ffmpeg=True),
+        "m4v": FormatSpec("m4v", gen_ffmpeg("m4v"), needs_ffmpeg=True),
+        "mkv": FormatSpec("mkv", gen_ffmpeg("mkv"), needs_ffmpeg=True),
+        "mpe": FormatSpec("mpe", gen_ffmpeg("mpeg"), needs_ffmpeg=True),
+        "mpeg": FormatSpec("mpeg", gen_ffmpeg("mpeg"), needs_ffmpeg=True),
+        "mpg": FormatSpec("mpg", gen_ffmpeg("mpg"), needs_ffmpeg=True),
+        "mov": FormatSpec("mov", gen_ffmpeg("mov"), needs_ffmpeg=True),
+        "mxf": FormatSpec("mxf", gen_ffmpeg("mxf"), needs_ffmpeg=True),
+        "vob": FormatSpec("vob", gen_ffmpeg("vob"), needs_ffmpeg=True),
+        "webm": FormatSpec("webm", gen_ffmpeg("webm"), needs_ffmpeg=True),
+        "wmv": FormatSpec("wmv", gen_ffmpeg("wmv"), needs_ffmpeg=True),
     }
 
 
@@ -264,7 +318,9 @@ def plan_distribution(
     """
     plan: list[PlanEntry] = []
     for i in range(count):
-        plan.append(PlanEntry(index=i, format=formats[i % len(formats)], duplicate_of=None))
+        plan.append(
+            PlanEntry(index=i, format=formats[i % len(formats)], duplicate_of=None)
+        )
 
     n_dupes = int(count * duplicate_ratio)
     if n_dupes == 0 or count <= 1:
@@ -350,7 +406,9 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     p.add_argument("--out", required=True, type=Path, help="Output directory.")
-    p.add_argument("--count", type=int, default=200, help="Total files to generate (default: 200).")
+    p.add_argument(
+        "--count", type=int, default=200, help="Total files to generate (default: 200)."
+    )
     p.add_argument(
         "--formats",
         type=str,
@@ -381,7 +439,12 @@ def parse_args() -> argparse.Namespace:
         default=64,
         help="Image edge in pixels; controls per-file size (default: 64).",
     )
-    p.add_argument("--seed", type=int, default=42, help="RNG seed for reproducibility (default: 42).")
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="RNG seed for reproducibility (default: 42).",
+    )
     return p.parse_args()
 
 
@@ -395,10 +458,16 @@ def resolve_formats(requested: list[str], registry: dict[str, FormatSpec]) -> li
             print(f"warning: unknown format '{fmt}' (skipped)", file=sys.stderr)
             continue
         if spec.needs_pillow and not pillow_ok:
-            print(f"warning: format '{fmt}' needs Pillow (pip install Pillow); skipped", file=sys.stderr)
+            print(
+                f"warning: format '{fmt}' needs Pillow (pip install Pillow); skipped",
+                file=sys.stderr,
+            )
             continue
         if spec.needs_ffmpeg and not ffmpeg_ok:
-            print(f"warning: format '{fmt}' needs ffmpeg on PATH; skipped", file=sys.stderr)
+            print(
+                f"warning: format '{fmt}' needs ffmpeg on PATH; skipped",
+                file=sys.stderr,
+            )
             continue
         resolved.append(fmt)
     return resolved
@@ -443,7 +512,9 @@ def main() -> int:
     elapsed = time.monotonic() - started
 
     print()
-    print(f"wrote {result['written']} files ({result['bytes'] / 1_048_576:.1f} MiB) in {elapsed:.1f}s")
+    print(
+        f"wrote {result['written']} files ({result['bytes'] / 1_048_576:.1f} MiB) in {elapsed:.1f}s"
+    )
     print(f"unique content hashes: {result['unique_hashes']}")
     print(f"per-format: {result['per_format']}")
     if result["skipped_cap"]:
