@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Per-folder sync rules: each watch folder can be set independently to **Upload only**, **Download only**, or **Full sync**. Bidirectional sync deletions (local→remote, remote→local) are configurable per folder and independent of the sync method, with both off by default (#120).
+- Periodic remote-album reconciler (5 min) so changes made directly on Immich mirror back without waiting for the next startup scan (#120).
+- Pre-flight checksum dedup before upload (batched on startup, per-asset on live events) and local rename detection so renaming doesn't cause an upload+trash cycle (#120).
+- Three-tier local trash (`gio` → XDG portal → manual XDG) for reliable trashing of Flatpak document-portal paths (#120).
+- Documented Immich API key permission requirements end-to-end: README/wiki tables, in-app welcome and field subtitles, 401/403 error guidance, and a troubleshooting entry (#120).
+- Asset generator tool overhaul and testing wiki page (#118); Codacy badge in the README (#116).
+
+### Changed
+
+- Split three large modules into directory modules with focused submodules to improve incremental compile times: `library/mod.rs` (3725 LOC → 7 submodules), `api_client.rs` (2224 LOC → 6), `settings_window.rs` (2173 LOC → 2). No behaviour change (#117).
+- Album→folder local trash is gated off until the upstream Flatpak portal trash bug is fixed; the settings toggle is disabled with an explanatory subtitle (#120).
+- Info logs are quieter — internal mechanics moved to debug; `MIMICK_PROFILE=dev` defaults to `mimick=debug` (#120).
+- CI: switched workflows to `ubuntu-latest`, decoupled the two Flatpak manifests' build triggers, removed the deprecated maintainer-approval workflow, and CodeQL now sets up Rust + `cargo fetch` for reliable extraction.
+- Dependabot: bumped `taiki-e/install-action`, `github/codeql-action`, `flatpak/flatpak-github-actions`, and `release-drafter/release-drafter` (#119).
+
+### Fixed
+
+- Live file-monitor events no longer re-upload already-synced files. The `MonitorEvent::Ready` handler now consults `ShardedSyncIndex` via `sync_decision` before queueing, mirroring the startup-scan path. Without this, `PollWatcher` (Flatpak's polling watcher for portal FUSE paths) could lose its internal "seen" state under heavy I/O and re-emit Create events for unchanged files.
+- Multiple deletion-safety fixes in the new sync engine: strict `album_id` match so re-targeting a folder doesn't mass-trash local files; per-album reconcile lock so manual + periodic sync can't race; two-tick confirmation for batch deletions >5; assets present elsewhere on the server (in another album, or referenced from another watch folder) are kept or only de-associated rather than fully trashed; orphan classification requires physical absence on disk (#120).
+- Immich base64 asset checksums normalised to hex at deserialisation; self-induced filesystem events suppressed so own trash/download no longer propagate back as sync work; live monitor clears sync records only after the server op succeeds so transient failures retry on the next tick (#120).
+
 ## [9.5.3] - 2026-05-11
 
 ### Added

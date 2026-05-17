@@ -40,7 +40,7 @@ use queue_manager::{EnvironmentPolicy, FileTask, QueueManager};
 use settings_window::build_settings_window;
 use startup_scan::queue_unsynced_files;
 use state_manager::{AppState, StateManager};
-use sync_index::ShardedSyncIndex;
+use sync_index::{ShardedSyncIndex, SyncDecision, SyncTarget};
 use tray_icon::build_tray;
 
 use flexi_logger::{
@@ -464,7 +464,6 @@ async fn main() {
                         if deletion_ctx.expected_self_downloads.consume(&path) {
                             continue;
                         }
-                        log::info!("Queuing: {} (sha1={})", path, checksum);
 
                         let (album_id, album_name, watch_path) = {
                             let path_configs = live_watch_paths_for_queue.lock();
@@ -486,14 +485,46 @@ async fn main() {
                                 .unwrap_or((None, None, String::new()))
                         };
 
+                        let target = SyncTarget {
+                            album_name: album_name.clone(),
+                            album_id: album_id.clone(),
+                        };
+                        let (reassociate_only, task_checksum) = match deletion_ctx
+                            .sync_index
+                            .sync_decision(std::path::Path::new(&path), &target)
+                        {
+                            Ok(SyncDecision::UpToDate) => {
+                                log::debug!("Skipping unchanged file: {}", path);
+                                continue;
+                            }
+                            Ok(SyncDecision::NeedsReassociate) => (
+                                true,
+                                deletion_ctx
+                                    .sync_index
+                                    .stored_checksum(&path)
+                                    .unwrap_or(checksum),
+                            ),
+                            Ok(SyncDecision::NeedsUpload) => (false, checksum),
+                            Err(err) => {
+                                log::warn!(
+                                    "Could not inspect sync index for '{}': {}; queuing anyway",
+                                    path,
+                                    err
+                                );
+                                (false, checksum)
+                            }
+                        };
+
+                        log::info!("Queuing: {} (sha1={})", path, task_checksum);
+
                         let _ = qm_clone
                             .add_to_queue(FileTask {
                                 path,
                                 watch_path,
-                                checksum,
+                                checksum: task_checksum,
                                 album_id,
                                 album_name,
-                                reassociate_only: false,
+                                reassociate_only,
                             })
                             .await;
                     }
