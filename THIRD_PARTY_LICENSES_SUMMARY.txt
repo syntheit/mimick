@@ -15,7 +15,7 @@ Full license texts are shipped alongside the application binary.
   1 crates: zlib License (Zlib)
 
 == Crate listing ==
-  openssl 0.10.79 — Apache-2.0
+  openssl 0.10.80 — Apache-2.0
   blake3 1.8.5 — Apache-2.0
   constant_time_eq 0.4.2 — Apache-2.0
   sync_wrapper 1.0.2 — Apache-2.0
@@ -23,7 +23,7 @@ Full license texts are shipped alongside the application binary.
   subtle 2.6.1 — BSD-3-Clause
   encoding_rs 0.8.35 — BSD-3-Clause
   notify 8.2.0 — CC0-1.0
-  mimick 9.5.3 — GPL-3.0-or-later
+  mimick 9.5.4 — GPL-3.0-or-later
   inotify-sys 0.1.5 — ISC
   inotify 0.11.1 — ISC
   uds_windows 1.2.1 — MIT
@@ -41,7 +41,7 @@ Full license texts are shipped alongside the application binary.
   cfg-if 1.0.4 — MIT
   js-sys 0.3.98 — MIT
   openssl-probe 0.2.1 — MIT
-  openssl-sys 0.9.115 — MIT
+  openssl-sys 0.9.116 — MIT
   socket2 0.6.3 — MIT
   wasm-bindgen-futures 0.4.71 — MIT
   wasm-bindgen-macro-support 0.2.121 — MIT
@@ -88,7 +88,7 @@ Full license texts are shipped alongside the application binary.
   parking_lot 0.12.5 — MIT
   parking_lot_core 0.9.12 — MIT
   native-tls 0.2.18 — MIT
-  kqueue-sys 1.1.1 — MIT
+  kqueue-sys 1.1.2 — MIT
   kqueue 1.1.1 — MIT
   indexmap 2.14.0 — MIT
   equivalent 1.0.2 — MIT
@@ -173,7 +173,7 @@ Full license texts are shipped alongside the application binary.
   zeroize 1.8.2 — MIT
   tokio-macros 2.7.0 — MIT
   zeroize_derive 1.4.3 — MIT
-  ashpd 0.13.10 — MIT
+  ashpd 0.13.11 — MIT
   oo7 0.6.0 — MIT
   libredox 0.1.16 — MIT
   chrono 0.4.44 — MIT
@@ -242,7 +242,7 @@ Full license texts are shipped alongside the application binary.
   zmij 1.0.21 — MIT
   zvariant_utils 3.3.1 — MIT
   allocator-api2 0.2.21 — MIT
-  winnow 1.0.2 — MIT
+  winnow 1.0.3 — MIT
   cairo-rs 0.22.0 — MIT
   cairo-sys-rs 0.22.0 — MIT
   gdk-pixbuf-sys 0.22.0 — MIT
@@ -309,7 +309,7 @@ Full license texts are shipped alongside the application binary.
   yoke-derive 0.8.2 — Unicode-3.0
   yoke 0.8.2 — Unicode-3.0
   zerofrom-derive 0.1.7 — Unicode-3.0
-  zerofrom 0.1.7 — Unicode-3.0
+  zerofrom 0.1.8 — Unicode-3.0
   zerotrie 0.2.4 — Unicode-3.0
   zerovec-derive 0.11.3 — Unicode-3.0
   zerovec 0.11.6 — Unicode-3.0

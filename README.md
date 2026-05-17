@@ -17,7 +17,14 @@
 
 [![Flathub Version](https://img.shields.io/flathub/v/dev.nicx.mimick?style=for-the-badge&logoSize=auto&color=%23e9b24c)](https://flathub.org/en/apps/dev.nicx.mimick)
 [![Flathub Downloads](https://img.shields.io/flathub/downloads/dev.nicx.mimick?style=for-the-badge&color=%23e9b24c)](https://flathub.org/en/apps/dev.nicx.mimick)
-![Codacy grade (branch)](https://img.shields.io/codacy/grade/b79ffac30db1427cae73a56ed8c89fee/main?style=for-the-badge)
+
+![Sonar Quality Gate](https://img.shields.io/sonar/quality_gate/nicx17_mimick?server=https%3A%2F%2Fsonarcloud.io&style=for-the-badge)
+
+[![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=nicx17_mimick&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=nicx17_mimick)
+[![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=nicx17_mimick&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=nicx17_mimick)
+[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=nicx17_mimick&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=nicx17_mimick)
+
+[![SonarQube Cloud](https://sonarcloud.io/images/project_badges/sonarcloud-light.svg)](https://sonarcloud.io/summary/new_code?id=nicx17_mimick)
 
 </div>
 
