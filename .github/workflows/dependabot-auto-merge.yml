@@ -4,9 +4,7 @@ on:
   pull_request_review:
     types: [submitted]
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: read-all
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -15,6 +13,9 @@ env:
 jobs:
   enable-auto-merge:
     name: Enable auto-merge for approved dependency PRs
+    permissions:
+      contents: write
+      pull-requests: write
     if: |
       github.event.review.state == 'approved' &&
       github.event.review.user.login == 'nicx17' &&
