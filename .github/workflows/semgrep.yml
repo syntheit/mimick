@@ -1,0 +1,52 @@
+name: "Semgrep Security Scan"
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/semgrep.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/semgrep.yml"
+  schedule:
+    - cron: "30 2 * * 1" # Runs weekly as a fallback
+
+permissions:
+  security-events: write
+  actions: read
+  contents: read
+
+jobs:
+  semgrep:
+    name: Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run Semgrep
+        run: |
+          python3 -m pip install --quiet 'semgrep==1.163.0'
+          semgrep scan \
+            --config="p/rust" \
+            --config="p/secrets" \
+            --sarif --output=semgrep.sarif || true
+          # Known false positives (unsafe-usage in GTK bindings, SHA-1 mandated by
+          # Immich protocol, current-exe in autostart entry) are dismissed in the
+          # GitHub Security tab so the audit trail lives next to the alerts.
+          # `|| true` keeps the SARIF upload step running even when findings exist;
+          # GitHub Code Scanning surfaces severities, so CI gating happens there.
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@7c1e4cf0b20d7c1872b26569c00ba908797a59bf # v4
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
