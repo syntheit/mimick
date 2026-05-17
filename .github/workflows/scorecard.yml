@@ -1,0 +1,47 @@
+name: "OpenSSF Scorecard"
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - 'docs/**'
+      - 'wiki/**'
+      - 'site/**'
+      - 'scripts/**'
+      - 'setup/**'
+      - 'CHANGELOG.md'
+      - 'roadmap.md'
+      - 'about.hbs'
+      - 'about-summary.hbs'
+      - '*.py'
+  schedule:
+    - cron: '30 2 * * 1'
+
+permissions:
+  security-events: write
+  id-token: write
+  actions: read
+  contents: read
+
+jobs:
+  scorecard:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run OpenSSF Scorecard
+        uses: ossf/scorecard-action@99c09fe975337306107572b4fdf4db224cf8e2f2 # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload to GitHub Security Tab
+        uses: github/codeql-action/upload-sarif@7c1e4cf0b20d7c1872b26569c00ba908797a59bf # v4
+        with:
+          sarif_file: results.sarif
+          category: scorecard
