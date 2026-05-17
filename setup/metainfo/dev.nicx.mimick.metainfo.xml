@@ -13,18 +13,14 @@
     <name>Nick Cardoso</name>
   </developer>
   <description>
-    <p>
-      Mimick is a native Linux desktop client designed to seamlessly integrate your local media with your self-hosted Immich server. Operating quietly in the background, it continuously monitors your designated folders and automatically streams new photos and videos to your server in real-time.
-    </p>
-    <p>
-      Beyond automatic backups, Mimick features a powerful built-in Library View that brings your entire Immich collection directly to your desktop. You can seamlessly browse your timeline, manage remote albums, explore geotagged locations, and leverage advanced search capabilities—including AI-powered Smart Search, OCR text matching, and EXIF metadata filtering—without ever needing to open a web browser.
-    </p>
-    <p>
-      Built entirely in Rust with a modern GTK4 interface, Mimick is highly optimized for performance and reliability. It employs intelligent SHA-1 deduplication to prevent redundant transfers, utilizes parallel worker threads for high-speed uploads, and safely persists its state offline so you never lose data during network interruptions. It is also environment-aware, automatically pausing resource-intensive operations when your device is on battery power or a metered connection.
-    </p>
-    <p>
-      Designed for transparency and user-led control, Mimick includes a comprehensive settings dashboard, a queue inspector for troubleshooting, and a system tray indicator for quick access. With configurable watch rules, quiet hours, and strict one-way mirroring, you retain absolute control over your backup process while keeping your local filesystem completely untouched.
-    </p>
+    <p>Mimick is a native Linux desktop client for self-hosted Immich servers. It monitors your folders in the background and automatically syncs photos and videos to your server.</p>
+    <ul>
+      <li>Per-folder sync methods: upload only, download only, or full bidirectional sync with optional deletion mirroring.</li>
+      <li>Built-in Library View for browsing your timeline, managing albums, and searching with Smart Search, OCR, and metadata filters.</li>
+      <li>SHA-1 deduplication, parallel upload workers, and offline retry queue for reliable transfers.</li>
+      <li>Environment-aware: automatically pauses on battery or metered connections. Configurable quiet hours and per-folder rules.</li>
+      <li>Built in Rust with GTK4 and Libadwaita. System tray integration and Flatpak sandbox support.</li>
+    </ul>
     <p>Mimick is a community-developed client and is not affiliated with or endorsed by the Immich project.</p>
   </description>
 
@@ -108,6 +104,11 @@
   </keywords>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="9.5.4" date="2026-05-17">
+      <description>
+        <p>Each watch folder can now be set to one of three sync methods: Full (upload and download), Upload Only, or Download Only.Deletion mirroring is also available per folder, letting local file removals propagate to the remote album. Startup catch-up mode can now be configured independently on each folder.</p>
+      </description>
+    </release>
     <release version="9.5.3" date="2026-05-11">
       <description>
         <p>This major update brings significant enhancements to the library viewing experience, including new lightbox image zoom capabilities, smooth slide animations, and dedicated back navigation. The Explore page has also been upgraded to show all of your geotagged locations, and asset timestamps now accurately reflect your local timezone.</p>

@@ -6,7 +6,7 @@ Their license terms apply in addition to Mimick's own GPL-3.0-or-later license.
 --------------------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
 Used by:
-  - openssl 0.10.79
+  - openssl 0.10.80
 --------------------------------------------------------------------------------
 
                                  Apache License
@@ -464,7 +464,7 @@ For these and/or other purposes and motivations, and without any expectation of 
 --------------------------------------------------------------------------------
 GNU General Public License v3.0 or later (GPL-3.0-or-later)
 Used by:
-  - mimick 9.5.3
+  - mimick 9.5.4
 --------------------------------------------------------------------------------
 
                     GNU GENERAL PUBLIC LICENSE
@@ -1439,7 +1439,7 @@ Used by:
   - cfg-if 1.0.4
   - js-sys 0.3.98
   - openssl-probe 0.2.1
-  - openssl-sys 0.9.115
+  - openssl-sys 0.9.116
   - socket2 0.6.3
   - wasm-bindgen-futures 0.4.71
   - wasm-bindgen-macro-support 0.2.121
@@ -2050,7 +2050,7 @@ SOFTWARE.
 --------------------------------------------------------------------------------
 MIT License (MIT)
 Used by:
-  - kqueue-sys 1.1.1
+  - kqueue-sys 1.1.2
   - kqueue 1.1.1
 --------------------------------------------------------------------------------
 
@@ -4233,7 +4233,7 @@ SOFTWARE.
 --------------------------------------------------------------------------------
 MIT License (MIT)
 Used by:
-  - ashpd 0.13.10
+  - ashpd 0.13.11
 --------------------------------------------------------------------------------
 
 MIT License
@@ -4544,7 +4544,7 @@ DEALINGS IN THE SOFTWARE.
 --------------------------------------------------------------------------------
 MIT License (MIT)
 Used by:
-  - winnow 1.0.2
+  - winnow 1.0.3
 --------------------------------------------------------------------------------
 
 Permission is hereby granted, free of charge, to any person obtaining
@@ -5521,7 +5521,7 @@ Used by:
   - yoke-derive 0.8.2
   - yoke 0.8.2
   - zerofrom-derive 0.1.7
-  - zerofrom 0.1.7
+  - zerofrom 0.1.8
   - zerotrie 0.2.4
   - zerovec-derive 0.11.3
   - zerovec 0.11.6
