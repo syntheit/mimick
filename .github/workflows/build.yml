@@ -12,17 +12,20 @@ jobs:
   sonarqube:
     name: SonarQube
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     permissions:
       contents: read
     steps:
+      - name: Install system dependencies
+        # Full upgrade first, then install — Arch disallows partial upgrades.
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed gtk4 libadwaita glib2 pkgconf base-devel libsecret git jre-openjdk-headless unzip
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0 # Shallow clones should be disabled for a better relevancy of analysis
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libglib2.0-dev pkg-config build-essential libsecret-1-dev
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
