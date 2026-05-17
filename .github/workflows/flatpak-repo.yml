@@ -23,10 +23,15 @@ jobs:
   build-repo:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
-      options: --privileged
+      image: archlinux:latest
 
     steps:
+      - name: Install system dependencies
+        # Full upgrade first, then install — Arch disallows partial upgrades.
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed gtk4 libadwaita glib2 pkgconf base-devel libsecret git
+
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
