@@ -251,6 +251,58 @@ impl ImmichApiClient {
     }
 
     /// Check whether an asset already exists on the server by checksum and return its asset ID.
+    /// Batch checksum existence check. Returns a map from checksum to asset id
+    /// for every checksum the server already has. Missing checksums are absent
+    /// from the result. The Immich endpoint accepts arbitrary batch sizes, but
+    /// we chunk to keep request bodies modest.
+    pub async fn bulk_existing_asset_ids(&self, checksums: &[String]) -> HashMap<String, String> {
+        const CHUNK: usize = 500;
+        let mut out: HashMap<String, String> = HashMap::new();
+        let Some(base_url) = self.get_active_url().await else {
+            return out;
+        };
+        let url = format!("{}/api/assets/bulk-upload-check", base_url);
+        let api_key = self.settings.read().api_key.clone();
+
+        for chunk in checksums.chunks(CHUNK) {
+            let assets: Vec<_> = chunk
+                .iter()
+                .map(|c| serde_json::json!({ "id": c, "checksum": c }))
+                .collect();
+            let body = serde_json::json!({ "assets": assets });
+
+            match self
+                .client
+                .post(&url)
+                .header("x-api-key", &api_key)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .json(&body)
+                .timeout(Duration::from_secs(30))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await
+                        && let Some(results) = json["results"].as_array()
+                    {
+                        for item in results {
+                            let id = item["id"].as_str();
+                            let asset_id = item["assetId"].as_str();
+                            if let (Some(checksum), Some(asset_id)) = (id, asset_id) {
+                                out.insert(checksum.to_string(), asset_id.to_string());
+                            }
+                        }
+                    }
+                }
+                Ok(resp) => log::warn!("Bulk upload check returned {}", resp.status()),
+                Err(err) => log::warn!("Bulk upload check request failed: {}", err),
+            }
+        }
+
+        out
+    }
+
     pub async fn find_existing_asset_id(&self, checksum: &str) -> Option<String> {
         let base_url = self.get_active_url().await?;
         let url = format!("{}/api/assets/bulk-upload-check", base_url);
@@ -354,6 +406,86 @@ impl ImmichApiClient {
                 log::error!("Network error adding assets to album: {}", e);
                 self.set_issue(classify_network_issue(RequestContext::AlbumAssign, &e))
                     .await;
+                false
+            }
+        }
+    }
+
+    /// Count the albums that currently contain the given asset on the
+    /// server. Drives the trash-vs-remove-from-album decision when mirroring
+    /// a local deletion: an asset in multiple albums should only be unlinked
+    /// from the linked album, never destroyed.
+    pub async fn count_albums_for_asset(&self, asset_id: &str) -> Option<usize> {
+        let base_url = self.get_active_url().await?;
+        let url = format!("{}/api/albums?assetId={}", base_url, asset_id);
+        let api_key = self.settings.read().api_key.clone();
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &api_key)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let albums: Vec<serde_json::Value> = resp.json().await.ok()?;
+                Some(albums.len())
+            }
+            Ok(resp) => {
+                log::warn!(
+                    "count_albums_for_asset({}) returned {}",
+                    asset_id,
+                    resp.status()
+                );
+                None
+            }
+            Err(err) => {
+                log::warn!("count_albums_for_asset({}) failed: {}", asset_id, err);
+                None
+            }
+        }
+    }
+
+    /// Remove assets from an album without trashing them on the server. Used
+    /// when an asset is referenced from more than one watch folder — we want
+    /// to mirror the local deletion's album side, not destroy the asset.
+    pub async fn remove_assets_from_album(&self, album_id: &str, asset_ids: &[String]) -> bool {
+        if album_id.is_empty() || asset_ids.is_empty() {
+            return false;
+        }
+        let base_url = match self.get_active_url().await {
+            Some(u) => u,
+            None => return false,
+        };
+        let url = format!("{}/api/albums/{}/assets", base_url, album_id);
+        let api_key = self.settings.read().api_key.clone();
+        let body = serde_json::json!({ "ids": asset_ids });
+        match self
+            .client
+            .delete(&url)
+            .header("x-api-key", &api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .json(&body)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                log::info!(
+                    "Removed {} asset(s) from album '{}' (asset preserved on server)",
+                    asset_ids.len(),
+                    album_id
+                );
+                true
+            }
+            Ok(resp) => {
+                log::warn!("Remove-from-album returned {}", resp.status());
+                false
+            }
+            Err(err) => {
+                log::warn!("Remove-from-album request failed: {}", err);
                 false
             }
         }

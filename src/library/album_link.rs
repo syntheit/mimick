@@ -74,6 +74,16 @@ fn handle_album_sync_click(ui: Rc<LibraryWindowUi>) {
         return;
     };
     let watch_path = std::path::PathBuf::from(entry.path());
+    // Sync from the album view should preview every operation regardless of
+    // per-folder gates — the user gets explicit checkboxes for each direction
+    // in the confirmation dialog and can opt in even when the folder's rules
+    // would otherwise suppress them.
+    let rules = crate::config::FolderRules {
+        delete_folder_to_album: true,
+        delete_album_to_folder: true,
+        sync_method: crate::config::FolderSyncMethod::Full,
+        ..entry.rules()
+    };
 
     let ui_for_async = ui.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -81,6 +91,8 @@ fn handle_album_sync_click(ui: Rc<LibraryWindowUi>) {
             ui_for_async.ctx.clone(),
             &album_id,
             &watch_path,
+            &rules,
+            true,
         )
         .await
         {
@@ -103,8 +115,14 @@ fn present_sync_dialog(
 ) {
     let upload_count = diff.to_upload.len();
     let download_count = diff.to_download.len();
+    let remote_delete_count = diff.to_delete_remote.len();
+    let local_delete_count = diff.to_delete_local.len();
 
-    if upload_count == 0 && download_count == 0 {
+    if upload_count == 0
+        && download_count == 0
+        && remote_delete_count == 0
+        && local_delete_count == 0
+    {
         let msg = if diff.remote_unhashed > 0 {
             format!(
                 "Already in sync. ({} remote item(s) couldn't be matched — missing checksum.)",
@@ -153,8 +171,34 @@ fn present_sync_dialog(
         .active(download_count > 0)
         .sensitive(download_count > 0)
         .build();
-    body_box.append(&upload_check);
-    body_box.append(&download_check);
+    let remote_delete_check = gtk::CheckButton::builder()
+        .label(format!(
+            "Move {} album item(s) to trash",
+            remote_delete_count
+        ))
+        .active(remote_delete_count > 0)
+        .sensitive(remote_delete_count > 0)
+        .build();
+    let local_delete_check = gtk::CheckButton::builder()
+        .label(format!(
+            "Move {} local item(s) to trash",
+            local_delete_count
+        ))
+        .active(local_delete_count > 0)
+        .sensitive(local_delete_count > 0)
+        .build();
+    if upload_count > 0 {
+        body_box.append(&upload_check);
+    }
+    if download_count > 0 {
+        body_box.append(&download_check);
+    }
+    if remote_delete_count > 0 {
+        body_box.append(&remote_delete_check);
+    }
+    if local_delete_count > 0 {
+        body_box.append(&local_delete_check);
+    }
     dialog.set_extra_child(Some(&body_box));
 
     dialog.add_response("cancel", "Cancel");
@@ -170,7 +214,9 @@ fn present_sync_dialog(
         }
         let do_upload = upload_check.is_active();
         let do_download = download_check.is_active();
-        if !do_upload && !do_download {
+        let do_remote_delete = remote_delete_check.is_active();
+        let do_local_delete = local_delete_check.is_active();
+        if !do_upload && !do_download && !do_remote_delete && !do_local_delete {
             dlg.close();
             return;
         }
@@ -188,12 +234,22 @@ fn present_sync_dialog(
         } else {
             Vec::new()
         };
+        let to_delete_remote = if do_remote_delete {
+            diff.to_delete_remote.clone()
+        } else {
+            Vec::new()
+        };
+        let to_delete_local = if do_local_delete {
+            diff.to_delete_local.clone()
+        } else {
+            Vec::new()
+        };
         glib::MainContext::default().spawn_local(async move {
             let queued = if !to_upload.is_empty() {
                 crate::library::album_sync::execute_uploads(
                     ui.ctx.clone(),
-                    album_id,
-                    album_name,
+                    album_id.clone(),
+                    album_name.clone(),
                     watch_path.clone(),
                     to_upload,
                 )
@@ -205,19 +261,40 @@ fn present_sync_dialog(
                 crate::library::album_sync::execute_downloads(
                     ui.ctx.clone(),
                     watch_path,
+                    Some(album_id.clone()),
+                    Some(album_name.clone()),
                     to_download,
                 )
                 .await
             } else {
                 (0, 0)
             };
+            let remote_deleted = if !to_delete_remote.is_empty() {
+                crate::library::album_sync::execute_remote_deletions(
+                    ui.ctx.clone(),
+                    &album_id,
+                    to_delete_remote,
+                )
+                .await
+            } else {
+                0
+            };
+            let (local_deleted, local_delete_failed) = if !to_delete_local.is_empty() {
+                crate::library::album_sync::execute_local_deletions(ui.ctx.clone(), to_delete_local)
+                    .await
+            } else {
+                (0, 0)
+            };
             log::info!(
-                "Album sync done: {} queued for upload, {} downloaded, {} download failures",
+                "Album sync done: {} queued for upload, {} downloaded, {} download failures, {} moved to Immich trash, {} local trashed, {} local trash failures",
                 queued,
                 downloaded,
-                failed
+                failed,
+                remote_deleted,
+                local_deleted,
+                local_delete_failed
             );
-            if queued > 0 || downloaded > 0 {
+            if queued > 0 || downloaded > 0 || remote_deleted > 0 || local_deleted > 0 {
                 super::refresh_library_after_mutation(ui.clone(), true);
             }
         });

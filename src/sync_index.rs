@@ -189,6 +189,82 @@ impl ShardedSyncIndex {
             .map(|record| record.checksum.clone())
     }
 
+    /// Return the cached checksum only if the file's current size + mtime still
+    /// match the stored fingerprint. Returns `None` when the file is missing,
+    /// untracked, or has been modified since the last index update — callers
+    /// must re-hash in that case.
+    pub fn fresh_checksum(&self, path: &Path) -> Option<String> {
+        let metadata = fs::metadata(path).ok()?;
+        let fingerprint = fingerprint_from_metadata(&metadata);
+        let key = path.to_string_lossy();
+        let idx = shard_for(&key);
+        let shard = self.shards[idx].read().unwrap();
+        let record = shard.entries.get(key.as_ref())?;
+        if record.size == fingerprint.0 && record.modified_ms == fingerprint.1 {
+            Some(record.checksum.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Return a synced record for a specific path without touching the filesystem.
+    pub fn record_for_path(&self, path: &str) -> Option<SyncedFileRecord> {
+        let idx = shard_for(path);
+        let shard = self.shards[idx].read().unwrap();
+        shard.entries.get(path).cloned()
+    }
+
+    /// Remove one synced path from the index after a deliberate delete sync.
+    pub fn remove_path(&self, path: &str) -> io::Result<bool> {
+        let idx = shard_for(path);
+        let mut shard = self.shards[idx].write().unwrap();
+        let Some(record) = shard.entries.remove(path) else {
+            return Ok(false);
+        };
+        let should_remove_checksum = shard
+            .checksum_to_path
+            .get(&record.checksum)
+            .is_some_and(|record_path| record_path == path);
+        if should_remove_checksum {
+            shard.checksum_to_path.remove(&record.checksum);
+        }
+        shard.dirty = true;
+        drop(shard);
+        self.flush()?;
+        Ok(true)
+    }
+
+    /// Return synced records rooted under a watch path.
+    pub fn records_under_path(&self, root: &Path) -> Vec<(String, SyncedFileRecord)> {
+        let mut records = Vec::new();
+        for lock in &self.shards {
+            let shard = lock.read().unwrap();
+            records.extend(
+                shard
+                    .entries
+                    .iter()
+                    .filter(|(path, _)| Path::new(path.as_str()).starts_with(root))
+                    .map(|(path, record)| (path.clone(), record.clone())),
+            );
+        }
+        records
+    }
+
+    /// All synced paths that share a checksum. Used to detect when an asset
+    /// is referenced from more than one watch folder before trashing it.
+    pub fn paths_for_checksum(&self, checksum: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        for lock in &self.shards {
+            let shard = lock.read().unwrap();
+            for (path, record) in &shard.entries {
+                if record.checksum == checksum {
+                    paths.push(path.clone());
+                }
+            }
+        }
+        paths
+    }
+
     /// Reverse-lookup a local path by checksum for library sync-state indicators.
     pub fn local_path_for_checksum(&self, checksum: &str) -> Option<String> {
         // The checksum could be in any shard, so we must search all.
