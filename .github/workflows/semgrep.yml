@@ -20,28 +20,32 @@ on:
   schedule:
     - cron: "30 2 * * 1" # Runs weekly as a fallback
 
-permissions:
-  security-events: write
-  actions: read
-  contents: read
+permissions: read-all
 
 jobs:
   semgrep:
     name: Scan
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Run via the official Docker image pinned by digest so the install path is
+      # hash-verified end-to-end (no transient pip dependency resolution at CI time).
+      # Known false positives (unsafe-usage in GTK bindings, SHA-1 mandated by
+      # Immich protocol, current-exe in autostart entry) are dismissed in the
+      # GitHub Security tab so the audit trail lives next to the alerts.
       - name: Run Semgrep
         run: |
-          python3 -m pip install --quiet 'semgrep==1.163.0'
-          semgrep scan \
-            --config="p/rust" \
-            --config="p/secrets" \
-            --sarif --output=semgrep.sarif || true
-          # Known false positives (unsafe-usage in GTK bindings, SHA-1 mandated by
-          # Immich protocol, current-exe in autostart entry) are dismissed in the
-          # GitHub Security tab so the audit trail lives next to the alerts.
+          docker run --rm -v "${PWD}:/src" --workdir /src \
+            semgrep/semgrep@sha256:7cad2bc2d1e44f87f0bf4be6d1fa23aa90fb72015bebc89fb91385d813987a03 \
+            semgrep scan \
+              --config="p/rust" \
+              --config="p/secrets" \
+              --sarif --output=semgrep.sarif || true
           # `|| true` keeps the SARIF upload step running even when findings exist;
           # GitHub Code Scanning surfaces severities, so CI gating happens there.
 
