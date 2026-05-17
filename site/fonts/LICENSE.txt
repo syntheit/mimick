@@ -1,0 +1,14 @@
+The fonts in this directory are bundled under the SIL Open Font License 1.1.
+
+Manrope
+  Copyright 2018 The Manrope Project Authors
+  https://github.com/sharanda/manrope
+
+Newsreader
+  Copyright 2019 The Newsreader Project Authors
+  https://github.com/productiontype/Newsreader
+
+SIL Open Font License v1.1: https://openfontlicense.org/
+
+Subsets (latin, latin-ext) were obtained from Google Fonts (fonts.gstatic.com)
+and are unmodified. Variable-axis weight ranges are preserved.
