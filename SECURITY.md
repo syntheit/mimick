@@ -10,10 +10,18 @@ Older releases are not guaranteed to receive backported fixes.
 
 Please do not report sensitive security issues in public GitHub issues.
 
-Preferred reporting path:
+Preferred reporting path: open a private advisory at
+<https://github.com/nicx17/mimick/security/advisories/new>.
 
-1. Use GitHub's private vulnerability reporting for this repository if it is enabled.
-2. If private reporting is unavailable, contact the maintainer through a trusted private channel first.
+This reaches the maintainer privately, creates an audit trail, and lets us
+coordinate a fix and CVE before public disclosure.
+
+### Disclosure timeline
+
+- **Acknowledgement** within 7 days of the report.
+- **Initial assessment** within 30 days.
+- **Coordinated public disclosure** targeted within 90 days, sooner if a fix
+  is available and the vulnerability is being actively exploited.
 
 When reporting a vulnerability, include:
 
@@ -30,7 +38,9 @@ Mimick already uses several controls intended to reduce risk:
 - release assets include checksums
 - the API key is stored in the desktop keyring instead of plain-text config
 - Flatpak builds use selected-folder access instead of broad home-directory access
-- CodeQL is enabled for static analysis
-- CI enforces formatting, linting, tests, and dependency auditing
+- [Semgrep](https://semgrep.dev) static analysis runs on every push and PR
+- [OpenSSF Scorecard](https://scorecard.dev) reports repository security posture
+- [Dependabot](https://docs.github.com/en/code-security/dependabot) keeps Rust and GitHub Actions dependencies patched
+- CI enforces formatting, linting, tests, and `cargo audit` dependency scanning
 
 
