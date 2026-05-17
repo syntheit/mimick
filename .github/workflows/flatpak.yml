@@ -13,6 +13,8 @@ on:
 
 name: CI Build Flatpak
 
+permissions: read-all
+
 jobs:
   flatpak:
     name: "Flatpak"
