@@ -46,7 +46,7 @@ jobs:
           # GitHub Code Scanning surfaces severities, so CI gating happens there.
 
       - name: Upload SARIF to GitHub Code Scanning
-        uses: github/codeql-action/upload-sarif@7c1e4cf0b20d7c1872b26569c00ba908797a59bf # v4
+        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
         with:
           sarif_file: semgrep.sarif
           category: semgrep
