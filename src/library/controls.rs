@@ -266,6 +266,7 @@ pub(super) fn connect_sidebar_handlers(ui: Rc<LibraryWindowUi>) {
                 }
                 _ => {}
             }
+            auto_hide_sidebar(&ui);
         }
     ));
 
@@ -287,8 +288,15 @@ pub(super) fn connect_sidebar_handlers(ui: Rc<LibraryWindowUi>) {
             let name = parts.next().unwrap_or("Album").to_string();
             ui.sidebar.fixed_list.unselect_all();
             sidebar_dispatch(ui.clone(), LibrarySource::Album { id, name });
+            auto_hide_sidebar(&ui);
         }
     ));
+}
+
+fn auto_hide_sidebar(ui: &Rc<LibraryWindowUi>) {
+    if ui.split.is_collapsed() {
+        ui.split.set_show_sidebar(false);
+    }
 }
 
 pub(super) fn update_back_button(ui: &Rc<LibraryWindowUi>) {

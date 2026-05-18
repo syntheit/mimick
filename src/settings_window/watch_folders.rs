@@ -6,7 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use glib::clone;
 use gtk::prelude::*;
-use gtk::{Box, Button, Entry, ListBox, Orientation};
+use gtk::{Box, Button, Entry, ListBox, Orientation, ScrolledWindow};
 use libadwaita as adw;
 
 use crate::config::{FolderRules, FolderSyncMethod, StartupCatchupMode};
@@ -198,7 +198,8 @@ fn show_folder_rules_dialog(
         .transient_for(parent)
         .modal(true)
         .title("Folder Rules")
-        .default_width(420)
+        .default_width(380)
+        .default_height(640)
         .width_request(360)
         .build();
     let content = Box::builder()
@@ -209,12 +210,19 @@ fn show_folder_rules_dialog(
         .margin_start(12)
         .margin_end(12)
         .build();
-    dialog.set_content(Some(&content));
+    let scroll = ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
+        .child(&content)
+        .build();
+    dialog.set_content(Some(&scroll));
 
     let title = gtk::Label::builder()
         .label(format!("Rules for {}", display_watch_path(folder_path)))
         .halign(gtk::Align::Start)
-        .wrap(true)
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
+        .max_width_chars(28)
         .build();
     content.append(&title);
 
@@ -228,6 +236,8 @@ fn show_folder_rules_dialog(
     let ignore_hidden = adw::SwitchRow::builder()
         .title("Ignore Hidden Files / Folders")
         .subtitle("Skip paths that contain hidden components such as .cache or .thumbnails.")
+        .title_lines(1)
+        .subtitle_lines(3)
         .active(current.ignore_hidden)
         .build();
 
@@ -239,6 +249,8 @@ fn show_folder_rules_dialog(
     let sync_method = adw::ComboRow::builder()
         .title("Sync Method")
         .subtitle("Controls which direction this folder syncs.")
+        .title_lines(1)
+        .subtitle_lines(2)
         .model(&sync_model)
         .build();
     sync_method.set_selected(match current.sync_method {
@@ -251,6 +263,8 @@ fn show_folder_rules_dialog(
     let startup_scan = adw::ComboRow::builder()
         .title("Startup Scan")
         .subtitle("Controls how this folder is scanned when Mimick starts.")
+        .title_lines(1)
+        .subtitle_lines(2)
         .model(&startup_model)
         .build();
     startup_scan.set_selected(
@@ -268,11 +282,15 @@ fn show_folder_rules_dialog(
     let delete_folder_to_album = adw::SwitchRow::builder()
         .title("Mirror Folder Deletions to Album")
         .subtitle("When a synced folder file is gone, move the matching Immich asset to trash.")
+        .title_lines(2)
+        .subtitle_lines(3)
         .active(current.delete_folder_to_album)
         .build();
     let delete_album_to_folder = adw::SwitchRow::builder()
         .title("Mirror Album Deletions to Folder")
         .subtitle("Currently unavailable — waiting on an upstream Flatpak Trash portal fix. The setting stays off until then.")
+        .title_lines(2)
+        .subtitle_lines(4)
         .active(false)
         .sensitive(false)
         .build();
@@ -285,8 +303,9 @@ fn show_folder_rules_dialog(
     content.append(&list_box);
 
     let max_size_entry = Entry::builder()
-        .placeholder_text("Max file size in MB, leave blank for no limit")
+        .placeholder_text("Max size in MB (blank = no limit)")
         .width_request(0)
+        .max_width_chars(16)
         .text(
             current
                 .max_file_size_mb
@@ -297,8 +316,9 @@ fn show_folder_rules_dialog(
     content.append(&max_size_entry);
 
     let extensions_entry = Entry::builder()
-        .placeholder_text("Comma-separated extensions, e.g. jpg,png,mp4")
+        .placeholder_text("Extensions: jpg,png,mp4")
         .width_request(0)
+        .max_width_chars(16)
         .text(current.allowed_extensions.join(", "))
         .build();
     content.append(&extensions_entry);

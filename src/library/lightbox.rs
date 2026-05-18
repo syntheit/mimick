@@ -199,14 +199,17 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     header.pack_end(&details_btn);
     toolbar.add_top_bar(&header);
 
-    let body = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
+    let body = libadwaita::OverlaySplitView::builder()
+        .sidebar_position(gtk::PackType::End)
+        .show_sidebar(false)
+        .enable_show_gesture(true)
+        .enable_hide_gesture(true)
         .build();
     let viewer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
         .margin_top(8)
-        .margin_bottom(8)
+        .margin_bottom(16)
         .margin_start(8)
         .margin_end(8)
         .hexpand(true)
@@ -293,21 +296,22 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
         .hexpand(false)
-        .min_content_width(320)
+        .min_content_width(280)
         .max_content_width(320)
         .css_classes(vec!["mimick-details-pane".to_string()])
-        .visible(false)
         .build();
     let details_filename = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
-        .max_width_chars(36)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .max_width_chars(28)
         .css_classes(vec!["title-3".to_string()])
         .build();
     let details_summary = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
-        .max_width_chars(36)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .max_width_chars(28)
         .build();
     let details_loading = gtk::Label::builder()
         .xalign(0.0)
@@ -324,13 +328,18 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     details_inner.append(&details_loading);
     details_inner.append(&details_exif);
 
-    body.append(&viewer);
-    body.append(&details_pane);
+    body.set_content(Some(&viewer));
+    body.set_sidebar(Some(&details_pane));
     toolbar.set_content(Some(&body));
     page.set_child(Some(&toolbar));
 
     details_btn
-        .bind_property("active", &details_pane, "visible")
+        .bind_property("active", &body, "show-sidebar")
+        .sync_create()
+        .bidirectional()
+        .build();
+    ui.split
+        .bind_property("collapsed", &body, "collapsed")
         .sync_create()
         .build();
 

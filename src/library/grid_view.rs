@@ -50,7 +50,10 @@ pub fn build_grid_view(
             .height_request(if is_narrow { 120 } else { 200 })
             .can_shrink(true)
             .content_fit(gtk::ContentFit::Cover)
-            .css_classes(vec!["mimick-thumbnail-loading".to_string()])
+            .css_classes(vec![
+                "mimick-grid-thumb".to_string(),
+                "mimick-thumbnail-loading".to_string(),
+            ])
             .build();
 
         let checkbox = gtk::CheckButton::builder()
@@ -234,7 +237,7 @@ pub fn build_grid_view(
         .single_click_activate(!select_toggle.is_active())
         .enable_rubberband(false)
         .max_columns(6)
-        .min_columns(2)
+        .min_columns(1)
         .build();
     select_toggle.connect_toggled(clone_view_for_toggle(&view));
 

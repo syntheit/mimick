@@ -256,9 +256,10 @@ pub fn build_settings_window_with_parent(
         .build();
     let internal_switch = Switch::builder().valign(gtk::Align::Center).build();
     let internal_entry = Entry::builder()
-        .placeholder_text("http://192.168.1.10:2283")
+        .placeholder_text("http://…")
         .valign(gtk::Align::Center)
-        .width_request(180)
+        .width_request(140)
+        .max_width_chars(16)
         .hexpand(true)
         .build();
     internal_row.add_prefix(&internal_switch);
@@ -272,9 +273,10 @@ pub fn build_settings_window_with_parent(
         .build();
     let external_switch = Switch::builder().valign(gtk::Align::Center).build();
     let external_entry = Entry::builder()
-        .placeholder_text("https://immich.example.com")
+        .placeholder_text("https://…")
         .valign(gtk::Align::Center)
-        .width_request(180)
+        .width_request(140)
+        .max_width_chars(16)
         .hexpand(true)
         .build();
     external_row.add_prefix(&external_switch);
@@ -285,7 +287,8 @@ pub fn build_settings_window_with_parent(
     let api_key_row = adw::ActionRow::builder().title("API Key").build();
     let api_key_entry = PasswordEntry::builder()
         .valign(gtk::Align::Center)
-        .width_request(180)
+        .width_request(140)
+        .max_width_chars(16)
         .hexpand(true)
         .build();
     api_key_row.add_suffix(&api_key_entry);

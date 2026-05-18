@@ -104,6 +104,7 @@ struct LibraryWindowUi {
     album_sync_button: gtk::Button,
     last_seen_upload_batch: Cell<u64>,
     narrow: Rc<Cell<bool>>,
+    split: libadwaita::OverlaySplitView,
 }
 
 pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>) {
@@ -196,6 +197,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let search_entry = gtk::SearchEntry::builder()
         .placeholder_text("Search filenames")
         .hexpand(true)
+        .width_chars(20)
+        .max_width_chars(24)
         .build();
     let filters_button = gtk::Button::builder()
         .icon_name("view-more-symbolic")
@@ -246,6 +249,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .xalign(0.0)
         .css_classes(vec!["mimick-timeline-banner".to_string()])
         .visible(false)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(20)
         .margin_top(4)
         .margin_bottom(4)
         .margin_start(12)
@@ -301,7 +306,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .margin_top(8)
-        .margin_bottom(8)
+        .margin_bottom(16)
         .margin_start(12)
         .margin_end(12)
         .css_classes(vec!["mimick-transfer-shell".to_string()])
@@ -353,7 +358,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .margin_top(8)
-        .margin_bottom(8)
+        .margin_bottom(16)
         .margin_start(12)
         .margin_end(12)
         .css_classes(vec!["toolbar".to_string()])
@@ -383,6 +388,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .content(&content)
         .show_sidebar(true)
         .enable_show_gesture(true)
+        .enable_hide_gesture(true)
         .build();
     split
         .bind_property("show-sidebar", &sidebar_toggle, "active")
@@ -411,7 +417,9 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         Some(&gtk::Orientation::Vertical.to_value()),
     );
     breakpoint.add_setter(&grid.view, "max-columns", Some(&2u32.to_value()));
-    breakpoint.add_setter(&grid.view, "min-columns", Some(&1u32.to_value()));
+    breakpoint.add_setter(&grid.view, "min-columns", Some(&2u32.to_value()));
+    breakpoint.add_setter(&refresh_button, "visible", Some(&false.to_value()));
+    breakpoint.add_setter(&queue_button, "visible", Some(&false.to_value()));
     breakpoint.add_setter(&bulk_delete, "label", Some(&"Del".to_value()));
     breakpoint.add_setter(&bulk_download, "label", Some(&"Get".to_value()));
     breakpoint.add_setter(&bulk_clear, "label", Some(&"X".to_value()));
@@ -431,6 +439,15 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         apply_narrow_recursive(nav_for_unapply.upcast_ref::<gtk::Widget>(), false);
     });
     window.add_breakpoint(breakpoint);
+
+    // Tablet-width breakpoint: collapse sidebar to overlay before the inline
+    // sidebar + controls (~960 px natural) overflow a shrunk desktop window.
+    let tablet_bp = libadwaita::Breakpoint::new(
+        libadwaita::BreakpointCondition::parse("max-width: 1000sp")
+            .expect("valid breakpoint condition"),
+    );
+    tablet_bp.add_setter(&split, "collapsed", Some(&true.to_value()));
+    window.add_breakpoint(tablet_bp);
 
     let f9 = gtk::Shortcut::builder()
         .trigger(&gtk::ShortcutTrigger::parse_string("F9").unwrap())
@@ -480,6 +497,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         album_sync_button: album_sync_button.clone(),
         last_seen_upload_batch: Cell::new(0),
         narrow: narrow_flag.clone(),
+        split: split.clone(),
     });
     *ui.grid.context_menu_handler.borrow_mut() = Some(Box::new(clone!(
         #[strong]
@@ -1201,7 +1219,7 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
 /// Walk the widget tree and resize known cards/panes for narrow viewports.
 pub(super) fn apply_narrow_recursive(widget: &gtk::Widget, narrow: bool) {
     if let Some(pic) = widget.downcast_ref::<gtk::Picture>() {
-        if pic.has_css_class("mimick-thumbnail-loading") {
+        if pic.has_css_class("mimick-grid-thumb") {
             pic.set_width_request(if narrow { 160 } else { 356 });
             pic.set_height_request(if narrow { 120 } else { 200 });
         } else if pic.has_css_class("mimick-explore-tile") {
