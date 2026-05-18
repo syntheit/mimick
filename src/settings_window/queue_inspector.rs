@@ -22,6 +22,8 @@ pub fn show_queue_inspector(
         .title("Queue Inspector")
         .default_width(900)
         .default_height(680)
+        .width_request(360)
+        .height_request(480)
         .build();
     let content = Box::builder()
         .orientation(Orientation::Vertical)
@@ -68,6 +70,7 @@ pub fn show_queue_inspector(
                         .unwrap_or(task.path.as_str()),
                 )
                 .subtitle(&task.path)
+                .title_lines(1)
                 .subtitle_lines(3)
                 .build();
             let retry_btn = Button::builder().label("Retry").build();
@@ -120,12 +123,14 @@ pub fn show_queue_inspector(
                     .map(|detail| format!(" | {}", detail))
                     .unwrap_or_default()
             ))
+            .title_lines(1)
             .subtitle_lines(4)
             .build();
         row.add_prefix(
             &gtk::Label::builder()
                 .label(display_watch_path(&event.path))
-                .wrap(true)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .max_width_chars(20)
                 .halign(gtk::Align::Start)
                 .build(),
         );
@@ -155,6 +160,16 @@ pub fn show_queue_inspector(
         }
     ));
     content.append(&close_btn);
+
+    let bp = adw::Breakpoint::new(
+        adw::BreakpointCondition::parse("max-width: 500sp")
+            .expect("valid breakpoint condition"),
+    );
+    bp.add_setter(&retry_all_btn, "label", Some(&"Retry All".to_value()));
+    bp.add_setter(&clear_failed_btn, "label", Some(&"Clear".to_value()));
+    bp.add_setter(&events_scroll, "min-content-height", Some(&220i32.to_value()));
+    dialog.add_breakpoint(bp);
+
     dialog.present();
 }
 

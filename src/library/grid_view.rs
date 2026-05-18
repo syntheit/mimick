@@ -23,7 +23,11 @@ pub struct GridViewParts {
     pub context_menu_handler: AssetContextMenuHandler,
 }
 
-pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -> GridViewParts {
+pub fn build_grid_view(
+    ctx: Arc<AppContext>,
+    select_toggle: gtk::ToggleButton,
+    narrow: Rc<Cell<bool>>,
+) -> GridViewParts {
     let model = LibraryAssetModel::new();
     let selection = gtk::MultiSelection::new(Some(model.clone()));
     let factory = gtk::SignalListItemFactory::new();
@@ -31,6 +35,7 @@ pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -
 
     let select_toggle_for_setup = select_toggle.clone();
     let selection_for_setup = selection.clone();
+    let narrow_for_setup = narrow.clone();
     factory.connect_setup(move |_, list_item| {
         let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -39,9 +44,10 @@ pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -
             .css_classes(vec!["mimick-cell".to_string()])
             .build();
 
+        let is_narrow = narrow_for_setup.get();
         let picture = gtk::Picture::builder()
-            .width_request(356)
-            .height_request(200)
+            .width_request(if is_narrow { 160 } else { 356 })
+            .height_request(if is_narrow { 120 } else { 200 })
             .can_shrink(true)
             .content_fit(gtk::ContentFit::Cover)
             .css_classes(vec!["mimick-thumbnail-loading".to_string()])

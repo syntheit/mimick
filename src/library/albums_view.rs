@@ -187,7 +187,6 @@ fn album_tile(ctx: Arc<AppContext>, album: &LibraryAlbum, on_click: AlbumClick) 
     let button = gtk::Button::builder()
         .child(&tile_box)
         .css_classes(vec!["flat".to_string()])
-        .width_request(300)
         .hexpand(false)
         .halign(gtk::Align::Start)
         .build();

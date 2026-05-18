@@ -48,10 +48,14 @@ pub(super) fn add_folder_row(
     let rules = Rc::new(RefCell::new(entry.rules()));
 
     let picker_btn = Button::builder()
-        .label(format!("Album: {}", album_name.borrow()))
+        .label(album_name.borrow().clone())
         .valign(gtk::Align::Center)
         .tooltip_text("Select or create a target Immich album")
         .build();
+    if let Some(label) = picker_btn.child().and_downcast::<gtk::Label>() {
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_max_width_chars(16);
+    }
 
     let picker_btn_clone = picker_btn.clone();
     let album_name_clone = album_name.clone();
@@ -85,7 +89,10 @@ pub(super) fn add_folder_row(
         }
     ));
 
-    let album_subrow = adw::ActionRow::builder().title("Target Album").build();
+    let album_subrow = adw::ActionRow::builder()
+        .title("Target Album")
+        .title_lines(1)
+        .build();
     album_subrow.add_suffix(&picker_btn);
     expander_row.add_row(&album_subrow);
 
@@ -156,11 +163,17 @@ pub(super) fn add_folder_row(
         }
     ));
 
-    let rules_subrow = adw::ActionRow::builder().title("Folder Rules").build();
+    let rules_subrow = adw::ActionRow::builder()
+        .title("Folder Rules")
+        .title_lines(1)
+        .build();
     rules_subrow.add_suffix(&rules_btn);
     expander_row.add_row(&rules_subrow);
 
-    let remove_subrow = adw::ActionRow::builder().title("Remove Folder").build();
+    let remove_subrow = adw::ActionRow::builder()
+        .title("Remove Folder")
+        .title_lines(1)
+        .build();
     remove_subrow.add_suffix(&remove_btn);
     expander_row.add_row(&remove_subrow);
 
@@ -186,6 +199,7 @@ fn show_folder_rules_dialog(
         .modal(true)
         .title("Folder Rules")
         .default_width(420)
+        .width_request(360)
         .build();
     let content = Box::builder()
         .orientation(Orientation::Vertical)
@@ -363,6 +377,7 @@ pub(super) fn show_album_picker_dialog(
         .title("Select Album")
         .default_width(400)
         .default_height(500)
+        .width_request(360)
         .build();
 
     let header_bar = adw::HeaderBar::new();
@@ -423,7 +438,7 @@ pub(super) fn show_album_picker_dialog(
                 let on_settings_changed_clone = on_settings_changed.clone();
                 default_row.connect_activated(move |_| {
                     *state_clone.borrow_mut() = DEFAULT_ALBUM_LABEL.to_string();
-                    btn_clone.set_label(&format!("Album: {}", DEFAULT_ALBUM_LABEL));
+                    btn_clone.set_label(DEFAULT_ALBUM_LABEL);
                     (on_settings_changed_clone)();
                     dialog_clone.close();
                 });
@@ -443,7 +458,7 @@ pub(super) fn show_album_picker_dialog(
                 let on_settings_changed_clone = on_settings_changed.clone();
                 create_row.connect_activated(move |_| {
                     *state_clone.borrow_mut() = typed_raw.clone();
-                    btn_clone.set_label(&format!("Album: {}", typed_raw));
+                    btn_clone.set_label(&typed_raw);
                     (on_settings_changed_clone)();
                     dialog_clone.close();
                 });
@@ -468,7 +483,7 @@ pub(super) fn show_album_picker_dialog(
                     let on_settings_changed_clone = on_settings_changed.clone();
                     row.connect_activated(move |_| {
                         *state_clone.borrow_mut() = album_name_clone.clone();
-                        btn_clone.set_label(&format!("Album: {}", album_name_clone));
+                        btn_clone.set_label(&album_name_clone);
                         (on_settings_changed_clone)();
                         dialog_clone.close();
                     });

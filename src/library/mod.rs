@@ -103,6 +103,7 @@ struct LibraryWindowUi {
     album_link_button: gtk::Button,
     album_sync_button: gtk::Button,
     last_seen_upload_batch: Cell<u64>,
+    narrow: Rc<Cell<bool>>,
 }
 
 pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>) {
@@ -115,6 +116,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .name("mimick-library-window")
         .default_width(1180)
         .default_height(780)
+        .width_request(360)
+        .height_request(480)
         .build();
 
     let header = libadwaita::HeaderBar::builder()
@@ -156,8 +159,9 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let toolbar = libadwaita::ToolbarView::builder().build();
     toolbar.add_top_bar(&header);
 
+    let narrow_flag = Rc::new(Cell::new(false));
     let sidebar = build_sidebar();
-    let grid = build_grid_view(ctx.clone(), select_toggle.clone());
+    let grid = build_grid_view(ctx.clone(), select_toggle.clone(), narrow_flag.clone());
     let explore = build_explore_view();
     let albums = build_albums_view();
 
@@ -166,6 +170,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .model(&source_mode_model)
         .selected(0)
         .tooltip_text("Asset source")
+        .hexpand(true)
         .build();
     let timeline_toggle = gtk::ToggleButton::builder()
         .label("Timeline")
@@ -200,22 +205,42 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let sort_mode = gtk::DropDown::builder()
         .model(&sort_model)
         .selected(0)
+        .hexpand(true)
         .build();
+
+    let source_group = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    source_group.append(&source_mode);
+    source_group.append(&timeline_toggle);
+
+    let search_group = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .hexpand(true)
+        .build();
+    search_group.append(&search_mode);
+    search_group.append(&search_entry);
+    search_group.append(&filters_button);
+
+    let sort_group = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    sort_group.append(&sort_mode);
 
     let controls = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
+        .spacing(12)
         .margin_top(12)
         .margin_bottom(12)
         .margin_start(12)
         .margin_end(12)
         .build();
-    controls.append(&source_mode);
-    controls.append(&timeline_toggle);
-    controls.append(&search_mode);
-    controls.append(&search_entry);
-    controls.append(&filters_button);
-    controls.append(&sort_mode);
+    controls.append(&source_group);
+    controls.append(&search_group);
+    controls.append(&sort_group);
 
     let timeline_banner = gtk::Label::builder()
         .xalign(0.0)
@@ -267,7 +292,9 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .xalign(0.0)
         .hexpand(true)
         .wrap(true)
-        .max_width_chars(48)
+        .max_width_chars(24)
+        .width_chars(12)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(vec!["caption".to_string(), "dim-label".to_string()])
         .build();
     let transfer_bar = gtk::Box::builder()
@@ -286,6 +313,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let album_link_row = libadwaita::ActionRow::builder()
         .title("No local folder linked")
         .subtitle("Drop files in the linked folder to sync this album")
+        .title_lines(1)
+        .subtitle_lines(2)
         .build();
     let album_sync_button = gtk::Button::builder()
         .label("Sync…")
@@ -371,6 +400,38 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     nav.add(&root_page);
     window.set_content(Some(&nav));
 
+    let breakpoint = libadwaita::Breakpoint::new(
+        libadwaita::BreakpointCondition::parse("max-width: 600sp")
+            .expect("valid breakpoint condition"),
+    );
+    breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
+    breakpoint.add_setter(
+        &controls,
+        "orientation",
+        Some(&gtk::Orientation::Vertical.to_value()),
+    );
+    breakpoint.add_setter(&grid.view, "max-columns", Some(&2u32.to_value()));
+    breakpoint.add_setter(&grid.view, "min-columns", Some(&1u32.to_value()));
+    breakpoint.add_setter(&bulk_delete, "label", Some(&"Del".to_value()));
+    breakpoint.add_setter(&bulk_download, "label", Some(&"Get".to_value()));
+    breakpoint.add_setter(&bulk_clear, "label", Some(&"X".to_value()));
+    breakpoint.add_setter(&album_sync_button, "label", Some(&"Sync".to_value()));
+    breakpoint.add_setter(&album_link_button, "label", Some(&"Link".to_value()));
+    breakpoint.add_setter(&transfer_bar, "visible", Some(&false.to_value()));
+    let nav_for_apply = nav.clone();
+    let narrow_apply = narrow_flag.clone();
+    breakpoint.connect_apply(move |_| {
+        narrow_apply.set(true);
+        apply_narrow_recursive(nav_for_apply.upcast_ref::<gtk::Widget>(), true);
+    });
+    let nav_for_unapply = nav.clone();
+    let narrow_unapply = narrow_flag.clone();
+    breakpoint.connect_unapply(move |_| {
+        narrow_unapply.set(false);
+        apply_narrow_recursive(nav_for_unapply.upcast_ref::<gtk::Widget>(), false);
+    });
+    window.add_breakpoint(breakpoint);
+
     let f9 = gtk::Shortcut::builder()
         .trigger(&gtk::ShortcutTrigger::parse_string("F9").unwrap())
         .action(&gtk::CallbackAction::new(clone!(
@@ -418,6 +479,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         album_link_button: album_link_button.clone(),
         album_sync_button: album_sync_button.clone(),
         last_seen_upload_batch: Cell::new(0),
+        narrow: narrow_flag.clone(),
     });
     *ui.grid.context_menu_handler.borrow_mut() = Some(Box::new(clone!(
         #[strong]
@@ -549,6 +611,7 @@ fn refresh_albums_view(ui: Rc<LibraryWindowUi>) {
             Ok(albums) => {
                 let on_click = album_click_handler(ui.clone());
                 populate_albums(&ui.albums, ui.ctx.clone(), albums, on_click);
+                apply_narrow_recursive(ui.albums.root.upcast_ref(), ui.narrow.get());
             }
             Err(err) => log::warn!("Albums fetch failed: {}", err),
         }
@@ -759,6 +822,7 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                     load_source_page(click_ui.clone(), request, false);
                 },
             );
+            apply_narrow_recursive(ui.explore.root.upcast_ref(), ui.narrow.get());
         }
     ));
 }
@@ -933,6 +997,8 @@ fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
         let action = libadwaita::ActionRow::builder()
             .title(&album.album_name)
             .subtitle(&subtitle)
+            .title_lines(1)
+            .subtitle_lines(1)
             .build();
         let row = gtk::ListBoxRow::builder()
             .tooltip_text(format!("{}:{}", album.id, album.album_name))
@@ -1130,6 +1196,29 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
     container.append(&title_label);
     container.append(&subtitle_label);
     container
+}
+
+/// Walk the widget tree and resize known cards/panes for narrow viewports.
+pub(super) fn apply_narrow_recursive(widget: &gtk::Widget, narrow: bool) {
+    if let Some(pic) = widget.downcast_ref::<gtk::Picture>() {
+        if pic.has_css_class("mimick-thumbnail-loading") {
+            pic.set_width_request(if narrow { 160 } else { 356 });
+            pic.set_height_request(if narrow { 120 } else { 200 });
+        } else if pic.has_css_class("mimick-explore-tile") {
+            pic.set_width_request(if narrow { 160 } else { 300 });
+            pic.set_height_request(if narrow { 140 } else { 220 });
+        }
+    } else if let Some(sw) = widget.downcast_ref::<gtk::ScrolledWindow>()
+        && sw.has_css_class("mimick-details-pane")
+    {
+        sw.set_min_content_width(if narrow { 260 } else { 320 });
+        sw.set_max_content_width(if narrow { 260 } else { 320 });
+    }
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        apply_narrow_recursive(&c, narrow);
+        child = c.next_sibling();
+    }
 }
 
 pub(super) fn immich_checksum_to_hex(b64: &str) -> Option<String> {

@@ -28,11 +28,15 @@ pub fn build_sidebar() -> SidebarParts {
     let connection_row = libadwaita::ActionRow::builder()
         .title("Connection")
         .subtitle("Offline")
+        .title_lines(1)
+        .subtitle_lines(1)
         .activatable(true)
         .build();
     let server_row = libadwaita::ActionRow::builder()
         .title("Server")
         .subtitle("Statistics unavailable")
+        .title_lines(1)
+        .subtitle_lines(1)
         .activatable(true)
         .build();
     let connection_list = gtk::ListBox::builder()
@@ -97,6 +101,8 @@ fn action_row(title: &str, subtitle: &str, icon_name: &str, key: &str) -> libadw
     let row = libadwaita::ActionRow::builder()
         .title(title)
         .subtitle(subtitle)
+        .title_lines(1)
+        .subtitle_lines(1)
         .tooltip_text(key)
         .activatable(true)
         .build();

@@ -295,6 +295,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .hexpand(false)
         .min_content_width(320)
         .max_content_width(320)
+        .css_classes(vec!["mimick-details-pane".to_string()])
         .visible(false)
         .build();
     let details_filename = gtk::Label::builder()
@@ -916,4 +917,5 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
 
     ui.nav.push(&page);
+    super::apply_narrow_recursive(page.upcast_ref(), ui.narrow.get());
 }
