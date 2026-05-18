@@ -162,12 +162,15 @@ pub fn show_queue_inspector(
     content.append(&close_btn);
 
     let bp = adw::Breakpoint::new(
-        adw::BreakpointCondition::parse("max-width: 500sp")
-            .expect("valid breakpoint condition"),
+        adw::BreakpointCondition::parse("max-width: 500sp").expect("valid breakpoint condition"),
     );
     bp.add_setter(&retry_all_btn, "label", Some(&"Retry All".to_value()));
     bp.add_setter(&clear_failed_btn, "label", Some(&"Clear".to_value()));
-    bp.add_setter(&events_scroll, "min-content-height", Some(&220i32.to_value()));
+    bp.add_setter(
+        &events_scroll,
+        "min-content-height",
+        Some(&220i32.to_value()),
+    );
     dialog.add_breakpoint(bp);
 
     dialog.present();

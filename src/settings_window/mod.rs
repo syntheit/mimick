@@ -306,8 +306,7 @@ pub fn build_settings_window_with_parent(
     conn_group.add(&save_btn);
 
     let settings_breakpoint = adw::Breakpoint::new(
-        adw::BreakpointCondition::parse("max-width: 500sp")
-            .expect("valid breakpoint condition"),
+        adw::BreakpointCondition::parse("max-width: 500sp").expect("valid breakpoint condition"),
     );
     settings_breakpoint.add_setter(&internal_row, "title", Some(&"LAN URL".to_value()));
     settings_breakpoint.add_setter(&external_row, "title", Some(&"WAN URL".to_value()));
