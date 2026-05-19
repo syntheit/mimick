@@ -1,7 +1,12 @@
 //! HTTP and network error classification for user-facing diagnostics.
+//!
+//! Maps HTTP status codes and request context into structured `ApiIssue`
+//! values with a summary and guidance string. The settings window and
+//! health dashboard display these to help users self-diagnose problems.
 
 use super::ApiIssue;
 
+/// Identifies the operational context in which an Immich request was made.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum RequestContext {
     Upload,
@@ -17,6 +22,7 @@ pub(super) enum RequestContext {
     ServerAbout,
 }
 
+/// Map an HTTP status code to an actionable user-facing `ApiIssue`.
 pub(super) fn classify_http_issue(
     context: RequestContext,
     status: u16,
@@ -93,6 +99,7 @@ pub(super) fn classify_http_issue(
     }
 }
 
+/// Map a reqwest connection or timeout error to an actionable user-facing `ApiIssue`.
 pub(super) fn classify_network_issue(context: RequestContext, error: &reqwest::Error) -> ApiIssue {
     if error.is_timeout() {
         ApiIssue {

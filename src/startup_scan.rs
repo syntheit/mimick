@@ -26,8 +26,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A file discovered during the parallel enumeration stage.
 struct ScanCandidate {
+    /// Absolute local path of the discovered candidate.
     path: String,
+    /// Watch path entry prefix that matched the candidate.
     watch_path: String,
+    /// Inferred or configured album name.
     album_name: String,
 }
 
@@ -293,6 +296,7 @@ pub async fn queue_unsynced_files(
     );
 }
 
+/// Trash remote Immich assets when their corresponding local file has been removed.
 async fn trash_remote_assets_for_missing_local_files(
     watch_paths: &[WatchPathEntry],
     seen_paths: &HashSet<String>,
@@ -368,6 +372,7 @@ async fn trash_remote_assets_for_missing_local_files(
     }
 }
 
+/// Parallel reconcile for each watch path entry against their remote albums.
 async fn sync_album_to_folder_entries(watch_paths: &[WatchPathEntry], app_ctx: Arc<AppContext>) {
     for entry in watch_paths {
         reconcile_entry(app_ctx.clone(), entry).await;
@@ -496,6 +501,7 @@ pub async fn reconcile_entry(app_ctx: Arc<AppContext>, entry: &WatchPathEntry) {
     }
 }
 
+/// Locate and move a remote asset to Immich trash by looking up its checksum in an album.
 async fn trash_remote_asset_by_checksum(
     api_client: &ImmichApiClient,
     sync_index: &ShardedSyncIndex,
@@ -548,6 +554,7 @@ async fn trash_remote_asset_by_checksum(
     }
 }
 
+/// Find the remote asset ID matching the given checksum inside an album.
 async fn find_album_asset_id_by_checksum(
     api_client: &ImmichApiClient,
     album_id: &str,

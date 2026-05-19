@@ -1,4 +1,9 @@
 //! Handles persistent configuration loading and provides desktop keyring access helpers.
+//!
+//! Configuration lives in a JSON file under the XDG config directory.
+//! Watch-path entries support both simple paths and extended per-folder
+//! rules (sync method, extension filters, size limits). The API key is
+//! stored in the desktop keyring via `oo7` and never written to disk.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -8,24 +13,31 @@ use std::path::PathBuf;
 /// Defines per-folder filters and guardrails applied before a file is queued for upload.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct FolderRules {
+    /// True if hidden files/folders should be ignored during sync.
     #[serde(default)]
     pub ignore_hidden: bool,
+    /// Maximum file size allowed for upload, in Megabytes.
     #[serde(default)]
     pub max_file_size_mb: Option<u64>,
+    /// List of file extensions permitted for sync.
     #[serde(default)]
     pub allowed_extensions: Vec<String>,
+    /// Selected synchronization direction method.
     #[serde(default)]
     pub sync_method: FolderSyncMethod,
-    /// None means "use the legacy/global startup catch-up mode".
+    /// Override startup catch-up mode, or None to use global setting.
     #[serde(default)]
     pub startup_catchup_mode: Option<StartupCatchupMode>,
+    /// Delete local file when its corresponding remote asset is removed.
     #[serde(default)]
     pub delete_folder_to_album: bool,
+    /// Delete remote asset when its corresponding local file is removed.
     #[serde(default)]
     pub delete_album_to_folder: bool,
 }
 
 impl FolderRules {
+    /// Return the list of allowed extensions trimmed and lowercased.
     pub fn normalized_extensions(&self) -> Vec<String> {
         self.allowed_extensions
             .iter()
@@ -34,6 +46,7 @@ impl FolderRules {
             .collect()
     }
 
+    /// Check if a specific file path meets all active folder validation rules.
     pub fn matches(&self, path: &Path) -> bool {
         if self.ignore_hidden
             && path.components().any(|component| {
@@ -90,25 +103,33 @@ pub enum FolderSyncMethod {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum WatchPathEntry {
+    /// Legacy, simple watched directory path without specific rules or targets.
     Simple(String),
+    /// Configured watched directory path containing custom sync targets and filters.
     WithConfig {
+        /// Absolute directory path on the local filesystem.
         path: String,
+        /// Target Immich album unique identifier.
         #[serde(default)]
         album_id: Option<String>,
+        /// Target Immich album name.
         #[serde(default)]
         album_name: Option<String>,
+        /// Specific validation and sync rules applied to this path.
         #[serde(default)]
         rules: FolderRules,
     },
 }
 
 impl WatchPathEntry {
+    /// Retrieve the base path of the watched directory.
     pub fn path(&self) -> &str {
         match self {
             WatchPathEntry::Simple(p) => p,
             WatchPathEntry::WithConfig { path, .. } => path,
         }
     }
+    /// Retrieve the target album name, if any.
     pub fn album_name(&self) -> Option<&str> {
         match self {
             WatchPathEntry::Simple(_) => None,
@@ -116,6 +137,7 @@ impl WatchPathEntry {
         }
     }
 
+    /// Retrieve the folder rules or a default set for simple paths.
     pub fn rules(&self) -> FolderRules {
         match self {
             WatchPathEntry::Simple(_) => FolderRules::default(),
@@ -123,10 +145,12 @@ impl WatchPathEntry {
         }
     }
 
+    /// Retrieve the sync direction configured for this directory.
     pub fn sync_method(&self) -> FolderSyncMethod {
         self.rules().sync_method
     }
 
+    /// Retrieve the catchup strategy override or fallback to global configuration.
     pub fn startup_catchup_mode(&self, fallback: &StartupCatchupMode) -> StartupCatchupMode {
         self.rules()
             .startup_catchup_mode
@@ -148,6 +172,7 @@ pub fn best_matching_watch_entry<'a>(
         .max_by_key(|entry| entry.path().len())
 }
 
+/// Find a configured watch path entry by its target album name.
 pub fn watch_entry_for_album<'a>(
     album_name: &str,
     entries: &'a [WatchPathEntry],
@@ -157,30 +182,43 @@ pub fn watch_entry_for_album<'a>(
         .find(|entry| entry.album_name() == Some(album_name))
 }
 
+/// Catch-up strategy applied to existing files when the application boots.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub enum StartupCatchupMode {
+    /// Perform full, deep comparison of all files on the local filesystem.
     #[default]
     Full,
+    /// Fast sync covering only files modified or added in the last 24 hours.
     RecentOnly,
+    /// Sync only new files added to folders while daemon was offline.
     NewFilesOnly,
 }
 
+/// Configuration schema driving application behavior and connection settings.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConfigData {
+    /// Active local Immich server connection address.
     #[serde(default)]
     pub internal_url: String,
+    /// Active remote or external connection address.
     #[serde(default)]
     pub external_url: String,
+    /// True if internal URL connection is enabled.
     #[serde(default = "default_true")]
     pub internal_url_enabled: bool,
+    /// True if external URL connection is enabled.
     #[serde(default = "default_true")]
     pub external_url_enabled: bool,
+    /// List of watched local directory entries.
     #[serde(default)]
     pub watch_paths: Vec<WatchPathEntry>,
+    /// True if application should launch automatically at user login.
     #[serde(default)]
     pub run_on_startup: bool,
+    /// Pause transfers when metered connections are detected.
     #[serde(default)]
     pub pause_on_metered_network: bool,
+    /// Pause transfers when system runs on battery.
     #[serde(default)]
     pub pause_on_battery_power: bool,
     /// Whether automatic background monitoring/upload discovery is enabled.
@@ -189,6 +227,7 @@ pub struct ConfigData {
     /// Whether desktop notifications (sync summary, connectivity lost, etc.) are shown.
     #[serde(default = "default_true")]
     pub notifications_enabled: bool,
+    /// Default catch-up scanning strategy when background scan starts.
     #[serde(default)]
     pub startup_catchup_mode: StartupCatchupMode,
     /// Number of parallel upload workers (1–10). Defaults to 3.
@@ -239,17 +278,22 @@ impl Default for ConfigData {
     }
 }
 
+/// Helper to default boolean fields to true during serialization.
 fn default_true() -> bool {
     true
 }
 
+/// Helper to default parallel upload worker threads to 3.
 fn default_upload_concurrency() -> u8 {
     3
 }
 
+/// Persistent config container wrapping loaded schema and file source info.
 #[derive(Clone)]
 pub struct Config {
+    /// Active live configuration switches.
     pub data: ConfigData,
+    /// Path to config file source.
     pub config_file: PathBuf,
 }
 
@@ -270,6 +314,7 @@ impl Config {
         config
     }
 
+    /// Load or parse configuration state from standard path source.
     pub fn load(&mut self) -> bool {
         if self.config_file.exists() {
             if let Ok(content) = fs::read_to_string(&self.config_file) {
@@ -291,6 +336,7 @@ impl Config {
         false
     }
 
+    /// Atomically write current configuration values back to disk.
     pub fn save(&self) -> bool {
         if let Ok(content) = serde_json::to_string_pretty(&self.data) {
             match crate::util::atomic_write(&self.config_file, content.as_bytes()) {

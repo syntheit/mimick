@@ -7,12 +7,16 @@
 use phf::{phf_map, phf_set};
 use std::path::Path;
 
+/// Discriminant representing whether a media file is an image or a video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
+    /// Asset is a static or animated image.
     Image,
+    /// Asset is a video or motion stream.
     Video,
 }
 
+/// Static set of all supported file extensions for quick membership lookups.
 pub static SUPPORTED: phf::Set<&'static str> = phf_set! {
     "3fr", "3gp", "3gpp", "ari", "arw", "avi", "avif", "bmp", "cap", "cin",
     "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "flv", "gif", "heic",
@@ -23,6 +27,7 @@ pub static SUPPORTED: phf::Set<&'static str> = phf_set! {
     "tif", "tiff", "ts", "vob", "webm", "webp", "wmv", "x3f",
 };
 
+/// Compile-time mapping from lowercased file extensions to standard MIME types.
 static MIME_BY_EXT: phf::Map<&'static str, &'static str> = phf_map! {
     "avif" => "image/avif",
     "bmp" => "image/bmp",
@@ -104,6 +109,7 @@ pub fn is_supported_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Check if a lowercased extension is present in the supported set.
 pub fn is_supported_ext(ext: &str) -> bool {
     SUPPORTED.contains(ext)
 }
@@ -120,6 +126,7 @@ pub fn mime_for_path(path: &Path) -> &'static str {
         .unwrap_or("application/octet-stream")
 }
 
+/// Determine the media kind based on the prefix of the MIME type.
 pub fn asset_kind(mime: &str) -> AssetKind {
     if mime.starts_with("video/") {
         AssetKind::Video
@@ -128,6 +135,7 @@ pub fn asset_kind(mime: &str) -> AssetKind {
     }
 }
 
+/// Extract the extension from a path and return it lowercased.
 fn extension_lower(path: &Path) -> Option<String> {
     path.extension()
         .map(|ext| ext.to_string_lossy().to_lowercase())

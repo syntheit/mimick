@@ -1,4 +1,8 @@
 //! Stores persistent status snapshots to restore basic UI state across application launches.
+//!
+//! Tracks the current sync progress, folder-level status, error history,
+//! and recent queue events. The state file is written atomically so a
+//! crash mid-write never corrupts the snapshot.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,75 +13,110 @@ use std::time::SystemTime;
 /// Represents a rolling queue/event status used by the settings window inspector.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct QueueEvent {
+    /// File path where the event occurred.
     pub path: String,
+    /// Outcome label of this synchronization event.
     pub status: String,
+    /// Detailed warning or cause description if failed.
     #[serde(default)]
     pub detail: Option<String>,
+    /// Number of sync attempts performed.
     #[serde(default)]
     pub attempts: u32,
+    /// Epoch timestamp of this event.
     pub timestamp: f64,
 }
 
 /// Represents the status of an individual watch folder.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct FolderSyncStatus {
+    /// Epoch timestamp of the last folder synchronization sweep.
     pub last_sync_at: Option<f64>,
+    /// Number of local files waiting in queue for this folder.
     pub pending_count: usize,
+    /// Target Immich album mapped to this folder.
     pub target_album: Option<String>,
+    /// Error warning recorded on last folder sync failure.
     pub last_error: Option<String>,
 }
 
+/// Target movement direction of active transfers.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub enum TransferDirection {
+    /// Files uploaded from local directories to Immich server.
     #[default]
     Upload,
+    /// Files downloaded from Immich server to local directories.
     Download,
 }
 
+/// Snapshot describing currently executing and active file transfers.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct TransferSnapshot {
+    /// True if a transfer batch session is currently running.
     #[serde(default)]
     pub active: bool,
+    /// Direction of current active transfer session.
     #[serde(default)]
     pub direction: TransferDirection,
+    /// Total bytes processed in current transfer task.
     #[serde(default)]
     pub current_bytes: u64,
+    /// Total bytes target across current session.
     #[serde(default)]
     pub total_bytes: Option<u64>,
+    /// Estimated sum of all item file sizes in the active batch.
     #[serde(default)]
     pub session_total_bytes: u64,
+    /// Sum of all bytes successfully sent or received in this session.
     #[serde(default)]
     pub session_transferred_bytes: u64,
+    /// Total target bytes of previously finished items in the batch.
     #[serde(default)]
     pub completed_total_bytes: u64,
+    /// Total bytes completed of previously finished items in the batch.
     #[serde(default)]
     pub completed_transferred_bytes: u64,
+    /// Instant speed in bytes per second.
     #[serde(default)]
     pub instant_bps: f64,
+    /// Average session speed in bytes per second.
     #[serde(default)]
     pub session_avg_bps: f64,
+    /// Epoch timestamp when the transfer session was started.
     #[serde(default)]
     pub session_started_at: Option<f64>,
+    /// Snapshot count of completed session bytes.
     #[serde(default)]
     pub session_bytes_done: u64,
+    /// Label representing the file currently being processed.
     #[serde(default)]
     pub active_item_label: Option<String>,
+    /// Active network route segment used for connection.
     #[serde(default)]
     pub active_route: Option<String>,
+    /// Average bytes per second achieved on the last upload batch.
     #[serde(default)]
     pub last_upload_avg_bps: f64,
+    /// Average bytes per second achieved on the last download batch.
     #[serde(default)]
     pub last_download_avg_bps: f64,
+    /// Tick epoch timestamp used to recalculate instant speed.
     #[serde(skip)]
     pub last_tick_at: Option<f64>,
+    /// Bytes processed on the last instant speed tick check.
     #[serde(skip)]
     pub last_tick_bytes: u64,
+    /// Number of active parallel upload workers.
     #[serde(skip)]
     pub active_uploads: usize,
+    /// Number of active parallel download workers.
     #[serde(skip)]
     pub active_downloads: usize,
+    /// Track of active item transferred bytes maps.
     #[serde(skip)]
     pub active_item_bytes: HashMap<String, u64>,
+    /// Track of active item total sizes maps.
     #[serde(skip)]
     pub active_item_totals: HashMap<String, u64>,
 }
@@ -85,42 +124,63 @@ pub struct TransferSnapshot {
 /// Contains shared progress counters exposed to the settings window.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppState {
+    /// Number of items remaining in background queue.
     pub queue_size: usize,
+    /// Total number of items scheduled this session.
     pub total_queued: usize,
+    /// Number of processed items during current session.
     pub processed_count: usize,
+    /// Number of items failing transmission.
     #[serde(default)]
     pub failed_count: usize,
     /// In-flight worker count — not persisted to disk.
     #[serde(skip)]
     pub active_workers: usize,
+    /// Relative path of file currently undergoing transmission.
     pub current_file: Option<String>,
+    /// Global application status label.
     pub status: String,
+    /// Percentage progress indicator of active batch.
     pub progress: u8,
+    /// Epoch timestamp of this state snapshot.
     pub timestamp: f64,
+    /// True if all processing queues are manually paused.
     #[serde(default)]
     pub paused: bool,
+    /// User or system reason why transmission is suspended.
     #[serde(default)]
     pub pause_reason: Option<String>,
+    /// Number of watched folders configured.
     #[serde(default)]
     pub watched_folder_count: usize,
+    /// Connection route label of the current session.
     #[serde(default)]
     pub active_server_route: Option<String>,
+    /// Epoch timestamp when the last sweep successfully finished.
     #[serde(default)]
     pub last_successful_sync_at: Option<f64>,
+    /// Diagnostic warning of the last critical error.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Troubleshooting guidance instructions for last_error.
     #[serde(default)]
     pub last_error_guidance: Option<String>,
+    /// Filename of the last successfully processed asset.
     #[serde(default)]
     pub last_completed_file: Option<String>,
+    /// Count of diagnostic bundles exported.
     #[serde(default)]
     pub diagnostics_exports: usize,
+    /// Historic rolling logs of recent queue event results.
     #[serde(default)]
     pub recent_events: Vec<QueueEvent>,
+    /// Current sync states mapped by watched folder paths.
     #[serde(default)]
     pub folder_statuses: std::collections::HashMap<String, FolderSyncStatus>,
+    /// Active metrics representing ongoing network transfers.
     #[serde(default)]
     pub transfer: TransferSnapshot,
+    /// Total completed batches of uploads executed.
     #[serde(skip)]
     pub completed_upload_batches: u64,
 }
@@ -157,6 +217,7 @@ impl Default for AppState {
 impl AppState {
     const MAX_EVENTS: usize = 80;
 
+    /// Add or update a rolling queue event entry in history.
     pub fn record_event(
         &mut self,
         path: impl Into<String>,
@@ -191,12 +252,14 @@ impl AppState {
         self.recent_events.truncate(Self::MAX_EVENTS);
     }
 
+    /// Discard in-progress transfer states at application boot time.
     pub fn reset_runtime_state(&mut self) {
         self.transfer.reset_runtime();
     }
 }
 
 impl TransferSnapshot {
+    /// Reset active metrics back to zero.
     pub fn reset_runtime(&mut self) {
         self.active = false;
         self.direction = TransferDirection::Upload;
@@ -220,6 +283,7 @@ impl TransferSnapshot {
         self.active_item_totals.clear();
     }
 
+    /// Check if target transfer direction should be switched.
     fn should_switch_to(&self, direction: &TransferDirection) -> bool {
         if !self.active {
             return true;
@@ -231,6 +295,7 @@ impl TransferSnapshot {
         }
     }
 
+    /// Ensure an active transfer session group is initialized.
     fn ensure_session(&mut self, direction: TransferDirection, route: Option<String>) {
         if self.should_switch_to(&direction) {
             self.active = true;
@@ -256,6 +321,7 @@ impl TransferSnapshot {
         }
     }
 
+    /// Add an active item structure into the ongoing transfer snapshot.
     pub fn register_item(
         &mut self,
         direction: TransferDirection,
@@ -284,6 +350,7 @@ impl TransferSnapshot {
         }
     }
 
+    /// Start tracking a group of transfer operations.
     pub fn begin_group(
         &mut self,
         direction: TransferDirection,
@@ -299,6 +366,7 @@ impl TransferSnapshot {
         }
     }
 
+    /// Update total sizes for a specific active item in the transfer.
     pub fn update_item_total(&mut self, item_id: &str, total_bytes: u64) {
         self.active_item_totals
             .insert(item_id.to_string(), total_bytes);
@@ -307,6 +375,7 @@ impl TransferSnapshot {
         self.total_bytes = Some(self.session_total_bytes);
     }
 
+    /// Update bytes completed so far for a specific active item.
     pub fn update_item_bytes(
         &mut self,
         direction: TransferDirection,
@@ -367,6 +436,7 @@ impl TransferSnapshot {
         }
     }
 
+    /// Finish tracking a specific item, returning true if the session is empty.
     pub fn finish_item(
         &mut self,
         direction: TransferDirection,
@@ -426,6 +496,7 @@ impl TransferSnapshot {
     }
 }
 
+/// Return current epoch timestamp.
 fn unix_timestamp_now() -> f64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -433,7 +504,9 @@ fn unix_timestamp_now() -> f64 {
         .as_secs_f64()
 }
 
+/// Helper that reads and writes redacted app states to disk.
 pub struct StateManager {
+    /// Resolved absolute path of status JSON cache.
     state_file: PathBuf,
 }
 

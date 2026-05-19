@@ -1,4 +1,7 @@
 //! Shared filesystem and I/O utilities.
+//!
+//! Provides atomic file writes (write-to-temp then rename) and other
+//! small helpers used across the sync engine and configuration modules.
 
 use std::fs;
 use std::io;

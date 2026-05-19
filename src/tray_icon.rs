@@ -1,4 +1,9 @@
-//! Integrates StatusNotifier tray functionality and provides GTK-facing control signals for tray actions.
+//! Integrates StatusNotifier tray functionality and provides GTK-facing control signals.
+//!
+//! Uses the `ksni` crate to register a system tray icon with menu entries
+//! for Settings, Library, Pause/Resume, Sync Now, and Quit. Each action
+//! sends a signal over a `tokio::sync::watch` channel that the GTK main
+//! loop polls to trigger the corresponding window or operation.
 
 use ksni::TrayMethods;
 use tokio::sync::watch;
@@ -90,16 +95,23 @@ impl ksni::Tray for MimickTray {
     }
 }
 
-/// Launch the tray and return receivers for settings-open and quit requests.
+/// Channels and handles returned by tray initialization to manage signals.
 pub struct TrayHandles {
+    /// Active ksni tray handle.
     pub handle: ksni::Handle<MimickTray>,
+    /// Receiver for the settings-open signal.
     pub settings_rx: watch::Receiver<bool>,
+    /// Receiver for the library-open signal.
     pub library_rx: watch::Receiver<bool>,
+    /// Receiver for the application quit signal.
     pub quit_rx: watch::Receiver<bool>,
+    /// Receiver for the pause/resume signal.
     pub pause_rx: watch::Receiver<bool>,
+    /// Receiver for the catch-up sync request signal.
     pub sync_now_rx: watch::Receiver<bool>,
 }
 
+/// Asynchronously construct and spawn the system tray icon, returning control channels.
 pub async fn build_tray(library_view_enabled: bool) -> Result<TrayHandles, ksni::Error> {
     let (settings_tx, settings_rx) = watch::channel(false);
     let (library_tx, library_rx) = watch::channel(false);

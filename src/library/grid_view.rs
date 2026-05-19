@@ -1,4 +1,9 @@
-//! GridView-based asset browser with async thumbnail loading and pagination.
+//! Grid view construction, thumbnail binding, and infinite-scroll pagination.
+//!
+//! Sets up a `gtk::GridView` backed by a `gio::ListStore` of `AssetObject`
+//! items. Thumbnails are loaded asynchronously via the thumbnail cache and
+//! bound to picture widgets through a factory. Scroll-to-bottom triggers
+//! automatic next-page fetches.
 
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -15,6 +20,7 @@ use crate::library::asset_object::AssetObject;
 const POS_DATA_KEY: &str = "mimick-cell-pos";
 pub type AssetContextMenuHandler = Rc<RefCell<Option<Box<dyn Fn(u32, f64, f64)>>>>;
 
+/// Contains references to the model, selection, and scrolled container of the GridView browser.
 pub struct GridViewParts {
     pub model: LibraryAssetModel,
     pub scrolled: gtk::ScrolledWindow,
@@ -23,6 +29,7 @@ pub struct GridViewParts {
     pub context_menu_handler: AssetContextMenuHandler,
 }
 
+/// Build and assemble the main GridView interface for library asset browsing.
 pub fn build_grid_view(
     ctx: Arc<AppContext>,
     select_toggle: gtk::ToggleButton,
@@ -335,6 +342,7 @@ pub fn build_grid_view(
     }
 }
 
+/// Construct a click activation toggle closure for the GridView.
 fn clone_view_for_toggle(view: &gtk::GridView) -> impl Fn(&gtk::ToggleButton) + 'static {
     let view = view.clone();
     move |toggle| {
@@ -342,6 +350,7 @@ fn clone_view_for_toggle(view: &gtk::GridView) -> impl Fn(&gtk::ToggleButton) + 
     }
 }
 
+/// Locate the checkbox child widget inside an overlay container.
 fn find_select_checkbox(container: &gtk::Overlay) -> Option<gtk::CheckButton> {
     let mut child = container.first_child();
     while let Some(c) = child {
@@ -356,6 +365,7 @@ fn find_select_checkbox(container: &gtk::Overlay) -> Option<gtk::CheckButton> {
     None
 }
 
+/// Synchronize the checkbutton state with list selection without triggering loops.
 fn sync_checkbox_state(checkbox: &gtk::CheckButton, position: u32, selected: bool) {
     let data = unsafe {
         checkbox
@@ -371,6 +381,7 @@ fn sync_checkbox_state(checkbox: &gtk::CheckButton, position: u32, selected: boo
     suppress.set(false);
 }
 
+/// Retrieve a descriptive text label for the specified sync state code.
 fn sync_state_label(sync_state: u32) -> &'static str {
     match sync_state {
         2 => "On Immich and locally",
@@ -379,6 +390,7 @@ fn sync_state_label(sync_state: u32) -> &'static str {
     }
 }
 
+/// Retrieve an icon name corresponding to the specified sync state code.
 fn sync_icon_name(sync_state: u32) -> &'static str {
     match sync_state {
         2 => "mimick-check-circle-symbolic",
@@ -387,6 +399,7 @@ fn sync_icon_name(sync_state: u32) -> &'static str {
     }
 }
 
+/// Locate a child image matching a specific CSS class inside the overlay container.
 fn find_overlay_image(container: &gtk::Overlay, class_name: &str) -> Option<gtk::Image> {
     let mut child = container.first_child();
     while let Some(c) = child {
@@ -401,6 +414,7 @@ fn find_overlay_image(container: &gtk::Overlay, class_name: &str) -> Option<gtk:
     None
 }
 
+/// Represents the current loading phase status of a thumbnail image.
 #[derive(Clone, Copy)]
 enum ThumbState {
     Loading,
@@ -408,6 +422,7 @@ enum ThumbState {
     Error,
 }
 
+/// Set the appropriate thumbnail state CSS classes on a picture widget.
 fn set_thumb_state(picture: &gtk::Picture, state: ThumbState) {
     let want = match state {
         ThumbState::Loading => "mimick-thumbnail-loading",
@@ -432,6 +447,7 @@ fn set_thumb_state(picture: &gtk::Picture, state: ThumbState) {
     }
 }
 
+/// Toggle the timeline square shape styling class on a picture widget.
 fn set_square_class(picture: &gtk::Picture, on: bool) {
     let has = picture.has_css_class("mimick-thumbnail-square");
     if on && !has {
@@ -441,6 +457,7 @@ fn set_square_class(picture: &gtk::Picture, on: bool) {
     }
 }
 
+/// Asynchronously load and apply a local or remote thumbnail to a picture widget.
 fn schedule_thumbnail_load(
     ctx: Arc<AppContext>,
     picture: gtk::Picture,
@@ -489,6 +506,7 @@ fn schedule_thumbnail_load(
 
 const GEN_DATA_KEY: &str = "mimick-cell-gen";
 
+/// Retrieve or initialize the cell generation cell tracking counter.
 fn generation_cell(picture: &gtk::Picture) -> Rc<Cell<u64>> {
     let existing = unsafe {
         picture
@@ -505,6 +523,7 @@ fn generation_cell(picture: &gtk::Picture) -> Rc<Cell<u64>> {
     cell
 }
 
+/// Increment and retrieve the cell's task generation tracker.
 fn bump_generation(picture: &gtk::Picture) -> u64 {
     let cell = generation_cell(picture);
     let next = cell.get().wrapping_add(1);
@@ -512,6 +531,7 @@ fn bump_generation(picture: &gtk::Picture) -> u64 {
     next
 }
 
+/// Prefetch neighboring thumbnails around the active scrolling viewport index.
 fn prefetch_thumbnails_around(
     ctx: Arc<AppContext>,
     model: &impl IsA<gtk::gio::ListModel>,
@@ -548,6 +568,7 @@ fn prefetch_thumbnails_around(
     }
 }
 
+/// Decode a ThumbHash Base64 string and compile it to a standard GDK texture.
 fn decode_thumbhash_texture(thumbhash_b64: &str) -> Option<Texture> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD

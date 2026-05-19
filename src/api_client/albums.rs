@@ -1,4 +1,8 @@
 //! Album management: list, create, cache, and add assets to albums.
+//!
+//! Provides the `get_all_albums`, `get_or_create_album`, and
+//! `add_asset_to_album` methods that the upload and library flows
+//! depend on. Album metadata is cached in-memory after the first fetch.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,6 +14,7 @@ use super::errors::{RequestContext, classify_http_issue, classify_network_issue}
 use super::{AlbumSummary, ApiIssue, ImmichApiClient};
 
 impl ImmichApiClient {
+    /// Retrieve all albums from the Immich server, populating the local in-memory cache.
     async fn fetch_all_albums(&self) {
         let _fetch_guard = self.album_fetch_lock.lock().await;
         if *self.albums_fetched.lock().await {

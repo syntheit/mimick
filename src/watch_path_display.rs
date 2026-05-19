@@ -1,4 +1,8 @@
-//! Provides utilities for displaying user-friendly names for watch paths, especially those selected via Flatpak portals.
+//! Provides user-friendly display names for watch paths.
+//!
+//! Flatpak document-portal paths (`/run/user/.../doc/...`) are mapped
+//! back to their original human-readable folder names. Regular paths
+//! are shortened to their final component for compact UI display.
 
 use std::path::Path;
 

@@ -1,4 +1,9 @@
 //! Manages upload queue orchestration, retry persistence, and sync-index updates.
+//!
+//! A configurable pool of async workers drains the upload queue in parallel.
+//! Failed tasks are moved to a retry queue with exponential back-off. The
+//! queue pauses automatically when environment policies (metered network,
+//! battery power, quiet hours) are active, and resumes when conditions clear.
 
 use crate::api_client::{ImmichApiClient, TransferProgressCallback};
 use crate::notifications;
@@ -15,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
+/// Helper to generate progress callback callbacks that update global transfer metrics.
 fn upload_progress_callback(
     shared_state: &Arc<parking_lot::Mutex<AppState>>,
     item_id: String,
@@ -43,53 +49,68 @@ fn upload_progress_callback(
 /// Represents a unit of work for the upload queue.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileTask {
+    /// Absolute local file path.
     pub path: String,
+    /// Absolute watch path prefix under which the file resides.
     #[serde(default)]
     pub watch_path: String,
+    /// Precomputed file SHA-1 checksum.
     pub checksum: String,
-    /// Optional album ID if it has already been resolved.
+    /// Target Immich album identifier if already resolved.
     #[serde(default)]
     pub album_id: Option<String>,
-    /// Album name to look up or create.
+    /// Mapped Immich album name.
     #[serde(default)]
     pub album_name: Option<String>,
-    /// True if the file already exists on the server and only album reassociation is needed.
+    /// True if the asset is already on the server and only needs album addition.
     #[serde(default)]
     pub reassociate_only: bool,
 }
 
 pub struct QueueManager {
+    /// Internal task sender channel.
     sender: mpsc::Sender<FileTask>,
     /// Shared in-memory state accessed by both workers and the UI.
     shared_state: Arc<parking_lot::Mutex<AppState>>,
     /// Failed tasks accumulated in memory and flushed during graceful shutdown.
     retry_list: Arc<parking_lot::Mutex<Vec<FileTask>>>,
-    /// Paths already queued or awaiting retry.
-    ///
-    /// Prevents duplicate entries when the startup scan and live watcher both
-    /// notice the same file in a short time window.
+    /// Paths already queued or awaiting retry to avoid duplication.
     pending_paths: Arc<parking_lot::Mutex<HashSet<String>>>,
+    /// Path of persistent retries file.
     retry_path: PathBuf,
+    /// Shared current transmission limits and environmental constraints.
     policy: Arc<parking_lot::Mutex<EnvironmentPolicy>>,
+    /// Active worker concurrency limit wrapper.
     worker_limit: Arc<AtomicUsize>,
+    /// Sync summary notification batch states tracker.
     batch_notify_state: Arc<parking_lot::Mutex<BatchNotifyState>>,
+    /// Flag indicating whether new tasks are accepted.
     accepting_new: Arc<AtomicBool>,
+    /// Internal shutdown cancellation coordinator.
     shutdown_token: CancellationToken,
 }
 
 #[derive(Debug, Default)]
 struct BatchNotifyState {
+    /// Active status indicating whether a batch notifications window is open.
     active: bool,
+    /// True if a notification summary sweep is already planned.
     notify_scheduled: bool,
+    /// Unique identifier of the current batch.
     current_batch_id: u64,
+    /// Last unique identifier that triggered desktop notification.
     last_notified_batch_id: u64,
+    /// Processed count recorded at beginning of batch.
     start_processed: usize,
+    /// Failed count recorded at beginning of batch.
     start_failed: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct EnvironmentPolicy {
+    /// True if syncing should pause when metered connections are detected.
     pub pause_on_metered_network: bool,
+    /// True if syncing should pause when battery power is detected.
     pub pause_on_battery_power: bool,
     /// First local clock hour (0–23) of the quiet window. `None` = disabled.
     pub quiet_hours_start: Option<u8>,
@@ -98,6 +119,7 @@ pub struct EnvironmentPolicy {
 }
 
 impl QueueManager {
+    /// Initialize a new QueueManager and kick off worker threads.
     pub fn new(
         api_client: Arc<ImmichApiClient>,
         workers: usize,
@@ -721,6 +743,7 @@ impl QueueManager {
         }
     }
 
+    /// Requeue failed task lists with specified details string.
     async fn requeue_failed(&self, tasks: Vec<FileTask>, detail: String) -> usize {
         if tasks.is_empty() {
             return 0;
@@ -754,6 +777,7 @@ impl QueueManager {
     }
 }
 
+/// Get current sync attempt count for a path based on recent events history.
 fn current_attempt_count(state: &AppState, path: &str) -> u32 {
     state
         .recent_events
@@ -763,6 +787,7 @@ fn current_attempt_count(state: &AppState, path: &str) -> u32 {
         .unwrap_or(1)
 }
 
+/// Activate a batch tracking window if none is currently active.
 fn activate_batch_if_needed(batch_state: &mut BatchNotifyState, state: &AppState) {
     if batch_state.active {
         return;
@@ -776,6 +801,7 @@ fn activate_batch_if_needed(batch_state: &mut BatchNotifyState, state: &AppState
     batch_state.start_failed = state.failed_count;
 }
 
+/// Return current epoch timestamp in seconds.
 fn unix_timestamp_now() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -799,6 +825,7 @@ fn is_quiet_hour(start: Option<u8>, end: Option<u8>) -> bool {
     }
 }
 
+/// Pause worker processing loops until environment checks and manual pauses permit resume.
 async fn wait_until_allowed(
     state_ref: &Arc<parking_lot::Mutex<AppState>>,
     policy_ref: &Arc<parking_lot::Mutex<EnvironmentPolicy>>,
@@ -973,6 +1000,7 @@ async fn handle_upload(
     })
 }
 
+/// Infer target album name from directory structure segment.
 fn infer_album_name(path: &str) -> Option<String> {
     std::path::Path::new(path)
         .parent()
@@ -980,6 +1008,7 @@ fn infer_album_name(path: &str) -> Option<String> {
         .map(|n| n.to_string_lossy().to_string())
 }
 
+/// Persist current list of failed items to retries cache.
 fn save_retries(path: &PathBuf, tasks: &[FileTask]) {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
@@ -1002,6 +1031,7 @@ fn save_retries(path: &PathBuf, tasks: &[FileTask]) {
     }
 }
 
+/// Load historical list of failed tasks from retries cache.
 fn load_retries(path: &PathBuf) -> Vec<FileTask> {
     if !path.exists() {
         return Vec::new();

@@ -1,4 +1,9 @@
 //! Provides best-effort checks of system conditions to determine when uploads should be deferred.
+//!
+//! Reads `/sys/class/power_supply` to detect battery state and parses
+//! NetworkManager D-Bus properties to identify metered connections. All
+//! checks are non-fatal: if a sysfs path is missing or D-Bus is unavailable,
+//! the condition is assumed to be clear.
 
 use std::fs;
 use std::path::Path;
@@ -51,11 +56,13 @@ pub fn is_on_battery_power() -> bool {
     is_on_battery_power_from_statuses(&statuses)
 }
 
+/// Check if the nmcli output string indicates a metered network connection.
 fn is_metered_connection_from_nmcli_output(stdout: &str) -> bool {
     let stdout = stdout.to_ascii_lowercase();
     stdout.contains("yes") || stdout.contains("guessed-yes")
 }
 
+/// Determine if running on battery based on parsed power supply types and online statuses.
 fn is_on_battery_power_from_statuses(
     statuses: &[(Option<String>, Option<bool>, Option<String>)],
 ) -> bool {

@@ -1,4 +1,10 @@
-//! Maintains a persistent index of files that have been previously synced, supporting efficient startup rescans.
+//! Maintains a persistent index of files that have been previously synced.
+//!
+//! The index maps local file paths to their checksums, modification times,
+//! and target album IDs. A sharded design (`ShardedSyncIndex`) distributes
+//! entries across multiple segment files for lock-free concurrent reads
+//! during parallel scans. On startup, unchanged files are skipped entirely
+//! by comparing stored checksums against the current state.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -15,11 +21,16 @@ const SHARD_COUNT: usize = 16;
 /// Represents a record stored on disk for a synced file, including the last associated album target.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SyncedFileRecord {
+    /// File size in bytes.
     pub size: u64,
+    /// Last modified epoch timestamp in milliseconds.
     pub modified_ms: u64,
+    /// Local pre-computed hex-encoded file SHA-1 checksum.
     pub checksum: String,
+    /// Targeted Immich album name.
     #[serde(default)]
     pub album_name: Option<String>,
+    /// Mapped Immich album unique identifier.
     #[serde(default)]
     pub album_id: Option<String>,
 }
@@ -27,7 +38,9 @@ pub struct SyncedFileRecord {
 /// Describes the intended album target for a file during sync operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncTarget {
+    /// Target Immich album name.
     pub album_name: Option<String>,
+    /// Mapped Immich album unique identifier.
     pub album_id: Option<String>,
 }
 
@@ -38,24 +51,32 @@ pub enum SyncDecision {
     NeedsReassociate,
 }
 
+/// Inner serialized structure representing the index files list.
 #[derive(Serialize, Deserialize, Default)]
 struct SyncIndexData {
+    /// Mapping of paths to synced file records.
     files: HashMap<String, SyncedFileRecord>,
 }
 
+/// Borrowed reference of the serialized index for zero-copy writes.
 #[derive(Serialize)]
 struct SyncIndexDataRef<'a> {
+    /// Borrowed mapping of paths to synced file records.
     files: &'a HashMap<String, SyncedFileRecord>,
 }
 
 /// A single shard of the sync index, holding a subset of entries.
 struct Shard {
+    /// Synced records stored in this shard.
     entries: HashMap<String, SyncedFileRecord>,
+    /// Reverse index map from checksum to absolute path.
     checksum_to_path: HashMap<String, String>,
+    /// True if this shard has modified records not yet flushed.
     dirty: bool,
 }
 
 impl Shard {
+    /// Initialize a new, empty Shard.
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
@@ -73,11 +94,13 @@ impl Shard {
 /// The public API is identical to the old `SyncIndex` but methods are inherent
 /// -- callers no longer wrap this in `Arc<Mutex<_>>`.
 pub struct ShardedSyncIndex {
+    /// Absolute path of index JSON on disk.
     index_file: PathBuf,
+    /// Array of RwLock-wrapped entry shards.
     shards: [RwLock<Shard>; SHARD_COUNT],
 }
 
-/// Determine which shard a path belongs to.
+/// Determine which shard index a path belongs to.
 fn shard_for(path: &str) -> usize {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
@@ -85,9 +108,7 @@ fn shard_for(path: &str) -> usize {
 }
 
 impl ShardedSyncIndex {
-    /// Loads the sync index from the persistent data directory, migrating
-    /// from the old cache location on first run so users who clear the
-    /// system cache don't lose sync state and trigger a full re-upload.
+    /// Load existing indices from persistent path, migrating cache if necessary.
     pub fn new() -> Self {
         let index_file = crate::profile::data_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp").join(crate::profile::dir_segment()))
@@ -303,10 +324,7 @@ impl ShardedSyncIndex {
     }
 }
 
-/// One-time migration of the sync index from the legacy cache_dir location
-/// to the persistent data_dir. Only runs when the new file is absent and the
-/// old one exists. Best-effort: failures are logged and the app continues
-/// with whatever is at the new path.
+/// Migrate legacy cache-dir synced indices on first launch.
 fn migrate_from_cache_dir(new_path: &Path) {
     if new_path.exists() {
         return;
@@ -352,7 +370,7 @@ fn migrate_from_cache_dir(new_path: &Path) {
     }
 }
 
-/// Load the saved index file, falling back to an empty index if it is missing or invalid.
+/// Helper to load all stored sync records from the file.
 fn load_entries(index_file: &Path) -> HashMap<String, SyncedFileRecord> {
     match fs::read_to_string(index_file) {
         Ok(content) => match serde_json::from_str::<SyncIndexData>(&content) {
@@ -370,7 +388,7 @@ fn load_entries(index_file: &Path) -> HashMap<String, SyncedFileRecord> {
     }
 }
 
-/// Reduce file metadata to the fields Mimick uses to detect local changes cheaply.
+/// Helper to calculate the size and modification timestamp fingerprint of a file.
 fn fingerprint_from_metadata(metadata: &fs::Metadata) -> (u64, u64) {
     let modified_ms = metadata
         .modified()

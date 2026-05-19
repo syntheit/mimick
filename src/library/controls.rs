@@ -1,4 +1,8 @@
 //! Header bar button wiring, search, sort, source-mode, timeline, and sidebar/grid handlers.
+//!
+//! Connects signal handlers for the library header bar controls including
+//! the search entry, sort-mode dropdown, view-source toggle, timeline
+//! scrubber, and sidebar collapse button.
 
 use std::rc::Rc;
 

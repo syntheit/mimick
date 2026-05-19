@@ -1,4 +1,9 @@
 //! Library browsing: fetch albums, thumbnails, asset details, download originals, delete.
+//!
+//! Implements the read-side API surface used by the library window:
+//! paginated asset lists, thumbnail downloads (with semaphore-limited
+//! concurrency), EXIF metadata, and original-file downloads. Asset
+//! deletion sends items to Immich trash rather than permanent removal.
 
 use std::time::Duration;
 
@@ -9,6 +14,7 @@ use super::{
 };
 
 impl ImmichApiClient {
+    /// Retrieve the complete list of albums from the Immich server for library display.
     pub async fn fetch_library_albums(&self) -> Result<Vec<LibraryAlbum>, String> {
         let base_url = self
             .get_active_url()
@@ -52,6 +58,7 @@ impl ImmichApiClient {
         }
     }
 
+    /// Retrieve paginated assets contained in a specific album.
     pub async fn fetch_album_assets(
         &self,
         album_id: &str,
@@ -81,6 +88,7 @@ impl ImmichApiClient {
         .await
     }
 
+    /// Retrieve raw thumbnail/preview image byte array for a given asset ID.
     pub async fn fetch_thumbnail(
         &self,
         asset_id: &str,
@@ -136,6 +144,7 @@ impl ImmichApiClient {
         }
     }
 
+    /// Retrieve full EXIF metadata and details for a given asset ID.
     pub async fn fetch_asset_details(&self, asset_id: &str) -> Result<AssetDetails, String> {
         let base_url = self
             .get_active_url()
@@ -161,6 +170,7 @@ impl ImmichApiClient {
         }
     }
 
+    /// Download original source file of a given asset ID and save it locally.
     pub async fn download_original_to_file(
         &self,
         asset_id: &str,
@@ -218,6 +228,7 @@ impl ImmichApiClient {
         }
     }
 
+    /// Fetch unique user ID of the logged-in API user.
     pub async fn fetch_current_user_id(&self) -> Result<String, String> {
         let base_url = self
             .get_active_url()
@@ -246,6 +257,7 @@ impl ImmichApiClient {
         }
     }
 
+    /// Soft-delete specified assets from the Immich server.
     pub async fn delete_assets(&self, asset_ids: &[String]) -> Result<(), String> {
         if asset_ids.is_empty() {
             return Ok(());

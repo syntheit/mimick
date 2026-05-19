@@ -1,4 +1,8 @@
 //! Selection-mode wiring and bulk batch operations.
+//!
+//! Manages multi-select mode toggling, selection-count tracking, and
+//! batch actions such as bulk download, bulk delete-to-trash, and
+//! bulk add-to-album for the library grid.
 
 use std::cell::Cell;
 use std::rc::Rc;

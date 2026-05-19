@@ -1,3 +1,11 @@
+//! Two-tier (memory + disk) thumbnail cache for the library grid.
+//!
+//! Remote thumbnails are fetched via the API client and decoded into
+//! GDK textures. An LRU memory cache with a configurable byte budget
+//! keeps hot textures in RAM, while a persistent disk cache avoids
+//! redundant network requests across sessions. In-flight deduplication
+//! ensures concurrent requests for the same asset coalesce into one load.
+
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -19,6 +27,7 @@ type InflightSlot = Option<Result<Texture, String>>;
 type InflightRx = watch::Receiver<InflightSlot>;
 type InflightMap = Arc<Mutex<HashMap<String, InflightRx>>>;
 
+/// Guard that cleans up in-flight channel entries on drop.
 struct InflightGuard {
     inflight: InflightMap,
     key: String,
@@ -26,6 +35,7 @@ struct InflightGuard {
 }
 
 impl InflightGuard {
+    /// Publish the load result to all listening subscribers.
     fn publish(&self, result: Result<Texture, String>) {
         let _ = self.tx.send(Some(result));
     }
@@ -38,6 +48,7 @@ impl Drop for InflightGuard {
     }
 }
 
+/// Helper to await an in-flight thumbnail load result from a subscriber channel.
 async fn await_inflight(mut rx: InflightRx) -> Result<Texture, String> {
     if let Some(result) = rx.borrow_and_update().clone() {
         return result;
@@ -51,6 +62,7 @@ async fn await_inflight(mut rx: InflightRx) -> Result<Texture, String> {
     }
 }
 
+/// LRU Cache that limits memory usage based on estimated byte size.
 struct SizedLruCache {
     inner: LruCache<String, Texture>,
     current_bytes: usize,
@@ -58,6 +70,7 @@ struct SizedLruCache {
 }
 
 impl SizedLruCache {
+    /// Construct a new LRU cache with a specific byte limit.
     fn new(max_bytes: usize) -> Self {
         let approx_per_entry = 256 * 1024;
         let count_cap = (max_bytes / approx_per_entry).max(8);
@@ -68,10 +81,12 @@ impl SizedLruCache {
         }
     }
 
+    /// Retrieve a texture from the cache if present, updating LRU recency.
     fn get(&mut self, key: &str) -> Option<Texture> {
         self.inner.get(key).cloned()
     }
 
+    /// Insert a texture into the cache, evicting entries to respect the byte budget.
     fn insert(&mut self, key: String, texture: Texture) {
         let added = estimate_texture_bytes(&texture);
         if let Some(previous) = self.inner.put(key, texture) {
@@ -91,12 +106,14 @@ impl SizedLruCache {
         }
     }
 
+    /// Clear all cached items and reset the current byte counter.
     fn clear(&mut self) {
         self.inner.clear();
         self.current_bytes = 0;
     }
 }
 
+/// A combined memory (LRU) and disk-based caching manager for remote and local assets.
 pub struct ThumbnailCache {
     api_client: std::sync::Arc<ImmichApiClient>,
     memory: Mutex<SizedLruCache>,
@@ -110,6 +127,7 @@ impl ThumbnailCache {
     const DISK_CAP_BYTES: u64 = 1024 * 1024 * 1024;
     const DISK_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
 
+    /// Construct a new thumbnail cache manager.
     pub fn with_capacity_mb(api_client: std::sync::Arc<ImmichApiClient>, mb: u32) -> Self {
         let cache_dir = crate::profile::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp").join(crate::profile::dir_segment()))
@@ -168,11 +186,13 @@ impl ThumbnailCache {
         }
     }
 
+    /// Retrieve a thumbnail texture from memory if present.
     pub fn get_cached(&self, asset_id: &str, size: ThumbnailSize) -> Option<Texture> {
         let key = cache_key(asset_id, size);
         self.memory.lock().get(&key)
     }
 
+    /// Asynchronously fetch a remote thumbnail with default non-cancellable execution.
     pub async fn load_thumbnail(
         &self,
         asset_id: &str,
@@ -182,6 +202,7 @@ impl ThumbnailCache {
             .await
     }
 
+    /// Asynchronously fetch a remote thumbnail with cancellable hook support.
     pub async fn load_thumbnail_cancellable<F>(
         &self,
         asset_id: &str,
@@ -207,6 +228,7 @@ impl ThumbnailCache {
         result
     }
 
+    /// Internal helper that performs the actual network request and disk backup logic.
     async fn fetch_remote_thumbnail(
         &self,
         asset_id: &str,
@@ -267,6 +289,7 @@ impl ThumbnailCache {
         Ok(texture)
     }
 
+    /// Asynchronously generate a local file thumbnail with cancellable hook support.
     pub async fn load_local_thumbnail_cancellable<F>(
         &self,
         asset_id: &str,
@@ -292,6 +315,7 @@ impl ThumbnailCache {
         result
     }
 
+    /// Internal helper that scales, saves, and loads a local folder asset thumbnail.
     async fn fetch_local_thumbnail(
         &self,
         asset_id: &str,
@@ -349,6 +373,7 @@ impl ThumbnailCache {
         Ok(texture)
     }
 
+    /// Purge all memory caches and completely delete the disk cache directory.
     pub fn clear(&self) -> Result<(), String> {
         self.memory.lock().clear();
         if self.cache_dir.exists() {
@@ -357,6 +382,7 @@ impl ThumbnailCache {
         Ok(())
     }
 
+    /// Prune disk cache entries until the total size falls under the byte limit.
     fn prune_disk_cache(&self, max_bytes: u64) -> Result<(), String> {
         if !self.cache_dir.exists() {
             return Ok(());
@@ -397,14 +423,17 @@ impl ThumbnailCache {
         Ok(())
     }
 
+    /// Return the physical disk cache path for a remote asset thumbnail.
     fn cache_file(&self, asset_id: &str, size: ThumbnailSize) -> PathBuf {
         self.cache_dir.join(cache_key(asset_id, size))
     }
 
+    /// Return the physical disk cache path for a local folder asset thumbnail.
     fn cache_file_local(&self, asset_id: &str) -> PathBuf {
         self.cache_dir.join(local_cache_key(asset_id))
     }
 
+    /// Register or join an ongoing in-flight loading request for a key.
     fn enter_inflight(&self, key: &str) -> Result<InflightGuard, InflightRx> {
         let mut map = self.inflight.lock();
         if let Some(rx) = map.get(key) {
@@ -420,6 +449,7 @@ impl ThumbnailCache {
     }
 }
 
+/// Construct a cache key string for remote assets.
 fn cache_key(asset_id: &str, size: ThumbnailSize) -> String {
     match size {
         ThumbnailSize::Thumbnail => format!("thumbnail:{}", asset_id),
@@ -427,16 +457,19 @@ fn cache_key(asset_id: &str, size: ThumbnailSize) -> String {
     }
 }
 
+/// Construct a cache key string for local assets using hashed paths.
 fn local_cache_key(asset_id: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     asset_id.hash(&mut hasher);
     format!("local-thumbnail-v2:{:x}", hasher.finish())
 }
 
+/// Estimate memory byte size occupied by a texture.
 fn estimate_texture_bytes(texture: &Texture) -> usize {
     texture.width().max(1) as usize * texture.height().max(1) as usize * 4
 }
 
+/// Asynchronously decode image bytes into a scaled texture.
 async fn decode_to_scaled_texture(bytes: Vec<u8>) -> Result<Texture, String> {
     tokio::task::spawn_blocking(move || -> Result<Texture, String> {
         let stream = gtk::gio::MemoryInputStream::from_bytes(&Bytes::from_owned(bytes));

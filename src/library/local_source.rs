@@ -70,6 +70,7 @@ pub async fn enumerate_local_for_entry(
         .unwrap_or_default()
 }
 
+/// Walk directories on a thread pool thread to search for media files.
 fn enumerate_blocking(watch_paths: &[WatchPathEntry]) -> Vec<LocalAsset> {
     let mut out = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -110,6 +111,7 @@ fn enumerate_blocking(watch_paths: &[WatchPathEntry]) -> Vec<LocalAsset> {
     out
 }
 
+/// Parse metadata details and construct a typed `LocalAsset` for a file path.
 fn build_asset(path: &Path) -> Option<LocalAsset> {
     let filename = path.file_name()?.to_string_lossy().into_owned();
     let metadata = std::fs::metadata(path).ok()?;
@@ -128,6 +130,7 @@ fn build_asset(path: &Path) -> Option<LocalAsset> {
     })
 }
 
+/// Convert a file modification timestamp into standard ISO-8601 formatting.
 fn format_modified(meta: &std::fs::Metadata) -> String {
     let mtime = meta
         .modified()

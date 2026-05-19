@@ -1,4 +1,9 @@
 //! Handles autostart integration for both native installations and sandboxed Flatpak builds.
+//!
+//! Under Flatpak, uses the XDG Background portal to request autostart
+//! permission. On bare-metal installs, writes or removes a `.desktop`
+//! file in `~/.config/autostart/`. The portal request is asynchronous
+//! and may be denied by the user.
 
 use ashpd::WindowIdentifier;
 use ashpd::desktop::background::Background;
@@ -10,6 +15,7 @@ const AUTOSTART_DESKTOP_ID: &str = "dev.nicx.mimick.desktop";
 const APP_ID: &str = "dev.nicx.mimick";
 const AUTOSTART_REASON: &str = "Reason for requesting background access: Mimick must run in the background to automatically sync media to Immich.";
 
+/// Configure or request autostart registration depending on container and integration style.
 pub async fn apply(window: &impl IsA<gtk::Window>, enable: bool) -> Result<bool, String> {
     if enable {
         if is_flatpak_sandbox() {
@@ -22,10 +28,12 @@ pub async fn apply(window: &impl IsA<gtk::Window>, enable: bool) -> Result<bool,
     }
 }
 
+/// Check if running inside Flatpak sandbox environment.
 fn is_flatpak_sandbox() -> bool {
     Path::new("/.flatpak-info").exists()
 }
 
+/// Direct autostart portal request on supported Flatpak desktop backgrounds.
 async fn request_background_portal(window: &impl IsA<gtk::Window>) -> Result<bool, String> {
     let identifier = match window.as_ref().native() {
         Some(native) => WindowIdentifier::from_native(&native).await,
@@ -46,6 +54,7 @@ async fn request_background_portal(window: &impl IsA<gtk::Window>) -> Result<boo
     Ok(response.auto_start() && response.run_in_background())
 }
 
+/// Install autostart desktop shortcut entry in standard non-flatpak configurations.
 fn install_desktop_entry() -> Result<(), String> {
     let entry_path = default_autostart_entry_path()?;
     if let Some(parent) = entry_path.parent() {
@@ -67,6 +76,7 @@ fn install_desktop_entry() -> Result<(), String> {
     Ok(())
 }
 
+/// Remove autostart desktop shortcut entry if one exists.
 fn remove_desktop_entry() -> Result<(), String> {
     for entry_path in autostart_entry_paths()? {
         if entry_path.exists() {
@@ -77,12 +87,14 @@ fn remove_desktop_entry() -> Result<(), String> {
     Ok(())
 }
 
+/// Retrieve default system autostart configuration shortcut folder path.
 fn default_autostart_entry_path() -> Result<PathBuf, String> {
     let config_dir = dirs::config_dir()
         .ok_or_else(|| "Could not locate the user config directory.".to_string())?;
     Ok(config_dir.join("autostart").join(AUTOSTART_DESKTOP_ID))
 }
 
+/// Retrieve possible system autostart shortcut path list (sandboxed and unsandboxed).
 fn autostart_entry_paths() -> Result<Vec<PathBuf>, String> {
     let config_dir = dirs::config_dir()
         .ok_or_else(|| "Could not locate the user config directory.".to_string())?;

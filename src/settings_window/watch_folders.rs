@@ -1,4 +1,8 @@
 //! Watch-folder row construction, folder-rules dialog, and album picker dialog.
+//!
+//! Each configured watch path gets a row with inline controls for the
+//! target album and a rules button. The rules dialog exposes sync method,
+//! extension and size filters, deletion policy, and hidden-file settings.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -14,6 +18,7 @@ use crate::watch_path_display::{display_watch_path, watch_path_subtitle};
 
 use super::{DEFAULT_ALBUM_LABEL, FolderRowData, WatchPathEntry};
 
+/// Append a new watched folder row to the settings folders ListBox.
 pub(super) fn add_folder_row(
     list: &ListBox,
     entry: &WatchPathEntry,
@@ -187,6 +192,7 @@ pub(super) fn add_folder_row(
     });
 }
 
+/// Present a modal dialog for editing a folder's sync and filter rules.
 fn show_folder_rules_dialog(
     parent: &impl gtk::prelude::IsA<gtk::Window>,
     folder_path: &str,
@@ -384,6 +390,7 @@ fn show_folder_rules_dialog(
 
     dialog.present();
 }
+/// Construct and present a modal search and select window for linking a folder to an Immich album.
 pub(super) fn show_album_picker_dialog(
     parent: &impl gtk::prelude::IsA<gtk::Window>,
     albums_ref: Rc<RefCell<Vec<(String, String)>>>,

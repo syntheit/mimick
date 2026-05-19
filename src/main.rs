@@ -1,4 +1,10 @@
 //! Handles application bootstrap, single-instance wiring, and daemon startup flow.
+//!
+//! Initialises GTK/Libadwaita, registers the D-Bus application name for
+//! single-instance enforcement, and decides whether to present the library
+//! window or settings window based on user configuration. Background sync,
+//! tray icon, and filesystem monitor are wired up before entering the
+//! main event loop.
 
 use gtk::prelude::*;
 use libadwaita as adw;
@@ -51,15 +57,22 @@ use std::io::Write;
 /// Shared application context reused by UI entry points and the shutdown path.
 static APP_CONTEXT: std::sync::OnceLock<Arc<AppContext>> = std::sync::OnceLock::new();
 
+/// Description of a local deletion event request targeting the remote album.
 #[derive(Clone, Debug)]
 struct LocalDeletionRequest {
+    /// Absolute local path of deleted asset.
     local_path: String,
+    /// Target Immich asset identifier.
     asset_id: String,
+    /// Absolute filename of deleted asset.
     asset_name: String,
+    /// Mapped Immich album name.
     album_name: String,
+    /// Mapped Immich album identifier.
     album_id: Option<String>,
 }
 
+/// Helper to extract formatted filename and line number from logs.
 fn format_log_location(record: &Record) -> String {
     match (record.file(), record.line()) {
         (Some(file), Some(line)) => format!(" {}:{}", file, line),
@@ -67,6 +80,7 @@ fn format_log_location(record: &Record) -> String {
     }
 }
 
+/// Logger formatter that produces plain text for files.
 fn detailed_plain_format(
     w: &mut dyn Write,
     now: &mut DeferredNow,
@@ -83,6 +97,7 @@ fn detailed_plain_format(
     )
 }
 
+/// Logger formatter that produces ANSI color output for terminal displays.
 fn detailed_colored_format(
     w: &mut dyn Write,
     now: &mut DeferredNow,
@@ -99,6 +114,7 @@ fn detailed_colored_format(
     )
 }
 
+/// Check if local deletion matches validation criteria for remote mirror sweep.
 async fn build_local_deletion_request(
     ctx: Arc<AppContext>,
     path: String,
@@ -176,6 +192,7 @@ async fn build_local_deletion_request(
     }
 }
 
+/// Mirrors local filesystem deletion by unlinking or trashing assets on Immich.
 async fn trash_remote_after_local_delete(ctx: Arc<AppContext>, request: LocalDeletionRequest) {
     let asset_ids = vec![request.asset_id.clone()];
     let album_count = ctx
@@ -231,6 +248,7 @@ async fn trash_remote_after_local_delete(ctx: Arc<AppContext>, request: LocalDel
     log::info!("{}", action_log);
 }
 
+/// Iterate through album assets matching checksum to find matching Immich library record.
 async fn find_album_asset_by_checksum(
     api_client: Arc<ImmichApiClient>,
     album_id: &str,
@@ -902,8 +920,7 @@ async fn main() {
     }
 }
 
-/// Default activation: open whichever window the user prefers, presenting an
-/// existing instance if one is already open.
+/// Open whichever window the user prefers, presenting an existing instance if available.
 fn open_default_window(app: &adw::Application, ctx: Arc<AppContext>) {
     if let Some(win) = find_window(app, "mimick-library-window")
         .or_else(|| find_window(app, "mimick-settings-window"))
@@ -918,6 +935,7 @@ fn open_default_window(app: &adw::Application, ctx: Arc<AppContext>) {
     }
 }
 
+/// Open Settings window or present existing settings instance.
 fn open_settings_window_now(app: &adw::Application, ctx: Arc<AppContext>) {
     if let Some(win) = find_window(app, "mimick-settings-window") {
         win.present();
@@ -927,6 +945,7 @@ fn open_settings_window_now(app: &adw::Application, ctx: Arc<AppContext>) {
     build_settings_window(app, ctx);
 }
 
+/// Open Library window, falling back to Settings if disabled.
 fn open_library_window_now(app: &adw::Application, ctx: Arc<AppContext>) {
     if let Some(win) = find_window(app, "mimick-library-window") {
         win.present();
@@ -941,6 +960,7 @@ fn open_library_window_now(app: &adw::Application, ctx: Arc<AppContext>) {
     library::build_library_window(app, ctx);
 }
 
+/// Helper to look up active GTK window instances by widget name.
 fn find_window(app: &adw::Application, name: &str) -> Option<gtk::Window> {
     app.windows().into_iter().find(|w| w.widget_name() == name)
 }

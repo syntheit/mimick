@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mobile and narrow viewport UI overhaul: optimized component dimensions for 360px width screens, adjusted album and explore tile layouts to 2-column on mobile with uniform sizing, reduced header controls footprint, and improved overall narrow-screen usability.
 - Album and explore view tile rendering now uses fixed 100px height with viewport-responsive width (via FlowBox homogeneous layout), ensuring consistent thumbnail aspect ratios and eliminating layout jitter on window resizes.
 - Grid view minimum columns reduced from 3 to 2 on narrow viewports to fit within 360px width constraints without overflow.
+- Added comprehensive rustdoc comments across all source files: module-level `//!` docs expanded to multi-line descriptions, and doc comments added to all public and private structs, enums, functions, and fields.
 
 ### Fixed
 

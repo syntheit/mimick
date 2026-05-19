@@ -1,4 +1,8 @@
 //! Upload-related helper functions: MIME detection, timezone fixup, file timestamps.
+//!
+//! Pure utility functions shared by the upload pipeline. Includes IANA
+//! timezone resolution from `/etc/localtime` or `$TZ`, ISO 8601
+//! formatting, and filesystem timestamp normalization.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -6,10 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{SecondsFormat, TimeZone, Utc};
 use reqwest::Client;
 
+/// Resolve the standard MIME type for a given local file path.
 pub(super) fn mime_for_path(path: &Path) -> &'static str {
     crate::media_kinds::mime_for_path(path)
 }
 
+/// Make a PUT request to the server to update the timezone offset of a specific asset.
 pub(super) async fn apply_asset_timezone_fixup(
     client: &Client,
     api_key: &str,
@@ -54,6 +60,7 @@ pub(super) async fn apply_asset_timezone_fixup(
     }
 }
 
+/// Retrieve and normalize the creation and modification timestamps of a local file.
 pub(super) fn file_timestamps(meta: &std::fs::Metadata) -> (u64, u64) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -67,10 +74,12 @@ pub(super) fn file_timestamps(meta: &std::fs::Metadata) -> (u64, u64) {
     (created, modified)
 }
 
+/// Convert a standard `SystemTime` to standard unix epoch seconds.
 pub(super) fn system_time_to_unix_secs(time: SystemTime) -> Option<u64> {
     time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
+/// Coalesce and normalize creation/modification timestamps using standard rules.
 pub(super) fn normalize_file_timestamps(
     created: Option<u64>,
     modified: Option<u64>,
@@ -91,6 +100,7 @@ pub(super) fn normalize_file_timestamps(
     (created, modified)
 }
 
+/// Convert standard unix epoch seconds to standard UTC ISO 8601 formatted string.
 pub(super) fn unix_to_utc_iso8601(secs: u64) -> String {
     Utc.timestamp_opt(secs as i64, 0)
         .single()
@@ -98,6 +108,7 @@ pub(super) fn unix_to_utc_iso8601(secs: u64) -> String {
         .unwrap_or_else(|| "1970-01-01T00:00:00.000+00:00".to_string())
 }
 
+/// Resolve the user's current local timezone name (IANA format) from system files or environment.
 pub(super) fn local_timezone_name() -> Option<String> {
     if let Ok(tz) = std::env::var("TZ") {
         let tz = tz.trim().trim_start_matches(':');
@@ -124,6 +135,7 @@ pub(super) fn local_timezone_name() -> Option<String> {
     None
 }
 
+/// Check if the timezone name string strictly matches IANA zone style.
 pub(super) fn looks_like_iana_timezone(value: &str) -> bool {
     !value.is_empty() && value.contains('/') && !value.contains(' ')
 }
