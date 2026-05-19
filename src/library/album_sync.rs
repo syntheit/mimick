@@ -1,4 +1,8 @@
-//! Album↔folder bidirectional sync diff and execution.
+//! Album-folder bidirectional sync diff and execution.
+//!
+//! Compares the set of assets in an Immich album against the files in
+//! a linked local folder to produce upload, download, and delete diffs.
+//! Executes the resolved diff actions with progress feedback.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,8 @@
 //! Advanced metadata-filters dialog.
+//!
+//! Presents a modal dialog with structured filter inputs (date range,
+//! media type, description, OCR text) that are combined into a
+//! `MetadataSearchFilters` value for the search API.
 
 use std::rc::Rc;
 

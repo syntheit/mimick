@@ -1,4 +1,8 @@
 //! Right-click context menu popover and its action handlers.
+//!
+//! Builds a GTK popover menu with per-asset actions such as download,
+//! open in lightbox, delete to trash, and copy link. Actions delegate
+//! to the shared library helpers.
 
 use std::path::PathBuf;
 use std::rc::Rc;

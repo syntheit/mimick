@@ -12,6 +12,7 @@ use crate::startup_scan::reconcile_entry;
 
 const REMOTE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// Periodic task loop that performs remote-to-local and local-to-remote sync reconciliations.
 pub async fn run_album_reconciler(ctx: Arc<AppContext>) {
     loop {
         tokio::time::sleep(REMOTE_POLL_INTERVAL).await;

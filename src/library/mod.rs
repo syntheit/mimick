@@ -1,4 +1,9 @@
 //! Library view module -- browse, search, and download assets from an Immich server.
+//!
+//! Constructs the main GTK window with a split-pane sidebar, paginated
+//! grid view, timeline scrubber, and search bar. Submodules handle the
+//! explore dashboard, album grids, lightbox, sidebar, and thumbnail
+//! caching independently.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -57,6 +62,7 @@ mod lightbox;
 
 const PAGE_SIZE: u32 = 50;
 
+/// Register application custom icons with the Gtk icon theme system.
 fn register_app_icons() {
     if let Some(display) = gtk::gdk::Display::default() {
         let theme = gtk::IconTheme::for_display(&display);
@@ -64,6 +70,7 @@ fn register_app_icons() {
     }
 }
 
+/// Load a local texture orienting it correctly based on embedded EXIF flags.
 fn load_texture_oriented(path: &std::path::Path) -> Option<gdk4::Texture> {
     let raw = gtk::gdk_pixbuf::Pixbuf::from_file(path).ok()?;
     let pixbuf = raw.apply_embedded_orientation().unwrap_or(raw);
@@ -71,6 +78,7 @@ fn load_texture_oriented(path: &std::path::Path) -> Option<gdk4::Texture> {
     Some(gdk4::Texture::for_pixbuf(&pixbuf))
 }
 
+/// The complete UI widgets state wrapper for the library window interface.
 struct LibraryWindowUi {
     ctx: Arc<AppContext>,
     app: libadwaita::Application,
@@ -107,6 +115,7 @@ struct LibraryWindowUi {
     split: libadwaita::OverlaySplitView,
 }
 
+/// Build and display the main library window application layout.
 pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>) {
     style::ensure_registered();
     register_app_icons();
@@ -526,6 +535,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     window.present();
 }
 
+/// Bootstrap initial data loading and background tasks for the library window.
 fn bootstrap_window(ui: Rc<LibraryWindowUi>) {
     let initial_request = {
         let mut state = ui.ctx.library_state.lock();
@@ -542,6 +552,7 @@ fn bootstrap_window(ui: Rc<LibraryWindowUi>) {
     load_source_page(ui, initial_request, false);
 }
 
+/// Start a periodic server health checking loop updating status icons in the UI.
 fn spawn_server_ping_loop(ui: Rc<LibraryWindowUi>) {
     glib::timeout_add_seconds_local(5, move || {
         let ui_for_tick = ui.clone();
@@ -554,6 +565,7 @@ fn spawn_server_ping_loop(ui: Rc<LibraryWindowUi>) {
     });
 }
 
+/// Start a quick periodic polling loop updating the transfer progress bar UI.
 fn spawn_transfer_poll_loop(ui: Rc<LibraryWindowUi>) {
     glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
         let completed_batches = ui.ctx.state.lock().completed_upload_batches;
@@ -566,6 +578,7 @@ fn spawn_transfer_poll_loop(ui: Rc<LibraryWindowUi>) {
     });
 }
 
+/// Fetch current logged-in API user ID and store it in app context.
 fn fetch_current_user(ui: Rc<LibraryWindowUi>) {
     if ui.ctx.current_user_id.lock().is_some() {
         return;
@@ -580,6 +593,7 @@ fn fetch_current_user(ui: Rc<LibraryWindowUi>) {
     });
 }
 
+/// Connect action handlers to the album creation widgets.
 fn connect_albums_create(ui: Rc<LibraryWindowUi>) {
     ui.albums.create_button.connect_clicked(clone!(
         #[strong]
@@ -588,6 +602,7 @@ fn connect_albums_create(ui: Rc<LibraryWindowUi>) {
     ));
 }
 
+/// Show a popup modal dialog prompting the user to name and create a new album.
 fn prompt_create_album(ui: Rc<LibraryWindowUi>) {
     let dialog = libadwaita::AlertDialog::builder()
         .heading("Create album")
@@ -628,6 +643,7 @@ fn prompt_create_album(ui: Rc<LibraryWindowUi>) {
     dialog.present(Some(&ui.window));
 }
 
+/// Asynchronously fetch the latest albums from the server and redraw the album views.
 fn refresh_albums_view(ui: Rc<LibraryWindowUi>) {
     glib::MainContext::default().spawn_local(async move {
         match ui.ctx.api_client.fetch_library_albums().await {
@@ -640,6 +656,7 @@ fn refresh_albums_view(ui: Rc<LibraryWindowUi>) {
     });
 }
 
+/// Produce a click callback handler for handling album activation events.
 fn album_click_handler(ui: Rc<LibraryWindowUi>) -> AlbumClick {
     Rc::new(move |id: &str, name: String| {
         sidebar_dispatch(
@@ -652,6 +669,7 @@ fn album_click_handler(ui: Rc<LibraryWindowUi>) -> AlbumClick {
     })
 }
 
+/// Apply header control layout adjustments when switching view modes.
 fn apply_timeline_ui_state(ui: &LibraryWindowUi, source: &LibrarySource) {
     let timeline_allowed = matches!(source, LibrarySource::AllAssets | LibrarySource::Timeline);
     let timeline_active = matches!(source, LibrarySource::Timeline);
@@ -707,6 +725,7 @@ fn apply_timeline_ui_state(ui: &LibraryWindowUi, source: &LibrarySource) {
     refresh_album_link_row(ui, source);
 }
 
+/// Compute and refresh the month-year overlay text dynamically while scrubbing the timeline list.
 fn update_timeline_banner_if_active(ui: &Rc<LibraryWindowUi>, adj: &gtk::Adjustment) {
     let state = ui.ctx.library_state.lock();
     if !matches!(state.source, LibrarySource::Timeline) {
@@ -725,6 +744,7 @@ fn update_timeline_banner_if_active(ui: &Rc<LibraryWindowUi>, adj: &gtk::Adjustm
     ui.timeline_banner.set_label(&label);
 }
 
+/// Convert an ISO 8601 string to a human-readable "Month Year" label.
 fn month_year_label(iso: &str) -> String {
     use chrono::{DateTime, Datelike};
     if let Ok(dt) = DateTime::parse_from_rfc3339(iso) {
@@ -750,6 +770,7 @@ fn month_year_label(iso: &str) -> String {
     iso.chars().take(7).collect()
 }
 
+/// Retrieve albums from the API and update the side navigation sidebar entries.
 fn load_albums(ui: Rc<LibraryWindowUi>) {
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
@@ -770,6 +791,7 @@ fn load_albums(ui: Rc<LibraryWindowUi>) {
     ));
 }
 
+/// Fetch and populate active server version details and stats into the UI.
 fn load_status(ui: Rc<LibraryWindowUi>) {
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
@@ -788,6 +810,7 @@ fn load_status(ui: Rc<LibraryWindowUi>) {
     ));
 }
 
+/// Load smart/metadata sections onto the Explore dashboard view.
 fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     ui.content_stack.set_visible_child_name("explore");
     if ui.explore.populated.get() {
@@ -851,6 +874,7 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     ));
 }
 
+/// Load a paginated subset of assets for the current source.
 fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32), append: bool) {
     if matches!(request.1, LibrarySource::Explore) {
         load_explore_landing(ui);
@@ -1009,6 +1033,7 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
     ));
 }
 
+/// Repopulate and select the active album or fixed row in the side navigation sidebar.
 fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
     while let Some(row) = ui.sidebar.albums_list.first_child() {
         ui.sidebar.albums_list.remove(&row);
@@ -1068,6 +1093,7 @@ fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
     }
 }
 
+/// Helper to select a sidebar row matching a specific string key.
 fn select_fixed_row(list: &gtk::ListBox, key: &str) {
     let mut child = list.first_child();
     while let Some(widget) = child {
@@ -1082,6 +1108,7 @@ fn select_fixed_row(list: &gtk::ListBox, key: &str) {
     }
 }
 
+/// Sync the visibility of the grid, loading, empty, and error page widgets.
 fn sync_content_state(ui: &LibraryWindowUi) {
     match &ui.ctx.library_state.lock().load_state {
         LibraryLoadState::Idle | LibraryLoadState::Loading => {
@@ -1100,6 +1127,7 @@ fn sync_content_state(ui: &LibraryWindowUi) {
     }
 }
 
+/// Update the status sidebar rows with the current server route and statistics.
 fn update_footer(ui: &LibraryWindowUi, route: Option<String>) {
     let state = ui.ctx.library_state.lock();
     let route_subtitle = route
@@ -1129,6 +1157,7 @@ fn update_footer(ui: &LibraryWindowUi, route: Option<String>) {
         .set_subtitle(&format!("{stats} | {about}"));
 }
 
+/// Synchronize the ongoing upload/download progress indicator bar and rate information text.
 fn update_transfer_ui(ui: &LibraryWindowUi) {
     let transfer = {
         let mut state = ui.ctx.state.lock();
@@ -1191,6 +1220,7 @@ fn update_transfer_ui(ui: &LibraryWindowUi) {
     }
 }
 
+/// Construct a styled placeholder view containing an icon, header title, and description text.
 fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
     let container = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -1226,12 +1256,14 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
     container
 }
 
+/// Convert a Base64-encoded Immich checksum string to its standard hexadecimal representation.
 pub(super) fn immich_checksum_to_hex(b64: &str) -> Option<String> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     Some(bytes.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
+/// Build a synthetic `LibraryAsset` from a physical local folder file.
 fn local_to_library_asset(local: LocalAsset) -> LibraryAsset {
     LibraryAsset {
         id: format!("{}{}", LOCAL_ID_PREFIX, local.path.display()),
@@ -1246,6 +1278,7 @@ fn local_to_library_asset(local: LocalAsset) -> LibraryAsset {
     }
 }
 
+/// Merge a page of remote API assets with local files that haven't been synchronized yet.
 async fn merge_unified_page(
     remote: Result<(Vec<LibraryAsset>, bool), String>,
     page: u32,
@@ -1282,6 +1315,7 @@ async fn merge_unified_page(
 }
 
 /// Return the path of the watch entry linked to `album_name`, if any.
+/// Find the local directory watch path mapped to the specified album.
 fn linked_entry_path_for_album(ui: &Rc<LibraryWindowUi>, album_name: &str) -> Option<String> {
     let entries = ui.ctx.live_watch_paths.lock().clone();
     crate::config::watch_entry_for_album(album_name, &entries).map(|e| e.path().to_string())
@@ -1290,6 +1324,7 @@ fn linked_entry_path_for_album(ui: &Rc<LibraryWindowUi>, album_name: &str) -> Op
 /// Album-scoped variant of `merge_unified_page`: takes the album's asset
 /// page from the remote API and overlays sync state from the album's
 /// linked local folder only — never from siblings.
+/// Merge a page of remote album assets with local folder files linked to the album.
 async fn merge_album_unified_page(
     remote: Result<(Vec<LibraryAsset>, bool), String>,
     page: u32,

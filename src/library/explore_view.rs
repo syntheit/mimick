@@ -17,6 +17,7 @@ use crate::app_context::AppContext;
 
 type ExploreClick = Rc<dyn Fn(&str, String)>;
 
+/// Contains references to individual grid widgets of the explore tab dashboard display.
 pub struct ExploreViewParts {
     pub root: gtk::ScrolledWindow,
     pub populated: Rc<Cell<bool>>,
@@ -28,6 +29,7 @@ pub struct ExploreViewParts {
     things_section: gtk::Box,
 }
 
+/// Construct the hierarchical panels and containers for the explore dashboard view.
 pub fn build_explore_view() -> ExploreViewParts {
     let outer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -65,6 +67,7 @@ pub fn build_explore_view() -> ExploreViewParts {
     }
 }
 
+/// Build a horizontal scrolled gallery row dedicated to recognized people circles.
 fn build_people_section() -> (gtk::Box, gtk::Box) {
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -86,6 +89,7 @@ fn build_people_section() -> (gtk::Box, gtk::Box) {
     (section, row)
 }
 
+/// Build a flow grid section mapping image tiles for Places or Things category.
 fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -105,6 +109,7 @@ fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
     (section, grid)
 }
 
+/// Helper to create a styled section heading label.
 fn heading(text: &str) -> gtk::Label {
     gtk::Label::builder()
         .label(text)
@@ -113,6 +118,7 @@ fn heading(text: &str) -> gtk::Label {
         .build()
 }
 
+/// Populate the round avatar buttons for recognized people in the dashboard section.
 pub fn populate_people<F>(
     parts: &ExploreViewParts,
     ctx: Arc<AppContext>,
@@ -132,6 +138,7 @@ pub fn populate_people<F>(
     }
 }
 
+/// Populate the city tiles representing locations in the places dashboard section.
 pub fn populate_places<F>(
     parts: &ExploreViewParts,
     ctx: Arc<AppContext>,
@@ -157,6 +164,7 @@ pub fn populate_places<F>(
     }
 }
 
+/// Populate general objects, scenes, and tags in the things dashboard section.
 pub fn populate_explore<F>(
     parts: &ExploreViewParts,
     ctx: Arc<AppContext>,
@@ -192,6 +200,7 @@ pub fn populate_explore<F>(
     parts.things_section.set_visible(had_things);
 }
 
+/// Construct an individual circular avatar widget representing a recognized person face.
 fn person_tile(
     ctx: Arc<AppContext>,
     person: &Person,
@@ -238,6 +247,7 @@ fn person_tile(
     button
 }
 
+/// Construct a rectangular tile representation for a specific explore category node.
 fn explore_tile(
     ctx: Arc<AppContext>,
     kind: &'static str,
@@ -283,6 +293,7 @@ fn explore_tile(
     button
 }
 
+/// Helper to asynchronously request and bind an asset cover art thumbnail image.
 fn spawn_asset_thumbnail(ctx: Arc<AppContext>, asset_id: String, picture: gtk::Picture) {
     if let Some(texture) = ctx
         .thumbnail_cache
@@ -304,6 +315,7 @@ fn spawn_asset_thumbnail(ctx: Arc<AppContext>, asset_id: String, picture: gtk::P
     });
 }
 
+/// Helper to asynchronously request and render a round avatar person face thumbnail.
 fn spawn_person_thumbnail(ctx: Arc<AppContext>, person_id: String, picture: gtk::Picture) {
     glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
         glib::MainContext::default().spawn_local(async move {

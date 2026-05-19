@@ -1,4 +1,8 @@
 //! Asset upload flow including duplicate detection, checksum computation, and retry logic.
+//!
+//! Builds a multipart request with the file payload, EXIF-derived timestamps,
+//! and a device-unique asset ID. After a successful upload, the asset is
+//! assigned to the target album and a timezone fixup is scheduled.
 
 use std::path::Path;
 use std::time::Duration;
@@ -13,6 +17,7 @@ use super::upload_helpers::{
 use super::{ApiIssue, ImmichApiClient, TransferProgressCallback};
 
 impl ImmichApiClient {
+    /// Upload a single local asset to the Immich server with progressive status tracking.
     pub async fn upload_asset(
         &self,
         file_path: &str,
@@ -230,6 +235,7 @@ impl ImmichApiClient {
 
     // --------------- Album Management ---------------
 
+    /// Schedule a background task to fix asset timezones after upload.
     fn schedule_asset_timezone_fixup(
         &self,
         base_url: String,

@@ -1,4 +1,8 @@
 //! Lightbox image viewer: full-screen preview with zoom, pan, EXIF details, and keyboard navigation.
+//!
+//! Loads preview or original resolution images with pinch-zoom and
+//! swipe navigation. Displays an EXIF metadata panel and provides
+//! download-to-folder and delete-to-trash actions.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -16,6 +20,7 @@ use super::download::{
 };
 use super::{LOCAL_ID_PREFIX, LibraryWindowUi, load_source_page, load_texture_oriented};
 
+/// Populate a vertical container box with structured EXIF metadata rows.
 fn fill_exif_box(container: &gtk::Box, exif: &crate::api_client::ExifInfo) {
     let mut rows: Vec<(String, String)> = Vec::new();
     let dims = match (exif.exif_image_width, exif.exif_image_height) {
@@ -103,6 +108,7 @@ fn fill_exif_box(container: &gtk::Box, exif: &crate::api_client::ExifInfo) {
     }
 }
 
+/// Format a byte count value into a human-readable size string (e.g. KB, MB, GB).
 fn format_bytes(n: u64) -> String {
     const KIB: f64 = 1024.0;
     let n_f = n as f64;
@@ -141,6 +147,7 @@ fn format_datetime_display(iso: &str) -> String {
     iso.get(..19).unwrap_or(iso).replace('T', " ").to_string()
 }
 
+/// Truncate a filename to a maximum character limit, appending an ellipsis if needed.
 fn truncate_filename(name: &str, max_chars: usize) -> String {
     let count = name.chars().count();
     if count <= max_chars {
@@ -178,6 +185,7 @@ fn apply_lightbox_zoom(picture: &gtk::Picture, viewer: &gtk::ScrolledWindow, zoo
     picture.set_size_request((fit_w * zoom) as i32, (fit_h * zoom) as i32);
 }
 
+/// Construct and present the fullscreen lightbox view for a selected asset.
 pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let Some(item) = ui.grid.model.item(position).and_downcast::<AssetObject>() else {
         return;

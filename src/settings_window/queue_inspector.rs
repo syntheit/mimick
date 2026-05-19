@@ -1,4 +1,8 @@
 //! Queue inspector dialog -- browse failed tasks and recent queue activity.
+//!
+//! Lists the current retry queue with per-item retry buttons and a bulk
+//! retry-all action. A scrollable activity feed shows recent upload
+//! attempts, statuses, and error details.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -12,6 +16,7 @@ use libadwaita as adw;
 use crate::queue_manager::QueueManager;
 use crate::watch_path_display::display_watch_path;
 
+/// Construct and present the modal Queue Inspector window.
 pub fn show_queue_inspector(
     parent: &impl gtk::prelude::IsA<gtk::Window>,
     queue_manager: Arc<QueueManager>,
@@ -176,6 +181,7 @@ pub fn show_queue_inspector(
     dialog.present();
 }
 
+/// Construct and present the Libadwaita standard About Dialog for the application.
 pub(super) fn show_about_dialog(parent: &impl gtk::prelude::IsA<gtk::Widget>) {
     let about = adw::AboutDialog::builder()
         .application_name("Mimick")

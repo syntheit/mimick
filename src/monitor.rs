@@ -1,4 +1,9 @@
-//! Provides live filesystem monitoring, file-settling checks, and checksum generation for watched paths.
+//! Provides live filesystem monitoring, file-settling checks, and checksum generation.
+//!
+//! Uses `notify` watchers (inotify on Linux, polling under Flatpak) to
+//! detect new or modified files in watch-path directories. Files are
+//! settled via a debounce window before being queued, and checksums are
+//! computed using BLAKE3 with chunked streaming to avoid large allocations.
 
 use crate::config::{FolderSyncMethod, WatchPathEntry, best_matching_watch_entry};
 use crate::media_kinds;
@@ -18,30 +23,49 @@ const CHECK_INTERVAL_MS: u64 = 1000;
 const IDLE_TIMEOUT_SECS: u64 = 300;
 const FLATPAK_POLL_INTERVAL_MS: u64 = 2000;
 
+/// File monitor that coordinates watching directories and reporting events.
 pub struct Monitor {
+    /// Watch folders entry list configuration.
     watch_paths: Vec<WatchPathEntry>,
+    /// State flag whether background sync is active.
     background_sync_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum MonitorEvent {
-    Ready { path: String, checksum: String },
-    Deleted { path: String },
+    /// Emitted when a file is fully populated and checksummed.
+    Ready {
+        /// Absolute path of the stabilized file.
+        path: String,
+        /// File SHA-1 checksum.
+        checksum: String,
+    },
+    /// Emitted when a watched file is deleted.
+    Deleted {
+        /// Absolute path of the deleted file.
+        path: String,
+    },
 }
 
+/// Monitor commands passed down the main event loop.
 enum MonitorCommand {
+    /// Replace the live watch folders and settings configuration.
     ReplaceWatchPaths {
+        /// Updated watch folder entry list.
         watch_paths: Vec<WatchPathEntry>,
+        /// State flag whether background sync is active.
         background_sync_enabled: bool,
     },
 }
 
 #[derive(Clone)]
 pub struct MonitorHandle {
+    /// Command sender channel pointing at the main loop.
     command_tx: std::sync::mpsc::Sender<MonitorCommand>,
 }
 
 impl Monitor {
+    /// Initialize a new file Monitor.
     pub fn new(watch_paths: Vec<WatchPathEntry>, background_sync_enabled: bool) -> Self {
         Self {
             watch_paths,
@@ -267,6 +291,7 @@ impl MonitorHandle {
     }
 }
 
+/// Replace live directories being monitored by the given watcher.
 fn replace_watches(
     watcher: &mut dyn Watcher,
     watched_roots: &mut Vec<PathBuf>,
@@ -305,6 +330,7 @@ fn replace_watches(
     }
 }
 
+/// Create recommended watcher fallback or poll watcher depending on flatpak containerisation.
 fn create_watcher(
     notify_tx: std::sync::mpsc::Sender<notify::Result<notify::Event>>,
 ) -> notify::Result<Box<dyn Watcher>> {
@@ -321,6 +347,7 @@ fn create_watcher(
     }
 }
 
+/// Check if running inside Flatpak sandbox environment.
 fn is_flatpak_sandbox() -> bool {
     Path::new("/.flatpak-info").exists()
 }

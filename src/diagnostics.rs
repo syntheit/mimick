@@ -1,4 +1,9 @@
 //! Exports a support-friendly diagnostics bundle with sensitive local data redacted for privacy.
+//!
+//! Copies recent log files, state snapshots, and environment summaries
+//! into a temporary directory. API keys, URLs, and filesystem paths are
+//! scrubbed before the bundle is presented to the user for attachment
+//! to issue reports.
 
 use crate::config::Config;
 use crate::queue_manager::FileTask;
@@ -9,6 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Primary entrypoint to create and export a redacted diagnostics zip/bundle folder.
 pub fn export_bundle(
     destination_root: &Path,
     state: &AppState,
@@ -21,6 +27,7 @@ pub fn export_bundle(
     export_bundle_with_paths(destination_root, state, config, &cache_root, &data_root)
 }
 
+/// Helper that generates redactions by specifying explicit caches and data roots for testing.
 fn export_bundle_with_paths(
     destination_root: &Path,
     state: &AppState,
@@ -62,6 +69,7 @@ fn export_bundle_with_paths(
     Ok(bundle_dir)
 }
 
+/// Format system environment and configuration state as plain text.
 fn build_summary(config: &Config, state: &AppState) -> String {
     let mut lines = Vec::new();
     lines.push("Mimick diagnostics export".to_string());
@@ -169,72 +177,121 @@ fn build_summary(config: &Config, state: &AppState) -> String {
     lines.join("\n")
 }
 
+/// Resolve a named file within the system cache root.
 fn cache_path(cache_root: &Path, name: &str) -> PathBuf {
     cache_root.join(name)
 }
 
+/// Safe, fully redacted structural copy of Config for user privacy.
 #[derive(Serialize)]
 struct RedactedConfigExport {
+    /// True if internal URL is actively configured.
     internal_url_enabled: bool,
+    /// True if external URL is actively configured.
     external_url_enabled: bool,
+    /// Number of configured watch paths.
     watch_path_count: usize,
+    /// Number of watch paths targeting custom albums.
     watch_paths_with_custom_album: usize,
+    /// Number of watch paths using extension or size filters.
     watch_paths_with_rules: usize,
+    /// True if autostart/startup is enabled.
     run_on_startup: bool,
+    /// True if transfer pauses on metered network.
     pause_on_metered_network: bool,
+    /// True if transfer pauses when running on battery.
     pause_on_battery_power: bool,
+    /// True if filesystem watcher is active in background.
     background_sync_enabled: bool,
+    /// True if user notifications are enabled.
     notifications_enabled: bool,
+    /// Current catchup strategy mode string representation.
     startup_catchup_mode: String,
+    /// Number of parallel uploads allowed.
     upload_concurrency: u8,
+    /// Hour of the day when quiet window begins, if any.
     quiet_hours_start: Option<u8>,
+    /// Hour of the day when quiet window ends, if any.
     quiet_hours_end: Option<u8>,
 }
 
+/// Redacted view of a transfer event to avoid exposing private filenames.
 #[derive(Serialize)]
 struct RedactedQueueEvent {
+    /// Redacted filename suffix without path components.
     path_hint: String,
+    /// Operation outcome status string.
     status: String,
+    /// Detailed diagnostic warning or cause if failed.
     detail: Option<String>,
+    /// Number of transfer attempts.
     attempts: u32,
+    /// Timestamp when this event took place.
     timestamp: f64,
 }
 
+/// Redacted snapshot of persistent app context status.
 #[derive(Serialize)]
 struct RedactedStateExport {
+    /// App status label.
     status: String,
+    /// True if transfers are currently paused.
     paused: bool,
+    /// User or environmental cause of pause.
     pause_reason: Option<String>,
+    /// Number of directories being watched.
     watched_folder_count: usize,
+    /// Connection route label.
     active_server_route: Option<String>,
+    /// Number of active items in transmission queue.
     queue_size: usize,
+    /// Total number of items queued this session.
     total_queued: usize,
+    /// Number of successfully processed items.
     processed_count: usize,
+    /// Number of items that failed transmission.
     failed_count: usize,
+    /// Percent progress of active batch.
     progress: u8,
+    /// Unix timestamp of last successful remote sync.
     last_successful_sync_at: Option<f64>,
+    /// File currently being processed.
     current_file: Option<String>,
+    /// Last processed file.
     last_completed_file: Option<String>,
+    /// Last recorded network or logic error string.
     last_error: Option<String>,
+    /// Troubleshooting instructions for the last error.
     last_error_guidance: Option<String>,
+    /// Total count of diagnostic exports generated.
     diagnostics_exports: usize,
+    /// Log of recent queue event summaries.
     recent_events: Vec<RedactedQueueEvent>,
 }
 
+/// Quantitative summaries of files waiting to be retried.
 #[derive(Serialize)]
 struct RedactedRetryExport {
+    /// Total number of tasks pending retry.
     total_retry_items: usize,
+    /// Number of tasks requiring only metadata linking.
     reassociate_only_items: usize,
+    /// Number of tasks destined for specific albums.
     album_targeted_items: usize,
 }
 
+/// Redacted metrics from the local synced database index.
 #[derive(Serialize)]
 struct RedactedSyncIndexExport {
+    /// Total synced records.
     total_entries: usize,
+    /// Synced records belonging to named albums.
     album_named_entries: usize,
+    /// Synced records with verified album IDs.
     album_id_entries: usize,
 }
 
+/// Populate redacted configuration statistics from live config values.
 fn build_config_export(config: &Config) -> RedactedConfigExport {
     let watch_paths_with_custom_album = config
         .data
@@ -272,6 +329,7 @@ fn build_config_export(config: &Config) -> RedactedConfigExport {
     }
 }
 
+/// Map live state values into redacted serialization format.
 fn build_state_export(state: &AppState) -> RedactedStateExport {
     RedactedStateExport {
         status: state.status.clone(),
@@ -304,6 +362,7 @@ fn build_state_export(state: &AppState) -> RedactedStateExport {
     }
 }
 
+/// Summarize items in the retry log without revealing their names.
 fn build_retry_export(retry_path: &Path) -> io::Result<RedactedRetryExport> {
     let tasks = if retry_path.exists() {
         let content = fs::read_to_string(retry_path)?;
@@ -322,6 +381,7 @@ fn build_retry_export(retry_path: &Path) -> io::Result<RedactedRetryExport> {
     })
 }
 
+/// Summarize database index composition to avoid detailing private folder contents.
 fn build_sync_index_export(sync_index_path: &Path) -> io::Result<RedactedSyncIndexExport> {
     if !sync_index_path.exists() {
         return Ok(RedactedSyncIndexExport {
@@ -365,11 +425,13 @@ fn build_sync_index_export(sync_index_path: &Path) -> io::Result<RedactedSyncInd
     })
 }
 
+/// Helper to write formatted, indented JSON structures to disk.
 fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let content = serde_json::to_string_pretty(value)?;
     fs::write(path, content)
 }
 
+/// Redact the absolute directory path, preserving only the trailing filename segment.
 fn redact_path_hint(path: &str) -> String {
     Path::new(path)
         .file_name()

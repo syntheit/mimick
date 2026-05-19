@@ -1,4 +1,8 @@
 //! Implements the GTK4/Libadwaita settings window and status dashboard.
+//!
+//! Builds the tabbed preferences interface covering server configuration,
+//! watch-folder management, behaviour toggles, and a live health dashboard.
+//! Changes are validated and persisted to the JSON config file on save.
 
 use crate::autostart;
 use crate::config::{FolderRules, StartupCatchupMode, WatchPathEntry};
@@ -27,15 +31,21 @@ use watch_folders::add_folder_row;
 
 /// Holds GTK widgets for a single watch-folder row in the settings list.
 struct FolderRowData {
+    /// Absolute local file path.
     path: String,
+    /// Target Immich album name.
     album_name: Rc<RefCell<String>>,
+    /// Custom path filtering rules.
     rules: Rc<RefCell<FolderRules>>,
+    /// Libadwaita row widget representing this watched folder.
     action_row: adw::ExpanderRow,
+    /// Base status subtitle for the row.
     base_subtitle: String,
 }
 
 const DEFAULT_ALBUM_LABEL: &str = "Default (Folder Name)";
 
+/// Display a standard Libadwaita modal alert message dialog to the user.
 fn show_alert(parent: &impl gtk::prelude::IsA<gtk::Widget>, heading: &str, body: &str) {
     let dialog = adw::AlertDialog::builder()
         .heading(heading)
@@ -45,6 +55,7 @@ fn show_alert(parent: &impl gtk::prelude::IsA<gtk::Widget>, heading: &str, body:
     dialog.present(Some(parent));
 }
 
+/// Format a Unix timestamp representing the last sync time into a relative display string.
 fn format_sync_age(timestamp: Option<f64>) -> String {
     let Some(timestamp) = timestamp else {
         return "No successful sync yet".to_string();
@@ -67,10 +78,12 @@ fn format_sync_age(timestamp: Option<f64>) -> String {
     }
 }
 
+/// Construct and present the settings window as a top-level window.
 pub fn build_settings_window(app: &adw::Application, ctx: Arc<AppContext>) {
     build_settings_window_with_parent(app, ctx, None);
 }
 
+/// Construct and present the settings window, optionally transient for a parent window.
 pub fn build_settings_window_with_parent(
     app: &adw::Application,
     ctx: Arc<AppContext>,

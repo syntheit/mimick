@@ -1,4 +1,8 @@
 //! Search and explore: smart search, OCR, metadata filters, people, places, server stats.
+//!
+//! Wraps the Immich `/search` and `/people` endpoints used by the library
+//! explore tab and search bar. Supports CLIP-based smart search, OCR text
+//! matching, and structured metadata filters with pagination.
 
 use std::time::Duration;
 
@@ -9,6 +13,7 @@ use super::{
 };
 
 impl ImmichApiClient {
+    /// Fetch the list of recognized people faces from the server.
     pub async fn fetch_people(&self) -> Result<Vec<Person>, String> {
         let base_url = self
             .get_active_url()
@@ -161,6 +166,7 @@ impl ImmichApiClient {
         }
     }
 
+    /// Perform a CLIP embedding-based smart search for matching assets.
     pub async fn search_smart(
         &self,
         query: &str,
@@ -181,6 +187,7 @@ impl ImmichApiClient {
         .await
     }
 
+    /// Perform an OCR-based search to match recognized text inside library images.
     pub async fn search_ocr(
         &self,
         query: &str,
@@ -210,6 +217,7 @@ impl ImmichApiClient {
         .await
     }
 
+    /// Search library assets matching specific text within their original filenames.
     pub async fn search_metadata(
         &self,
         query: &str,
@@ -226,6 +234,7 @@ impl ImmichApiClient {
             .await
     }
 
+    /// Perform a advanced search matching specific metadata filters.
     pub async fn search_metadata_with_filters(
         &self,
         filters: &MetadataSearchFilters,
@@ -247,6 +256,7 @@ impl ImmichApiClient {
         .await
     }
 
+    /// Retrieve total images, videos, and overall asset count statistics from the server.
     pub async fn fetch_server_stats(&self) -> Result<ServerStats, String> {
         let base_url = self
             .get_active_url()
@@ -290,6 +300,7 @@ impl ImmichApiClient {
         }
     }
 
+    /// Retrieve detailed Immich server system information (e.g. version).
     pub async fn fetch_server_about(&self) -> Result<ServerAbout, String> {
         let base_url = self
             .get_active_url()
@@ -333,6 +344,7 @@ impl ImmichApiClient {
         }
     }
 
+    /// Shared internal helper executing paginated POST search queries against asset endpoints.
     pub(super) async fn fetch_search_assets(
         &self,
         endpoint: &str,

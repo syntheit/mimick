@@ -1,4 +1,8 @@
 //! Album-folder linking, sync dialog, and link/unlink actions.
+//!
+//! Presents a dialog to associate a local watch folder with a remote
+//! Immich album for bidirectional synchronization. Handles link state
+//! persistence and triggers the initial diff when a new link is created.
 
 use std::rc::Rc;
 

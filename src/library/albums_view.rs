@@ -1,4 +1,8 @@
 //! Albums landing page with Recent / Owned / Shared sections.
+//!
+//! Fetches album cover thumbnails and renders them as clickable tiles
+//! in a responsive flow layout. Selecting a tile navigates the main
+//! grid to that album's contents.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -11,6 +15,7 @@ use crate::app_context::AppContext;
 
 pub type AlbumClick = Rc<dyn Fn(&str, String)>;
 
+/// Contains references to individual grid widgets of the albums overview display.
 pub struct AlbumsViewParts {
     pub root: gtk::ScrolledWindow,
     pub populated: Rc<Cell<bool>>,
@@ -23,6 +28,7 @@ pub struct AlbumsViewParts {
     shared_section: gtk::Box,
 }
 
+/// Construct the hierarchical panels and containers for the albums listing page.
 pub fn build_albums_view() -> AlbumsViewParts {
     let outer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -77,6 +83,7 @@ pub fn build_albums_view() -> AlbumsViewParts {
     }
 }
 
+/// Populate the album list grids grouped by ownership status.
 pub fn populate_albums(
     parts: &AlbumsViewParts,
     ctx: Arc<AppContext>,
@@ -124,6 +131,7 @@ pub fn populate_albums(
     parts.populated.set(true);
 }
 
+/// Build a single category grid section with a text label and a flow box layout.
 fn build_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -147,6 +155,7 @@ fn build_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
     (section, grid)
 }
 
+/// Build a clickable tile representing an individual album complete with cover art.
 fn album_tile(ctx: Arc<AppContext>, album: &LibraryAlbum, on_click: AlbumClick) -> gtk::Button {
     let tile_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -205,6 +214,7 @@ fn album_tile(ctx: Arc<AppContext>, album: &LibraryAlbum, on_click: AlbumClick) 
     button
 }
 
+/// Asynchronously load and set the thumbnail for an album cover art picture widget.
 fn spawn_thumbnail(ctx: Arc<AppContext>, asset_id: String, picture: gtk::Picture) {
     if let Some(texture) = ctx
         .thumbnail_cache
@@ -226,6 +236,7 @@ fn spawn_thumbnail(ctx: Arc<AppContext>, asset_id: String, picture: gtk::Picture
     });
 }
 
+/// Remove all child widgets from the specified flow box.
 fn clear(flow: &gtk::FlowBox) {
     while let Some(child) = flow.first_child() {
         flow.remove(&child);

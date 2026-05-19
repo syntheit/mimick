@@ -1,4 +1,8 @@
 //! Download flow, video handoff, and transfer-tracking helpers.
+//!
+//! Streams the original-quality asset from the server into a local file,
+//! updating the progress bar and transfer rate display. Video files can
+//! optionally be handed off to the system default player after download.
 
 use std::path::PathBuf;
 use std::rc::Rc;

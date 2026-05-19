@@ -1,6 +1,13 @@
+//! Sidebar navigation panel for the library window.
+//!
+//! Builds the split-pane sidebar containing album rows, fixed navigation
+//! entries (All Assets, Explore, Local, Timeline), and the folder-scoped
+//! album list. Handles selection changes to drive the main grid view source.
+
 use gtk::prelude::*;
 use libadwaita::prelude::*;
 
+/// Contains references to the side navigation panel widgets and lists.
 pub struct SidebarParts {
     pub root: gtk::Box,
     pub connection_row: libadwaita::ActionRow,
@@ -9,6 +16,7 @@ pub struct SidebarParts {
     pub albums_list: gtk::ListBox,
 }
 
+/// Construct the hierarchical side navigation sidebar panel.
 pub fn build_sidebar() -> SidebarParts {
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -97,6 +105,7 @@ pub fn build_sidebar() -> SidebarParts {
     }
 }
 
+/// Construct a navigation list row decorated with an icon and titles.
 fn action_row(title: &str, subtitle: &str, icon_name: &str, key: &str) -> libadwaita::ActionRow {
     let row = libadwaita::ActionRow::builder()
         .title(title)

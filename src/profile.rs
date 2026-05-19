@@ -14,10 +14,14 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// Environment variable key driving profile isolation.
 const PROFILE_ENV_VAR: &str = "MIMICK_PROFILE";
+/// Maximum character length of a valid profile name segment.
 const MAX_PROFILE_LEN: usize = 32;
 
+/// Cached profile name parsed from environment.
 static PROFILE: OnceLock<Option<String>> = OnceLock::new();
+/// Cached directory path segment mapped from environment.
 static DIR_SEGMENT: OnceLock<String> = OnceLock::new();
 
 /// Active profile name, or `None` when the default profile is in use.
@@ -38,14 +42,17 @@ pub fn dir_segment() -> &'static str {
         .as_str()
 }
 
+/// Resolve user's local configuration directory parent based on profile.
 pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join(dir_segment()))
 }
 
+/// Resolve user's local data directory parent based on profile.
 pub fn data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(dir_segment()))
 }
 
+/// Resolve user's local cache directory parent based on profile.
 pub fn cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join(dir_segment()))
 }
@@ -71,6 +78,7 @@ pub fn keyring_account() -> String {
     }
 }
 
+/// Helper to retrieve the current profile string, parsing and caching it once.
 fn profile() -> &'static Option<String> {
     PROFILE.get_or_init(|| match std::env::var(PROFILE_ENV_VAR) {
         Ok(raw) => sanitise(&raw),
@@ -78,6 +86,7 @@ fn profile() -> &'static Option<String> {
     })
 }
 
+/// Validate that a profile name is safe for filesystem and D-Bus usage.
 fn sanitise(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

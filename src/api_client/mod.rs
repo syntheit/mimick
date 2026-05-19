@@ -1,4 +1,9 @@
 //! Integrates with the Immich API, handles connectivity failover, and provides album/cache helpers.
+//!
+//! The client probes both an internal (LAN) and external (WAN) URL and
+//! locks onto whichever responds first. Submodules split the API surface
+//! by domain: `albums`, `library`, `search`, `upload`, and `errors`.
+//! All HTTP requests share a single `reqwest::Client` connection pool.
 
 use parking_lot::RwLock;
 use reqwest::Client;
@@ -23,61 +28,91 @@ use upload_helpers::{
 
 pub type TransferProgressCallback = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 
+/// Represents an actionable API or connection issue encountered during operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiIssue {
+    /// Concise summary of the encountered issue.
     pub summary: String,
+    /// Guidance text showing the user how to resolve it.
     pub guidance: String,
 }
 
+/// In-memory API client connection URLs and configuration settings.
 #[derive(Debug, Clone)]
 pub(super) struct ApiClientSettings {
+    /// Server URL for local network connections.
     pub(super) internal_url: String,
+    /// Server URL for external network connections.
     pub(super) external_url: String,
+    /// Immich authorization API key.
     pub(super) api_key: String,
 }
 
+/// Simplified album summary response from Immich.
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct AlbumSummary {
+    /// Album identifier.
     pub(super) id: String,
+    /// Name of the album.
     #[serde(rename = "albumName")]
     pub(super) album_name: String,
 }
 
+/// Detailed Immich library album representation.
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct LibraryAlbum {
+    /// Unique album identifier.
     pub id: String,
+    /// Name of the album.
     #[serde(rename = "albumName")]
     pub album_name: String,
+    /// Count of assets contained in the album.
     #[serde(rename = "assetCount")]
     pub asset_count: u32,
+    /// Asset ID used as the album's cover thumbnail.
     #[serde(rename = "albumThumbnailAssetId")]
     pub thumbnail_asset_id: Option<String>,
+    /// ISO 8601 creation timestamp.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// ISO 8601 modification timestamp.
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
+    /// User description of the album.
     #[serde(default)]
     pub description: String,
+    /// Owner identifier.
     #[serde(rename = "ownerId", default)]
     pub owner_id: String,
+    /// True if the album is shared.
     #[serde(default)]
     pub shared: bool,
 }
 
+/// Detailed Immich library asset representation.
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct LibraryAsset {
+    /// Unique asset identifier on the server.
     pub id: String,
+    /// Original file name.
     #[serde(rename = "originalFileName")]
     pub filename: String,
+    /// Original MIME type.
     #[serde(rename = "originalMimeType")]
     pub mime_type: String,
+    /// Asset file creation timestamp.
     #[serde(rename = "fileCreatedAt")]
     pub created_at: String,
+    /// Asset kind (e.g. `"IMAGE"` or `"VIDEO"`).
     #[serde(rename = "type")]
     pub asset_type: String,
+    /// Thumbhash representation for preview blur effects.
     pub thumbhash: Option<String>,
+    /// Display width in pixels.
     pub width: Option<f64>,
+    /// Display height in pixels.
     pub height: Option<f64>,
+    /// Canonical lowercase SHA-1 checksum.
     #[serde(default, deserialize_with = "deserialize_checksum_to_hex")]
     pub checksum: Option<String>,
 }
@@ -115,11 +150,14 @@ pub fn normalize_checksum_to_hex(input: &str) -> Option<String> {
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Structured filters passed down search operations.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetadataSearchFilters {
+    /// Inferred or original file name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_file_name: Option<String>,
+    /// User description or caption search query.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Match against OCR-extracted text inside images. Distinct from
@@ -137,156 +175,225 @@ pub struct MetadataSearchFilters {
     /// ISO 8601 inclusive upper bound on `fileCreatedAt`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub taken_before: Option<String>,
+    /// Camera make.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub make: Option<String>,
+    /// Camera model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Camera lens model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lens_model: Option<String>,
+    /// City location.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
+    /// State location.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// City location.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub city: Option<String>,
+    /// True to only return favorited assets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_favorite: Option<bool>,
+    /// True to only return archived assets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_archived: Option<bool>,
+    /// True to only return motion photos.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_motion: Option<bool>,
+    /// True to only return assets not associated with any albums.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_not_in_album: Option<bool>,
+    /// True to only return assets having valid EXIF.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_exif: Option<bool>,
+    /// True to also return deleted assets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_deleted: Option<bool>,
+    /// List of person identifiers to match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub person_ids: Option<Vec<String>>,
+    /// List of tag identifiers to match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_ids: Option<Vec<String>>,
+    /// Desired sorting order.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<SortOrder>,
 }
 
+/// Direction of sort results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
+    /// Ascending order.
     Asc,
+    /// Descending order.
     Desc,
 }
 
+/// Immich server asset count statistics.
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct ServerStats {
+    /// Number of image assets.
     pub images: u64,
+    /// Number of video assets.
     pub videos: u64,
+    /// Total assets.
     pub total: u64,
 }
 
+/// Immich server configuration and version details.
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct ServerAbout {
+    /// Semver string of the Immich instance.
     pub version: String,
 }
 
+/// A recognized person returned by Immich's facial recognition.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Person {
+    /// Unique identifier of the person.
     pub id: String,
+    /// Name assigned to the person.
     #[serde(default)]
     pub name: String,
 }
 
+/// List wrapper of recognized people returned by Immich.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(super) struct PeopleResponse {
+    /// Internal people list array.
     pub(super) people: Vec<Person>,
 }
 
+/// Discovered item in an Immich explore page section.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ExploreItem {
+    /// Text value representing the item category (e.g. city or tag name).
     pub value: String,
+    /// Associated representative asset for preview.
     pub data: LibraryAsset,
 }
 
+/// Discovered category section on the Immich explore page (e.g. places or tags).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ExploreSection {
+    /// Categorisation field name.
     #[serde(rename = "fieldName")]
     pub field_name: String,
+    /// Discovered list of explore items.
     pub items: Vec<ExploreItem>,
 }
 
+/// Container matching assets returned alongside their EXIF metadata.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(super) struct AssetWithExif {
+    /// Unique asset ID.
     pub(super) id: String,
+    /// EXIF info details payload if populated.
     #[serde(rename = "exifInfo", default)]
     pub(super) exif_info: Option<ExifInfo>,
 }
 
+/// Search results response wrapper for EXIF queries.
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct ExifSearchResponse {
+    /// Contained assets list wrapper.
     pub(super) assets: ExifSearchAssets,
 }
 
+/// Asset items list returned inside an EXIF search response.
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct ExifSearchAssets {
+    /// Individual items within search page.
     pub(super) items: Vec<AssetWithExif>,
+    /// Pagination pointer to the next search page, if any.
     #[serde(rename = "nextPage", default)]
     pub(super) next_page: Option<String>,
 }
 
 /// One city with a representative asset ID for thumbnail display.
+/// Places display category representation holding the representative thumbnail asset.
 pub struct PlaceItem {
+    /// Name of the city location.
     pub city: String,
+    /// Asset ID mapped as the representative cover image.
     pub asset_id: String,
 }
 
+/// Full EXIF metadata schema properties returned by Immich.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExifInfo {
+    /// Camera manufacturer name.
     #[serde(default)]
     pub make: Option<String>,
+    /// Camera model.
     #[serde(default)]
     pub model: Option<String>,
+    /// Camera lens model name.
     #[serde(default)]
     pub lens_model: Option<String>,
+    /// F-number aperture value.
     #[serde(default)]
     pub f_number: Option<f64>,
+    /// Focal length in millimeters.
     #[serde(default)]
     pub focal_length: Option<f64>,
+    /// ISO speed rating.
     #[serde(default)]
     pub iso: Option<u32>,
+    /// Shutter speed string representation.
     #[serde(default)]
     pub exposure_time: Option<String>,
+    /// Uncompressed file size in bytes.
     #[serde(default)]
     pub file_size_in_byte: Option<u64>,
+    /// Original capture datetime string.
     #[serde(default)]
     pub date_time_original: Option<String>,
+    /// Discovered city name.
     #[serde(default)]
     pub city: Option<String>,
+    /// Discovered state or region name.
     #[serde(default)]
     pub state: Option<String>,
+    /// Discovered country name.
     #[serde(default)]
     pub country: Option<String>,
+    /// GPS Latitude coordinate in decimal degrees.
     #[serde(default)]
     pub latitude: Option<f64>,
+    /// GPS Longitude coordinate in decimal degrees.
     #[serde(default)]
     pub longitude: Option<f64>,
+    /// Metadata description text.
     #[serde(default)]
     pub description: Option<String>,
+    /// Image width in pixels.
     #[serde(default)]
     pub exif_image_width: Option<u32>,
+    /// Image height in pixels.
     #[serde(default)]
     pub exif_image_height: Option<u32>,
 }
 
+/// Asset details metadata payload.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetDetails {
+    /// Extracted EXIF metadata block.
     #[serde(default)]
     pub exif_info: Option<ExifInfo>,
 }
 
+/// Type of asset thumbnails requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThumbnailSize {
+    /// Mapped standard thumbnail preview.
     Thumbnail,
+    /// High-resolution large image preview.
     Preview,
 }
 
@@ -299,13 +406,17 @@ impl ThumbnailSize {
     }
 }
 
+/// Search response wrapper.
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct SearchResponse {
+    /// Inner assets block.
     pub(super) assets: SearchAssetSection,
 }
 
+/// Paginated asset list section within a search response.
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct SearchAssetSection {
+    /// Assets returned in the search.
     pub(super) items: Vec<LibraryAsset>,
     /// Authoritative pagination signal from Immich. Some(page) when more
     /// results exist, None when the search is exhausted. We only need its
@@ -314,8 +425,11 @@ pub(super) struct SearchAssetSection {
     pub(super) next_page: Option<String>,
 }
 
+/// Asynchronous Immich API client with failover and request serialization.
 pub struct ImmichApiClient {
+    /// Internal HTTP client instance.
     pub client: Client,
+    /// Configuration settings wrapper.
     settings: RwLock<ApiClientSettings>,
     /// The currently active base URL, selected by the last successful connectivity check.
     pub active_url: Mutex<Option<String>>,
@@ -335,11 +449,14 @@ pub struct ImmichApiClient {
     /// Timestamp of the most recent successful connectivity probe. Used to
     /// coalesce concurrent burst callers without suppressing periodic re-checks.
     last_successful_check: Mutex<Option<Instant>>,
+    /// Flag indicating whether the album list has been successfully fetched in this session.
     albums_fetched: Mutex<bool>,
+    /// Semaphore guarding maximum concurrent thumbnail downloads.
     thumbnail_semaphore: Arc<Semaphore>,
 }
 
 impl ImmichApiClient {
+    /// Initialize a new ImmichApiClient.
     pub fn new(internal_url: String, external_url: String, api_key: String) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(300))
@@ -376,15 +493,18 @@ impl ImmichApiClient {
         }
     }
 
+    /// Retrieve the route label (LAN/WAN) for the currently active connection URL.
     pub async fn active_route_label(&self) -> Option<String> {
         let active = self.active_url.lock().await.clone()?;
         Some(self.route_label_for_url(&active))
     }
 
+    /// Retrieve the most recently recorded API issue.
     pub async fn latest_issue(&self) -> Option<ApiIssue> {
         self.last_issue.lock().await.clone()
     }
 
+    /// Update in-memory configuration settings and reset connection state.
     pub async fn update_settings(
         &self,
         internal_url: String,
@@ -403,18 +523,22 @@ impl ImmichApiClient {
         self.clear_issue().await;
     }
 
+    /// Set the last encountered API issue.
     pub(super) async fn set_issue(&self, issue: ApiIssue) {
         *self.last_issue.lock().await = Some(issue);
     }
 
+    /// Clear the active API issue.
     pub(super) async fn clear_issue(&self) {
         *self.last_issue.lock().await = None;
     }
 
+    /// Retrieve a snapshot copy of the current configuration settings.
     pub(super) fn settings_snapshot(&self) -> ApiClientSettings {
         self.settings.read().clone()
     }
 
+    /// Retrieve the LAN/WAN/Custom route label matching a specific URL.
     pub(super) fn route_label_for_url(&self, url: &str) -> String {
         let settings = self.settings.read().clone();
         let trimmed = url.trim_end_matches('/');
