@@ -248,13 +248,15 @@ fn explore_tile(
     let picture = gtk::Picture::builder()
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Cover)
-        .width_request(160)
-        .height_request(100)
-        .hexpand(false)
-        .vexpand(false)
-        .halign(gtk::Align::Fill)
-        .valign(gtk::Align::Start)
+        .hexpand(true)
+        .vexpand(true)
         .css_classes(vec!["mimick-explore-tile".to_string()])
+        .build();
+    let frame = gtk::AspectFrame::builder()
+        .obey_child(false)
+        .ratio(160.0 / 100.0)
+        .hexpand(true)
+        .child(&picture)
         .build();
     let label = gtk::Label::builder()
         .label(value)
@@ -267,14 +269,16 @@ fn explore_tile(
     let inner = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
-        .css_classes(vec!["mimick-tile-box".to_string()])
+        .hexpand(true)
         .build();
-    inner.append(&picture);
+    inner.append(&frame);
     inner.append(&label);
 
     let button = gtk::Button::builder()
         .child(&inner)
         .css_classes(vec!["flat".to_string()])
+        .hexpand(true)
+        .halign(gtk::Align::Fill)
         .build();
 
     let value_owned = value.to_string();

@@ -235,7 +235,7 @@ pub fn build_grid_view(
         .single_click_activate(!select_toggle.is_active())
         .enable_rubberband(false)
         .max_columns(8)
-        .min_columns(3)
+        .min_columns(2)
         .build();
     select_toggle.connect_toggled(clone_view_for_toggle(&view));
 

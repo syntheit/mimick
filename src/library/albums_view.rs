@@ -136,7 +136,7 @@ fn build_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
         .build();
     let grid = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
-        .max_children_per_line(12)
+        .max_children_per_line(6)
         .min_children_per_line(2)
         .row_spacing(12)
         .column_spacing(12)
@@ -151,18 +151,20 @@ fn album_tile(ctx: Arc<AppContext>, album: &LibraryAlbum, on_click: AlbumClick) 
     let tile_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
-        .css_classes(vec!["mimick-tile-box".to_string()])
+        .hexpand(true)
         .build();
     let picture = gtk::Picture::builder()
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Cover)
-        .width_request(160)
-        .height_request(100)
-        .hexpand(false)
-        .vexpand(false)
-        .halign(gtk::Align::Fill)
-        .valign(gtk::Align::Start)
+        .hexpand(true)
+        .vexpand(true)
         .css_classes(vec!["mimick-explore-tile".to_string()])
+        .build();
+    let frame = gtk::AspectFrame::builder()
+        .obey_child(false)
+        .ratio(160.0 / 100.0)
+        .hexpand(true)
+        .child(&picture)
         .build();
     let meta_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -188,14 +190,14 @@ fn album_tile(ctx: Arc<AppContext>, album: &LibraryAlbum, on_click: AlbumClick) 
         .build();
     meta_row.append(&title_label);
     meta_row.append(&count_label);
-    tile_box.append(&picture);
+    tile_box.append(&frame);
     tile_box.append(&meta_row);
 
     let button = gtk::Button::builder()
         .child(&tile_box)
         .css_classes(vec!["flat".to_string()])
-        .hexpand(false)
-        .halign(gtk::Align::Center)
+        .hexpand(true)
+        .halign(gtk::Align::Fill)
         .build();
 
     if let Some(thumb_id) = album.thumbnail_asset_id.clone() {

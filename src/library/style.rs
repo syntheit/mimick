@@ -72,18 +72,6 @@ picture.mimick-person-avatar {
 picture.mimick-explore-tile {
     border-radius: 6px;
     background-color: alpha(@view_fg_color, 0.08);
-    min-width: 160px;
-    max-width: 160px;
-    min-height: 100px;
-    max-height: 100px;
-}
-
-box.mimick-tile-box {
-    min-width: 160px;
-    max-width: 160px;
-}
-
-window.mimick-wide picture.mimick-explore-tile {
 }
 
 picture.mimick-grid-thumb {
