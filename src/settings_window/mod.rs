@@ -98,7 +98,7 @@ pub fn build_settings_window_with_parent(
             .destroy_with_parent(true);
     }
     let window = window_builder.build();
-    window.set_size_request(360, 640);
+    window.set_size_request(360, 480);
 
     let view_stack = adw::ViewStack::builder()
         .vexpand(true)
@@ -252,12 +252,14 @@ pub fn build_settings_window_with_parent(
     // Internal URL
     let internal_row = adw::ActionRow::builder()
         .title("Internal URL (LAN)")
+        .title_lines(1)
         .build();
     let internal_switch = Switch::builder().valign(gtk::Align::Center).build();
     let internal_entry = Entry::builder()
-        .placeholder_text("http://192.168.1.10:2283")
+        .placeholder_text("http://…")
         .valign(gtk::Align::Center)
-        .width_request(0)
+        .width_request(140)
+        .max_width_chars(16)
         .hexpand(true)
         .build();
     internal_row.add_prefix(&internal_switch);
@@ -267,12 +269,14 @@ pub fn build_settings_window_with_parent(
     // External URL
     let external_row = adw::ActionRow::builder()
         .title("External URL (WAN)")
+        .title_lines(1)
         .build();
     let external_switch = Switch::builder().valign(gtk::Align::Center).build();
     let external_entry = Entry::builder()
-        .placeholder_text("https://immich.example.com")
+        .placeholder_text("https://…")
         .valign(gtk::Align::Center)
-        .width_request(0)
+        .width_request(140)
+        .max_width_chars(16)
         .hexpand(true)
         .build();
     external_row.add_prefix(&external_switch);
@@ -283,6 +287,8 @@ pub fn build_settings_window_with_parent(
     let api_key_row = adw::ActionRow::builder().title("API Key").build();
     let api_key_entry = PasswordEntry::builder()
         .valign(gtk::Align::Center)
+        .width_request(140)
+        .max_width_chars(16)
         .hexpand(true)
         .build();
     api_key_row.add_suffix(&api_key_entry);
@@ -301,6 +307,16 @@ pub fn build_settings_window_with_parent(
         .margin_top(6)
         .build();
     conn_group.add(&save_btn);
+
+    let settings_breakpoint = adw::Breakpoint::new(
+        adw::BreakpointCondition::parse("max-width: 500sp").expect("valid breakpoint condition"),
+    );
+    settings_breakpoint.add_setter(&internal_row, "title", Some(&"LAN URL".to_value()));
+    settings_breakpoint.add_setter(&external_row, "title", Some(&"WAN URL".to_value()));
+    settings_breakpoint.add_setter(&internal_entry, "width-request", Some(&140i32.to_value()));
+    settings_breakpoint.add_setter(&external_entry, "width-request", Some(&140i32.to_value()));
+    settings_breakpoint.add_setter(&api_key_entry, "width-request", Some(&140i32.to_value()));
+    window.add_breakpoint(settings_breakpoint);
 
     // Clone before moving into test_btn closure so api_client is still available below
     let api_client_for_test = api_client.clone();

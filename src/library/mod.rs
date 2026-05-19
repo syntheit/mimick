@@ -103,6 +103,8 @@ struct LibraryWindowUi {
     album_link_button: gtk::Button,
     album_sync_button: gtk::Button,
     last_seen_upload_batch: Cell<u64>,
+    narrow: Rc<Cell<bool>>,
+    split: libadwaita::OverlaySplitView,
 }
 
 pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>) {
@@ -113,8 +115,10 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .application(app)
         .title("Mimick Library")
         .name("mimick-library-window")
-        .default_width(1180)
+        .default_width(1480)
         .default_height(780)
+        .width_request(360)
+        .height_request(480)
         .build();
 
     let header = libadwaita::HeaderBar::builder()
@@ -131,23 +135,18 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .tooltip_text("Back (Alt+Left)")
         .sensitive(false)
         .build();
-    let prefs_button = gtk::Button::builder()
-        .icon_name("emblem-system-symbolic")
-        .tooltip_text("Open Settings")
-        .build();
-    let queue_button = gtk::Button::builder()
-        .icon_name("view-list-symbolic")
-        .tooltip_text("Open Queue Inspector")
-        .build();
-    let refresh_button = gtk::Button::builder()
-        .icon_name("view-refresh-symbolic")
-        .tooltip_text("Refresh")
+    let menu = gtk::gio::Menu::new();
+    menu.append(Some("Refresh"), Some("win.refresh"));
+    menu.append(Some("Queue Inspector"), Some("win.queue"));
+    menu.append(Some("Settings"), Some("win.settings"));
+    let menu_button = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .tooltip_text("Menu")
         .build();
     header.pack_start(&sidebar_toggle);
     header.pack_start(&back_button);
-    header.pack_end(&prefs_button);
-    header.pack_end(&queue_button);
-    header.pack_end(&refresh_button);
+    header.pack_end(&menu_button);
     let select_toggle = gtk::ToggleButton::builder()
         .icon_name("checkbox-symbolic")
         .tooltip_text("Select assets (Esc to exit)")
@@ -156,8 +155,9 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let toolbar = libadwaita::ToolbarView::builder().build();
     toolbar.add_top_bar(&header);
 
+    let narrow_flag = Rc::new(Cell::new(false));
     let sidebar = build_sidebar();
-    let grid = build_grid_view(ctx.clone(), select_toggle.clone());
+    let grid = build_grid_view(ctx.clone(), select_toggle.clone(), narrow_flag.clone());
     let explore = build_explore_view();
     let albums = build_albums_view();
 
@@ -191,6 +191,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let search_entry = gtk::SearchEntry::builder()
         .placeholder_text("Search filenames")
         .hexpand(true)
+        .width_chars(6)
+        .max_width_chars(24)
         .build();
     let filters_button = gtk::Button::builder()
         .icon_name("view-more-symbolic")
@@ -202,25 +204,46 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .selected(0)
         .build();
 
-    let controls = gtk::Box::builder()
+    let source_group = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
+        .build();
+    source_group.append(&source_mode);
+    source_group.append(&timeline_toggle);
+
+    let search_group = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .hexpand(true)
+        .build();
+    search_group.append(&search_mode);
+    search_group.append(&search_entry);
+    search_group.append(&filters_button);
+
+    let sort_group = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    sort_group.append(&sort_mode);
+
+    let controls = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
         .margin_top(12)
         .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
+        .margin_start(8)
+        .margin_end(8)
         .build();
-    controls.append(&source_mode);
-    controls.append(&timeline_toggle);
-    controls.append(&search_mode);
-    controls.append(&search_entry);
-    controls.append(&filters_button);
-    controls.append(&sort_mode);
+    controls.append(&source_group);
+    controls.append(&search_group);
+    controls.append(&sort_group);
 
     let timeline_banner = gtk::Label::builder()
         .xalign(0.0)
         .css_classes(vec!["mimick-timeline-banner".to_string()])
         .visible(false)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(20)
         .margin_top(4)
         .margin_bottom(4)
         .margin_start(12)
@@ -267,14 +290,16 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .xalign(0.0)
         .hexpand(true)
         .wrap(true)
-        .max_width_chars(48)
+        .max_width_chars(24)
+        .width_chars(12)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(vec!["caption".to_string(), "dim-label".to_string()])
         .build();
     let transfer_bar = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .margin_top(8)
-        .margin_bottom(8)
+        .margin_bottom(16)
         .margin_start(12)
         .margin_end(12)
         .css_classes(vec!["mimick-transfer-shell".to_string()])
@@ -286,15 +311,17 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let album_link_row = libadwaita::ActionRow::builder()
         .title("No local folder linked")
         .subtitle("Drop files in the linked folder to sync this album")
+        .title_lines(1)
+        .subtitle_lines(2)
         .build();
     let album_sync_button = gtk::Button::builder()
-        .label("Sync…")
+        .label("Sync")
         .valign(gtk::Align::Center)
         .css_classes(vec!["suggested-action".to_string()])
         .visible(false)
         .build();
     let album_link_button = gtk::Button::builder()
-        .label("Link folder…")
+        .label("Link")
         .valign(gtk::Align::Center)
         .build();
     album_link_row.add_suffix(&album_sync_button);
@@ -312,19 +339,24 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
 
     let bulk_count_label = gtk::Label::builder().xalign(0.0).hexpand(true).build();
     let bulk_delete = gtk::Button::builder()
-        .label("Delete")
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Delete selected")
         .css_classes(vec!["destructive-action".to_string()])
         .build();
-    let bulk_download = gtk::Button::builder().label("Download").build();
+    let bulk_download = gtk::Button::builder()
+        .icon_name("mimick-download-symbolic")
+        .tooltip_text("Download selected")
+        .build();
     let bulk_clear = gtk::Button::builder()
-        .label("Clear")
+        .icon_name("edit-clear-symbolic")
+        .tooltip_text("Clear selection")
         .css_classes(vec!["flat".to_string()])
         .build();
     let bulk_inner = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .margin_top(8)
-        .margin_bottom(8)
+        .margin_bottom(16)
         .margin_start(12)
         .margin_end(12)
         .css_classes(vec!["toolbar".to_string()])
@@ -354,6 +386,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .content(&content)
         .show_sidebar(true)
         .enable_show_gesture(true)
+        .enable_hide_gesture(true)
         .build();
     split
         .bind_property("show-sidebar", &sidebar_toggle, "active")
@@ -370,6 +403,56 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .build();
     nav.add(&root_page);
     window.set_content(Some(&nav));
+
+    let breakpoint = libadwaita::Breakpoint::new(
+        libadwaita::BreakpointCondition::parse("max-width: 750sp")
+            .expect("valid breakpoint condition"),
+    );
+    breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
+    breakpoint.add_setter(&transfer_bar, "visible", Some(&false.to_value()));
+    let narrow_apply = narrow_flag.clone();
+    breakpoint.connect_apply(move |_| {
+        narrow_apply.set(true);
+    });
+    let narrow_unapply = narrow_flag.clone();
+    breakpoint.connect_unapply(move |_| {
+        narrow_unapply.set(false);
+    });
+    window.add_breakpoint(breakpoint);
+
+    let desktop_bp = libadwaita::Breakpoint::new(
+        libadwaita::BreakpointCondition::parse("min-width: 750sp")
+            .expect("valid breakpoint condition"),
+    );
+    let window_for_desktop_apply = window.clone();
+    desktop_bp.connect_apply(move |_| {
+        window_for_desktop_apply.add_css_class("mimick-wide");
+    });
+    let window_for_desktop_unapply = window.clone();
+    desktop_bp.connect_unapply(move |_| {
+        window_for_desktop_unapply.remove_css_class("mimick-wide");
+    });
+    desktop_bp.add_setter(
+        &controls,
+        "orientation",
+        Some(&gtk::Orientation::Horizontal.to_value()),
+    );
+    desktop_bp.add_setter(&album_sync_button, "label", Some(&"Sync…".to_value()));
+    desktop_bp.add_setter(
+        &album_link_button,
+        "label",
+        Some(&"Link folder…".to_value()),
+    );
+    window.add_breakpoint(desktop_bp);
+
+    // Tablet-width breakpoint: collapse sidebar to overlay before the inline
+    // sidebar + controls (~960 px natural) overflow a shrunk desktop window.
+    let tablet_bp = libadwaita::Breakpoint::new(
+        libadwaita::BreakpointCondition::parse("max-width: 1000sp")
+            .expect("valid breakpoint condition"),
+    );
+    tablet_bp.add_setter(&split, "collapsed", Some(&true.to_value()));
+    window.add_breakpoint(tablet_bp);
 
     let f9 = gtk::Shortcut::builder()
         .trigger(&gtk::ShortcutTrigger::parse_string("F9").unwrap())
@@ -418,6 +501,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         album_link_button: album_link_button.clone(),
         album_sync_button: album_sync_button.clone(),
         last_seen_upload_batch: Cell::new(0),
+        narrow: narrow_flag.clone(),
+        split: split.clone(),
     });
     *ui.grid.context_menu_handler.borrow_mut() = Some(Box::new(clone!(
         #[strong]
@@ -433,7 +518,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     connect_bulk_actions(ui.clone(), bulk_delete, bulk_download, bulk_clear);
 
     connect_sidebar_handlers(ui.clone());
-    connect_controls(ui.clone(), prefs_button, queue_button, refresh_button);
+    connect_controls(ui.clone());
     connect_grid_handlers(ui.clone());
     connect_filters_button(ui.clone(), filters_button);
 
@@ -595,8 +680,11 @@ fn apply_timeline_ui_state(ui: &LibraryWindowUi, source: &LibrarySource) {
             | LibrarySource::AlbumUnified { .. }
     );
     let remote_search_allowed = !is_local && !is_unified;
-    ui.search_mode.set_visible(remote_search_allowed);
-    ui.filters_button.set_visible(remote_search_allowed);
+    let is_narrow = ui.narrow.get();
+    ui.search_mode
+        .set_visible(remote_search_allowed && !is_narrow);
+    ui.filters_button
+        .set_visible(remote_search_allowed && !is_narrow);
     if !remote_search_allowed {
         ui.search_mode.set_selected(0);
     }
@@ -933,6 +1021,8 @@ fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
         let action = libadwaita::ActionRow::builder()
             .title(&album.album_name)
             .subtitle(&subtitle)
+            .title_lines(1)
+            .subtitle_lines(1)
             .build();
         let row = gtk::ListBoxRow::builder()
             .tooltip_text(format!("{}:{}", album.id, album.album_name))
@@ -1118,11 +1208,15 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
     icon.add_css_class("dim-label");
     let title_label = gtk::Label::builder()
         .label(title)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .justify(gtk::Justification::Center)
         .css_classes(vec!["mimick-empty-title".to_string()])
         .build();
     let subtitle_label = gtk::Label::builder()
         .label(subtitle)
         .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
         .justify(gtk::Justification::Center)
         .css_classes(vec!["mimick-empty-subtitle".to_string()])
         .build();

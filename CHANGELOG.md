@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Mobile and narrow viewport UI overhaul: optimized component dimensions for 360px width screens, adjusted album and explore tile layouts to 2-column on mobile with uniform sizing, reduced header controls footprint, and improved overall narrow-screen usability.
+- Album and explore view tile rendering now uses fixed 100px height with viewport-responsive width (via FlowBox homogeneous layout), ensuring consistent thumbnail aspect ratios and eliminating layout jitter on window resizes.
+- Grid view minimum columns reduced from 3 to 2 on narrow viewports to fit within 360px width constraints without overflow.
+
+### Fixed
+
+- Album/explore tile thumbnails now maintain uniform sizes within a viewport and display correctly at 360px window width, with no collapse on window-height changes.
+- FlowBox children per line constraints adjusted (min 2, max 6 for albums) to ensure 2-column layout on mobile while limiting tile width growth on desktop.
+
 ## [9.5.4] - 2026-05-17
 
 ### Added

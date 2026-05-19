@@ -74,6 +74,16 @@ picture.mimick-explore-tile {
     background-color: alpha(@view_fg_color, 0.08);
 }
 
+picture.mimick-grid-thumb {
+    min-width: 114px;
+    min-height: 85px;
+}
+
+window.mimick-wide picture.mimick-grid-thumb {
+    min-width: 356px;
+    min-height: 200px;
+}
+
 picture.mimick-thumbnail-square,
 picture.mimick-thumbnail-square.mimick-thumbnail-loading,
 picture.mimick-thumbnail-square.mimick-thumbnail-loaded,

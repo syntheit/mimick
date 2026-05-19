@@ -26,7 +26,16 @@ fn present_advanced_filters_dialog(ui: Rc<LibraryWindowUi>) {
         .title("Advanced Filters")
         .content_width(520)
         .content_height(720)
+        .width_request(360)
+        .height_request(480)
         .build();
+    let dialog_bp = libadwaita::Breakpoint::new(
+        libadwaita::BreakpointCondition::parse("max-width: 400sp")
+            .expect("valid breakpoint condition"),
+    );
+    dialog_bp.add_setter(&dialog, "content-width", Some(&(-1i32).to_value()));
+    dialog_bp.add_setter(&dialog, "content-height", Some(&560i32.to_value()));
+    dialog.add_breakpoint(dialog_bp);
     let toolbar = libadwaita::ToolbarView::builder().build();
     let header = libadwaita::HeaderBar::builder().build();
     toolbar.add_top_bar(&header);

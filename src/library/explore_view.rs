@@ -97,10 +97,9 @@ fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
         .selection_mode(gtk::SelectionMode::None)
         .row_spacing(8)
         .column_spacing(8)
-        .min_children_per_line(1)
+        .min_children_per_line(2)
         .max_children_per_line(6)
-        .homogeneous(false)
-        .halign(gtk::Align::Start)
+        .homogeneous(true)
         .build();
     section.append(&grid);
     (section, grid)
@@ -247,21 +246,25 @@ fn explore_tile(
     on_click: ExploreClick,
 ) -> gtk::Button {
     let picture = gtk::Picture::builder()
-        .width_request(300)
-        .height_request(220)
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Cover)
+        .height_request(100)
+        .hexpand(true)
+        .vexpand(false)
         .css_classes(vec!["mimick-explore-tile".to_string()])
         .build();
     let label = gtk::Label::builder()
         .label(value)
         .xalign(0.0)
+        .width_chars(1)
+        .max_width_chars(1)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(vec!["caption-heading".to_string()])
         .build();
     let inner = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
+        .hexpand(true)
         .build();
     inner.append(&picture);
     inner.append(&label);
@@ -269,6 +272,8 @@ fn explore_tile(
     let button = gtk::Button::builder()
         .child(&inner)
         .css_classes(vec!["flat".to_string()])
+        .hexpand(true)
+        .halign(gtk::Align::Fill)
         .build();
 
     let value_owned = value.to_string();

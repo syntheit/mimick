@@ -45,4 +45,4 @@ opt-level = "z"        # Optimise for binary size (less code = less mapped pages
 codegen-units = 1      # Full whole-program optimisation
 lto = true             # Link-Time Optimisation – dead code is stripped at link time
 panic = "abort"        # Remove panic unwinding machinery (~60-100 KB of runtime)
-strip = true           # Strip debug symbols from the final binary
+strip = false           # Strip debug symbols from the final binary

@@ -23,7 +23,11 @@ pub struct GridViewParts {
     pub context_menu_handler: AssetContextMenuHandler,
 }
 
-pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -> GridViewParts {
+pub fn build_grid_view(
+    ctx: Arc<AppContext>,
+    select_toggle: gtk::ToggleButton,
+    _narrow: Rc<Cell<bool>>,
+) -> GridViewParts {
     let model = LibraryAssetModel::new();
     let selection = gtk::MultiSelection::new(Some(model.clone()));
     let factory = gtk::SignalListItemFactory::new();
@@ -40,11 +44,14 @@ pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -
             .build();
 
         let picture = gtk::Picture::builder()
-            .width_request(356)
-            .height_request(200)
+            .width_request(114)
+            .height_request(85)
             .can_shrink(true)
             .content_fit(gtk::ContentFit::Cover)
-            .css_classes(vec!["mimick-thumbnail-loading".to_string()])
+            .css_classes(vec![
+                "mimick-grid-thumb".to_string(),
+                "mimick-thumbnail-loading".to_string(),
+            ])
             .build();
 
         let checkbox = gtk::CheckButton::builder()
@@ -227,7 +234,7 @@ pub fn build_grid_view(ctx: Arc<AppContext>, select_toggle: gtk::ToggleButton) -
         .factory(&factory)
         .single_click_activate(!select_toggle.is_active())
         .enable_rubberband(false)
-        .max_columns(6)
+        .max_columns(8)
         .min_columns(2)
         .build();
     select_toggle.connect_toggled(clone_view_for_toggle(&view));
