@@ -32,7 +32,8 @@ Open an Issue on GitHub. Include:
 4. If you add logic, add unit tests in the same file under `#[cfg(test)]`.
 5. Run tests: `cargo test`.
 6. Ensure no warnings: `cargo clippy`.
-7. Submit your PR.
+7. Review the [API docs](https://mimick.nicx.dev/docs/) if you need to understand module interfaces.
+8. Submit your PR.
 
 ### 4. Code Style
 

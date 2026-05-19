@@ -40,6 +40,14 @@ cargo run
 cargo run -- --settings
 ```
 
+## API Documentation (Rustdoc)
+
+Rustdoc is generated and deployed to [mimick.nicx.dev/docs](https://mimick.nicx.dev/docs/) on each release. To generate the docs locally:
+
+```bash
+cargo doc --no-deps --open
+```
+
 ## Profile Switcher
 
 Mimick supports isolated runtime profiles via the `MIMICK_PROFILE` environment
