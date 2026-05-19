@@ -248,15 +248,10 @@ fn explore_tile(
     let picture = gtk::Picture::builder()
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Cover)
+        .height_request(100)
         .hexpand(true)
-        .vexpand(true)
+        .vexpand(false)
         .css_classes(vec!["mimick-explore-tile".to_string()])
-        .build();
-    let frame = gtk::AspectFrame::builder()
-        .obey_child(false)
-        .ratio(160.0 / 100.0)
-        .hexpand(true)
-        .child(&picture)
         .build();
     let label = gtk::Label::builder()
         .label(value)
@@ -271,7 +266,7 @@ fn explore_tile(
         .spacing(4)
         .hexpand(true)
         .build();
-    inner.append(&frame);
+    inner.append(&picture);
     inner.append(&label);
 
     let button = gtk::Button::builder()
