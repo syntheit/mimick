@@ -247,8 +247,8 @@ fn explore_tile(
     on_click: ExploreClick,
 ) -> gtk::Button {
     let picture = gtk::Picture::builder()
-        .width_request(300)
-        .height_request(220)
+        .width_request(200)
+        .height_request(160)
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Cover)
         .css_classes(vec!["mimick-explore-tile".to_string()])

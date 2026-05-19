@@ -46,8 +46,8 @@ pub fn build_grid_view(
 
         let is_narrow = narrow_for_setup.get();
         let picture = gtk::Picture::builder()
-            .width_request(if is_narrow { 160 } else { 356 })
-            .height_request(if is_narrow { 120 } else { 200 })
+            .width_request(if is_narrow { 140 } else { 356 })
+            .height_request(if is_narrow { 105 } else { 200 })
             .can_shrink(true)
             .content_fit(gtk::ContentFit::Cover)
             .css_classes(vec![

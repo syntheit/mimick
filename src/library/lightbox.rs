@@ -93,7 +93,8 @@ fn fill_exif_box(container: &gtk::Box, exif: &crate::api_client::ExifInfo) {
             .label(&value)
             .xalign(0.0)
             .wrap(true)
-            .max_width_chars(36)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .max_width_chars(28)
             .selectable(true)
             .build();
         row.append(&k);
@@ -140,6 +141,16 @@ fn format_datetime_display(iso: &str) -> String {
     iso.get(..19).unwrap_or(iso).replace('T', " ").to_string()
 }
 
+fn truncate_filename(name: &str, max_chars: usize) -> String {
+    let count = name.chars().count();
+    if count <= max_chars {
+        return name.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let head: String = name.chars().take(keep).collect();
+    format!("{}…", head)
+}
+
 /// Apply zoom to a lightbox Picture. Zoom is fit-relative: 1.0 = the size the
 /// texture would occupy inside `viewer` under Contain layout. > 1.0 overflows
 /// the viewer for panning. At 1.0 we restore (-1, -1) so the picture
@@ -172,9 +183,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         return;
     };
     let initial_filename = item.property::<String>("filename");
+    let title_cap = if ui.split.is_collapsed() { 14 } else { 24 };
+    let title_for_header = truncate_filename(&initial_filename, title_cap);
 
     let page = libadwaita::NavigationPage::builder()
-        .title(&initial_filename)
+        .title(&title_for_header)
         .can_pop(true)
         .build();
     let toolbar = libadwaita::ToolbarView::builder().build();
@@ -202,16 +215,20 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let body = libadwaita::OverlaySplitView::builder()
         .sidebar_position(gtk::PackType::End)
         .show_sidebar(false)
+        .collapsed(ui.split.is_collapsed())
         .enable_show_gesture(true)
         .enable_hide_gesture(true)
+        .min_sidebar_width(180.0)
+        .max_sidebar_width(320.0)
+        .sidebar_width_fraction(0.4)
         .build();
     let viewer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
-        .margin_top(8)
-        .margin_bottom(16)
-        .margin_start(8)
-        .margin_end(8)
+        .margin_top(4)
+        .margin_bottom(8)
+        .margin_start(4)
+        .margin_end(4)
         .hexpand(true)
         .build();
     // Two picture widgets in a stack so navigation can slide between them.
@@ -239,6 +256,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .child(&pic_stack)
         .vexpand(true)
         .hexpand(true)
+        .min_content_width(120)
         .build();
     let active_a = Rc::new(Cell::new(true));
     let zoom_level = Rc::new(Cell::new(1.0_f64));
@@ -270,7 +288,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     zoom_group.append(&zoom_in_btn);
     let actions = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
+        .spacing(4)
         .build();
     let actions_spacer = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -296,7 +314,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
         .hexpand(false)
-        .min_content_width(280)
+        .min_content_width(180)
         .max_content_width(320)
         .css_classes(vec!["mimick-details-pane".to_string()])
         .build();
@@ -342,6 +360,25 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .bind_property("collapsed", &body, "collapsed")
         .sync_create()
         .build();
+
+    // On narrow widths, hide the prev/next header buttons — Left/Right
+    // keyboard shortcuts still work, and the saved space lets the title fit.
+    let sync_nav_visibility = {
+        let prev_btn = prev_btn.clone();
+        let next_btn = next_btn.clone();
+        let details_btn = details_btn.clone();
+        let split = ui.split.clone();
+        move || {
+            let show = !split.is_collapsed();
+            prev_btn.set_visible(show);
+            next_btn.set_visible(show);
+            details_btn.set_visible(show);
+        }
+    };
+    sync_nav_visibility();
+    let sync_clone = sync_nav_visibility.clone();
+    ui.split
+        .connect_notify_local(Some("collapsed"), move |_, _| sync_clone());
 
     let pos_cell = Rc::new(Cell::new(position));
     let load_into_picture = Rc::new({
@@ -434,7 +471,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let created = item.property::<String>("created-at");
             let sync_state = item.property::<u32>("sync-state");
 
-            page.set_title(&filename);
+            let cap = if ui.split.is_collapsed() { 14 } else { 24 };
+            page.set_title(&truncate_filename(&filename, cap));
             details_filename.set_label(&filename);
             let sync_label = match sync_state {
                 2 => "On Immich and locally",

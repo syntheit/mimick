@@ -154,8 +154,8 @@ fn album_tile(ctx: Arc<AppContext>, album: &LibraryAlbum, on_click: AlbumClick) 
         .spacing(4)
         .build();
     let picture = gtk::Picture::builder()
-        .width_request(300)
-        .height_request(220)
+        .width_request(200)
+        .height_request(160)
         .content_fit(gtk::ContentFit::Cover)
         .css_classes(vec!["mimick-explore-tile".to_string()])
         .build();

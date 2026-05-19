@@ -171,7 +171,6 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .model(&source_mode_model)
         .selected(0)
         .tooltip_text("Asset source")
-        .hexpand(true)
         .build();
     let timeline_toggle = gtk::ToggleButton::builder()
         .label("Timeline")
@@ -197,7 +196,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let search_entry = gtk::SearchEntry::builder()
         .placeholder_text("Search filenames")
         .hexpand(true)
-        .width_chars(20)
+        .width_chars(6)
         .max_width_chars(24)
         .build();
     let filters_button = gtk::Button::builder()
@@ -208,7 +207,6 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let sort_mode = gtk::DropDown::builder()
         .model(&sort_model)
         .selected(0)
-        .hexpand(true)
         .build();
 
     let source_group = gtk::Box::builder()
@@ -238,8 +236,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .spacing(12)
         .margin_top(12)
         .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
+        .margin_start(8)
+        .margin_end(8)
         .build();
     controls.append(&source_group);
     controls.append(&search_group);
@@ -426,6 +424,11 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     breakpoint.add_setter(&album_sync_button, "label", Some(&"Sync".to_value()));
     breakpoint.add_setter(&album_link_button, "label", Some(&"Link".to_value()));
     breakpoint.add_setter(&transfer_bar, "visible", Some(&false.to_value()));
+    breakpoint.add_setter(&search_mode, "visible", Some(&false.to_value()));
+    breakpoint.add_setter(&sort_mode, "visible", Some(&false.to_value()));
+    breakpoint.add_setter(&sort_group, "visible", Some(&false.to_value()));
+    breakpoint.add_setter(&timeline_toggle, "visible", Some(&false.to_value()));
+    breakpoint.add_setter(&sidebar_toggle, "visible", Some(&false.to_value()));
     let nav_for_apply = nav.clone();
     let narrow_apply = narrow_flag.clone();
     breakpoint.connect_apply(move |_| {
@@ -676,8 +679,11 @@ fn apply_timeline_ui_state(ui: &LibraryWindowUi, source: &LibrarySource) {
             | LibrarySource::AlbumUnified { .. }
     );
     let remote_search_allowed = !is_local && !is_unified;
-    ui.search_mode.set_visible(remote_search_allowed);
-    ui.filters_button.set_visible(remote_search_allowed);
+    let is_narrow = ui.narrow.get();
+    ui.search_mode
+        .set_visible(remote_search_allowed && !is_narrow);
+    ui.filters_button
+        .set_visible(remote_search_allowed && !is_narrow);
     if !remote_search_allowed {
         ui.search_mode.set_selected(0);
     }
@@ -1220,17 +1226,17 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
 pub(super) fn apply_narrow_recursive(widget: &gtk::Widget, narrow: bool) {
     if let Some(pic) = widget.downcast_ref::<gtk::Picture>() {
         if pic.has_css_class("mimick-grid-thumb") {
-            pic.set_width_request(if narrow { 160 } else { 356 });
-            pic.set_height_request(if narrow { 120 } else { 200 });
+            pic.set_width_request(if narrow { 140 } else { 356 });
+            pic.set_height_request(if narrow { 105 } else { 200 });
         } else if pic.has_css_class("mimick-explore-tile") {
-            pic.set_width_request(if narrow { 160 } else { 300 });
-            pic.set_height_request(if narrow { 140 } else { 220 });
+            pic.set_width_request(if narrow { 140 } else { 300 });
+            pic.set_height_request(if narrow { 100 } else { 220 });
         }
     } else if let Some(sw) = widget.downcast_ref::<gtk::ScrolledWindow>()
         && sw.has_css_class("mimick-details-pane")
     {
-        sw.set_min_content_width(if narrow { 260 } else { 320 });
-        sw.set_max_content_width(if narrow { 260 } else { 320 });
+        sw.set_min_content_width(if narrow { 180 } else { 320 });
+        sw.set_max_content_width(if narrow { 180 } else { 320 });
     }
     let mut child = widget.first_child();
     while let Some(c) = child {
