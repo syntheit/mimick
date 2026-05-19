@@ -37,6 +37,7 @@ Mimick is a Linux background app that watches selected folders and syncs photos 
 [![Testing](https://img.shields.io/badge/Testing-Guide-444444?style=for-the-badge&labelColor=444444)](Testing)
 [![Release Ops](https://img.shields.io/badge/Release-Operations-444444?style=for-the-badge&labelColor=444444)](Release-Operations)
 [![Repo Automation](https://img.shields.io/badge/Repository-Automation-444444?style=for-the-badge&labelColor=444444)](Repository-Automation)
+[![API Docs](https://img.shields.io/badge/API-Rustdoc-F74C00?style=for-the-badge&logo=rust&logoColor=white&labelColor=F74C00)](https://mimick.nicx.dev/docs/)
 
 </div>
 
