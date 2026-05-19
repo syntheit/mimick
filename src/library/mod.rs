@@ -115,7 +115,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .application(app)
         .title("Mimick Library")
         .name("mimick-library-window")
-        .default_width(1180)
+        .default_width(1480)
         .default_height(780)
         .width_request(360)
         .height_request(480)
@@ -135,23 +135,18 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .tooltip_text("Back (Alt+Left)")
         .sensitive(false)
         .build();
-    let prefs_button = gtk::Button::builder()
-        .icon_name("emblem-system-symbolic")
-        .tooltip_text("Open Settings")
-        .build();
-    let queue_button = gtk::Button::builder()
-        .icon_name("view-list-symbolic")
-        .tooltip_text("Open Queue Inspector")
-        .build();
-    let refresh_button = gtk::Button::builder()
-        .icon_name("view-refresh-symbolic")
-        .tooltip_text("Refresh")
+    let menu = gtk::gio::Menu::new();
+    menu.append(Some("Refresh"), Some("win.refresh"));
+    menu.append(Some("Queue Inspector"), Some("win.queue"));
+    menu.append(Some("Settings"), Some("win.settings"));
+    let menu_button = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .tooltip_text("Menu")
         .build();
     header.pack_start(&sidebar_toggle);
     header.pack_start(&back_button);
-    header.pack_end(&prefs_button);
-    header.pack_end(&queue_button);
-    header.pack_end(&refresh_button);
+    header.pack_end(&menu_button);
     let select_toggle = gtk::ToggleButton::builder()
         .icon_name("checkbox-symbolic")
         .tooltip_text("Select assets (Esc to exit)")
@@ -232,7 +227,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     sort_group.append(&sort_mode);
 
     let controls = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
+        .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .margin_top(12)
         .margin_bottom(12)
@@ -320,13 +315,13 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .subtitle_lines(2)
         .build();
     let album_sync_button = gtk::Button::builder()
-        .label("Sync…")
+        .label("Sync")
         .valign(gtk::Align::Center)
         .css_classes(vec!["suggested-action".to_string()])
         .visible(false)
         .build();
     let album_link_button = gtk::Button::builder()
-        .label("Link folder…")
+        .label("Link")
         .valign(gtk::Align::Center)
         .build();
     album_link_row.add_suffix(&album_sync_button);
@@ -344,12 +339,17 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
 
     let bulk_count_label = gtk::Label::builder().xalign(0.0).hexpand(true).build();
     let bulk_delete = gtk::Button::builder()
-        .label("Delete")
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Delete selected")
         .css_classes(vec!["destructive-action".to_string()])
         .build();
-    let bulk_download = gtk::Button::builder().label("Download").build();
+    let bulk_download = gtk::Button::builder()
+        .icon_name("mimick-download-symbolic")
+        .tooltip_text("Download selected")
+        .build();
     let bulk_clear = gtk::Button::builder()
-        .label("Clear")
+        .icon_name("edit-clear-symbolic")
+        .tooltip_text("Clear selection")
         .css_classes(vec!["flat".to_string()])
         .build();
     let bulk_inner = gtk::Box::builder()
@@ -405,43 +405,45 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     window.set_content(Some(&nav));
 
     let breakpoint = libadwaita::Breakpoint::new(
-        libadwaita::BreakpointCondition::parse("max-width: 600sp")
+        libadwaita::BreakpointCondition::parse("max-width: 750sp")
             .expect("valid breakpoint condition"),
     );
     breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
-    breakpoint.add_setter(
-        &controls,
-        "orientation",
-        Some(&gtk::Orientation::Vertical.to_value()),
-    );
-    breakpoint.add_setter(&grid.view, "max-columns", Some(&2u32.to_value()));
-    breakpoint.add_setter(&grid.view, "min-columns", Some(&2u32.to_value()));
-    breakpoint.add_setter(&refresh_button, "visible", Some(&false.to_value()));
-    breakpoint.add_setter(&queue_button, "visible", Some(&false.to_value()));
-    breakpoint.add_setter(&bulk_delete, "label", Some(&"Del".to_value()));
-    breakpoint.add_setter(&bulk_download, "label", Some(&"Get".to_value()));
-    breakpoint.add_setter(&bulk_clear, "label", Some(&"X".to_value()));
-    breakpoint.add_setter(&album_sync_button, "label", Some(&"Sync".to_value()));
-    breakpoint.add_setter(&album_link_button, "label", Some(&"Link".to_value()));
     breakpoint.add_setter(&transfer_bar, "visible", Some(&false.to_value()));
-    breakpoint.add_setter(&search_mode, "visible", Some(&false.to_value()));
-    breakpoint.add_setter(&sort_mode, "visible", Some(&false.to_value()));
-    breakpoint.add_setter(&sort_group, "visible", Some(&false.to_value()));
-    breakpoint.add_setter(&timeline_toggle, "visible", Some(&false.to_value()));
-    breakpoint.add_setter(&sidebar_toggle, "visible", Some(&false.to_value()));
-    let nav_for_apply = nav.clone();
     let narrow_apply = narrow_flag.clone();
     breakpoint.connect_apply(move |_| {
         narrow_apply.set(true);
-        apply_narrow_recursive(nav_for_apply.upcast_ref::<gtk::Widget>(), true);
     });
-    let nav_for_unapply = nav.clone();
     let narrow_unapply = narrow_flag.clone();
     breakpoint.connect_unapply(move |_| {
         narrow_unapply.set(false);
-        apply_narrow_recursive(nav_for_unapply.upcast_ref::<gtk::Widget>(), false);
     });
     window.add_breakpoint(breakpoint);
+
+    let desktop_bp = libadwaita::Breakpoint::new(
+        libadwaita::BreakpointCondition::parse("min-width: 750sp")
+            .expect("valid breakpoint condition"),
+    );
+    let window_for_desktop_apply = window.clone();
+    desktop_bp.connect_apply(move |_| {
+        window_for_desktop_apply.add_css_class("mimick-wide");
+    });
+    let window_for_desktop_unapply = window.clone();
+    desktop_bp.connect_unapply(move |_| {
+        window_for_desktop_unapply.remove_css_class("mimick-wide");
+    });
+    desktop_bp.add_setter(
+        &controls,
+        "orientation",
+        Some(&gtk::Orientation::Horizontal.to_value()),
+    );
+    desktop_bp.add_setter(&album_sync_button, "label", Some(&"Sync…".to_value()));
+    desktop_bp.add_setter(
+        &album_link_button,
+        "label",
+        Some(&"Link folder…".to_value()),
+    );
+    window.add_breakpoint(desktop_bp);
 
     // Tablet-width breakpoint: collapse sidebar to overlay before the inline
     // sidebar + controls (~960 px natural) overflow a shrunk desktop window.
@@ -516,7 +518,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     connect_bulk_actions(ui.clone(), bulk_delete, bulk_download, bulk_clear);
 
     connect_sidebar_handlers(ui.clone());
-    connect_controls(ui.clone(), prefs_button, queue_button, refresh_button);
+    connect_controls(ui.clone());
     connect_grid_handlers(ui.clone());
     connect_filters_button(ui.clone(), filters_button);
 
@@ -632,7 +634,6 @@ fn refresh_albums_view(ui: Rc<LibraryWindowUi>) {
             Ok(albums) => {
                 let on_click = album_click_handler(ui.clone());
                 populate_albums(&ui.albums, ui.ctx.clone(), albums, on_click);
-                apply_narrow_recursive(ui.albums.root.upcast_ref(), ui.narrow.get());
             }
             Err(err) => log::warn!("Albums fetch failed: {}", err),
         }
@@ -846,7 +847,6 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                     load_source_page(click_ui.clone(), request, false);
                 },
             );
-            apply_narrow_recursive(ui.explore.root.upcast_ref(), ui.narrow.get());
         }
     ));
 }
@@ -1208,11 +1208,15 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
     icon.add_css_class("dim-label");
     let title_label = gtk::Label::builder()
         .label(title)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .justify(gtk::Justification::Center)
         .css_classes(vec!["mimick-empty-title".to_string()])
         .build();
     let subtitle_label = gtk::Label::builder()
         .label(subtitle)
         .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
         .justify(gtk::Justification::Center)
         .css_classes(vec!["mimick-empty-subtitle".to_string()])
         .build();
@@ -1220,29 +1224,6 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
     container.append(&title_label);
     container.append(&subtitle_label);
     container
-}
-
-/// Walk the widget tree and resize known cards/panes for narrow viewports.
-pub(super) fn apply_narrow_recursive(widget: &gtk::Widget, narrow: bool) {
-    if let Some(pic) = widget.downcast_ref::<gtk::Picture>() {
-        if pic.has_css_class("mimick-grid-thumb") {
-            pic.set_width_request(if narrow { 140 } else { 356 });
-            pic.set_height_request(if narrow { 105 } else { 200 });
-        } else if pic.has_css_class("mimick-explore-tile") {
-            pic.set_width_request(if narrow { 140 } else { 300 });
-            pic.set_height_request(if narrow { 100 } else { 220 });
-        }
-    } else if let Some(sw) = widget.downcast_ref::<gtk::ScrolledWindow>()
-        && sw.has_css_class("mimick-details-pane")
-    {
-        sw.set_min_content_width(if narrow { 180 } else { 320 });
-        sw.set_max_content_width(if narrow { 180 } else { 320 });
-    }
-    let mut child = widget.first_child();
-    while let Some(c) = child {
-        apply_narrow_recursive(&c, narrow);
-        child = c.next_sibling();
-    }
 }
 
 pub(super) fn immich_checksum_to_hex(b64: &str) -> Option<String> {

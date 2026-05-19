@@ -15,35 +15,36 @@ use super::{
     open_lightbox, refresh_albums_view, update_timeline_banner_if_active,
 };
 
-pub(super) fn connect_controls(
-    ui: Rc<LibraryWindowUi>,
-    prefs_button: gtk::Button,
-    queue_button: gtk::Button,
-    refresh_button: gtk::Button,
-) {
-    prefs_button.connect_clicked(clone!(
+pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
+    let action_settings = gtk::gio::SimpleAction::new("settings", None);
+    action_settings.connect_activate(clone!(
         #[strong]
         ui,
-        move |_| {
+        move |_, _| {
             build_settings_window_with_parent(&ui.app, ui.ctx.clone(), Some(&ui.window));
         }
     ));
+    ui.window.add_action(&action_settings);
 
-    queue_button.connect_clicked(clone!(
+    let action_queue = gtk::gio::SimpleAction::new("queue", None);
+    action_queue.connect_activate(clone!(
         #[strong]
         ui,
-        move |_| {
+        move |_, _| {
             show_queue_inspector(&ui.window, ui.ctx.queue_manager.clone());
         }
     ));
+    ui.window.add_action(&action_queue);
 
-    refresh_button.connect_clicked(clone!(
+    let action_refresh = gtk::gio::SimpleAction::new("refresh", None);
+    action_refresh.connect_activate(clone!(
         #[strong]
         ui,
-        move |_| {
+        move |_, _| {
             refresh_library_surfaces(ui.clone(), true);
         }
     ));
+    ui.window.add_action(&action_refresh);
 
     ui.back_button.connect_clicked(clone!(
         #[strong]
@@ -73,17 +74,21 @@ pub(super) fn connect_controls(
     ui.window.add_controller(alt_left_controller);
 
     let f5_controller = gtk::EventControllerKey::new();
-    f5_controller.connect_key_pressed({
-        let refresh_button = refresh_button.clone();
+    f5_controller.connect_key_pressed(clone!(
+        #[strong]
+        ui,
         move |_, keyval, _, _| {
             if keyval == gtk::gdk::Key::F5 {
-                refresh_button.emit_clicked();
+                let _ = ui
+                    .window
+                    .upcast_ref::<gtk::Widget>()
+                    .activate_action("win.refresh", None);
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
             }
         }
-    });
+    ));
     ui.window.add_controller(f5_controller);
 
     ui.source_mode.connect_selected_notify(clone!(

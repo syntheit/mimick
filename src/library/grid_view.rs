@@ -26,7 +26,7 @@ pub struct GridViewParts {
 pub fn build_grid_view(
     ctx: Arc<AppContext>,
     select_toggle: gtk::ToggleButton,
-    narrow: Rc<Cell<bool>>,
+    _narrow: Rc<Cell<bool>>,
 ) -> GridViewParts {
     let model = LibraryAssetModel::new();
     let selection = gtk::MultiSelection::new(Some(model.clone()));
@@ -35,7 +35,6 @@ pub fn build_grid_view(
 
     let select_toggle_for_setup = select_toggle.clone();
     let selection_for_setup = selection.clone();
-    let narrow_for_setup = narrow.clone();
     factory.connect_setup(move |_, list_item| {
         let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -44,10 +43,9 @@ pub fn build_grid_view(
             .css_classes(vec!["mimick-cell".to_string()])
             .build();
 
-        let is_narrow = narrow_for_setup.get();
         let picture = gtk::Picture::builder()
-            .width_request(if is_narrow { 140 } else { 356 })
-            .height_request(if is_narrow { 105 } else { 200 })
+            .width_request(114)
+            .height_request(85)
             .can_shrink(true)
             .content_fit(gtk::ContentFit::Cover)
             .css_classes(vec![
@@ -236,8 +234,8 @@ pub fn build_grid_view(
         .factory(&factory)
         .single_click_activate(!select_toggle.is_active())
         .enable_rubberband(false)
-        .max_columns(6)
-        .min_columns(1)
+        .max_columns(8)
+        .min_columns(3)
         .build();
     select_toggle.connect_toggled(clone_view_for_toggle(&view));
 

@@ -262,11 +262,14 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let zoom_level = Rc::new(Cell::new(1.0_f64));
     let initial_full = ui.ctx.config.read().data.library_preview_full_resolution;
     let resolution_toggle = gtk::ToggleButton::builder()
-        .label(if initial_full { "Original" } else { "Preview" })
+        .label(if initial_full { "Raw" } else { "Prev" })
         .tooltip_text("Toggle preview vs original full-resolution image")
         .active(initial_full)
         .build();
-    let download = gtk::Button::builder().label("Download").build();
+    let download = gtk::Button::builder()
+        .icon_name("mimick-download-symbolic")
+        .tooltip_text("Download asset")
+        .build();
     let zoom_out_btn = gtk::Button::builder()
         .icon_name("zoom-out-symbolic")
         .tooltip_text("Zoom out (Ctrl+-)")
@@ -954,15 +957,10 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         render,
         move |btn| {
-            btn.set_label(if btn.is_active() {
-                "Original"
-            } else {
-                "Preview"
-            });
+            btn.set_label(if btn.is_active() { "Raw" } else { "Prev" });
             (*render)();
         }
     ));
 
     ui.nav.push(&page);
-    super::apply_narrow_recursive(page.upcast_ref(), ui.narrow.get());
 }
