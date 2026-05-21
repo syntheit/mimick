@@ -9,18 +9,23 @@ use std::time::Duration;
 use super::errors::{RequestContext, classify_http_issue, classify_network_issue};
 use super::{
     ExifSearchResponse, ExploreSection, ImmichApiClient, LibraryAsset, MetadataSearchFilters,
-    PeopleResponse, Person, PlaceItem, SearchResponse, ServerAbout, ServerStats, SortOrder,
+    PeopleResponse, Person, PlaceItem, SearchResponse, ServerAbout, ServerStatistics, ServerStats,
+    SortOrder,
 };
 
 impl ImmichApiClient {
     /// Fetch the list of recognized people faces from the server.
-    pub async fn fetch_people(&self) -> Result<Vec<Person>, String> {
+    pub async fn fetch_people(&self, include_hidden: bool) -> Result<Vec<Person>, String> {
         let base_url = self
             .get_active_url()
             .await
             .ok_or_else(|| "No active connection".to_string())?;
         let settings = self.settings_snapshot();
-        let url = format!("{}/api/people?withHidden=false", base_url);
+        let url = format!(
+            "{}/api/people?withHidden={}",
+            base_url,
+            if include_hidden { "true" } else { "false" }
+        );
         match self
             .client
             .get(&url)
@@ -297,6 +302,36 @@ impl ImmichApiClient {
                     .await;
                 Err(err.to_string())
             }
+        }
+    }
+
+    /// Fetch server-wide statistics including per-user usage breakdown.
+    ///
+    /// Admin-only endpoint; non-admin sessions will receive an HTTP 403 and an
+    /// `Err` is returned. Caller should fall back to per-user asset counts.
+    pub async fn fetch_server_statistics(&self) -> Result<ServerStatistics, String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/server/statistics", base_url);
+
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp
+                .json::<ServerStatistics>()
+                .await
+                .map_err(|err| err.to_string()),
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
         }
     }
 

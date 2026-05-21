@@ -4,7 +4,7 @@
 //! tiles). Tile clicks invoke caller-provided closures so dispatch lives in
 //! `mod.rs` and this module stays UI-only.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ use crate::api_client::{ExploreSection, Person, PlaceItem, ThumbnailSize};
 use crate::app_context::AppContext;
 
 type ExploreClick = Rc<dyn Fn(&str, String)>;
+type PersonClick = Rc<dyn Fn(String, String)>;
 
 /// Contains references to individual grid widgets of the explore tab dashboard display.
 pub struct ExploreViewParts {
@@ -27,6 +28,9 @@ pub struct ExploreViewParts {
     people_section: gtk::Box,
     places_section: gtk::Box,
     things_section: gtk::Box,
+    pub people_filter_button: gtk::MenuButton,
+    cached_people: Rc<RefCell<Vec<Person>>>,
+    cached_people_click: Rc<RefCell<Option<PersonClick>>>,
 }
 
 /// Construct the hierarchical panels and containers for the explore dashboard view.
@@ -40,7 +44,7 @@ pub fn build_explore_view() -> ExploreViewParts {
         .margin_end(16)
         .build();
 
-    let (people_section, people_row) = build_people_section();
+    let (people_section, people_row, people_filter_button) = build_people_section();
     let (places_section, places_grid) = build_tile_section("Places");
     let (things_section, things_grid) = build_tile_section("Things");
 
@@ -64,17 +68,36 @@ pub fn build_explore_view() -> ExploreViewParts {
         people_section,
         places_section,
         things_section,
+        people_filter_button,
+        cached_people: Rc::new(RefCell::new(Vec::new())),
+        cached_people_click: Rc::new(RefCell::new(None)),
     }
 }
 
 /// Build a horizontal scrolled gallery row dedicated to recognized people circles.
-fn build_people_section() -> (gtk::Box, gtk::Box) {
+fn build_people_section() -> (gtk::Box, gtk::Box, gtk::MenuButton) {
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
         .visible(false)
         .build();
-    section.append(&heading("People"));
+
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    let title = heading("People");
+    title.set_hexpand(true);
+    header.append(&title);
+    let filter_button = gtk::MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .tooltip_text("Filter people")
+        .css_classes(["flat"])
+        .valign(gtk::Align::Center)
+        .build();
+    header.append(&filter_button);
+    section.append(&header);
+
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
@@ -86,7 +109,7 @@ fn build_people_section() -> (gtk::Box, gtk::Box) {
         .height_request(140)
         .build();
     section.append(&scroller);
-    (section, row)
+    (section, row, filter_button)
 }
 
 /// Build a flow grid section mapping image tiles for Places or Things category.
@@ -119,6 +142,10 @@ fn heading(text: &str) -> gtk::Label {
 }
 
 /// Populate the round avatar buttons for recognized people in the dashboard section.
+///
+/// Stores the full fetched list so face-visibility toggles can re-filter without
+/// re-querying the server. Always call with `include_hidden=true` upstream so the
+/// `Show hidden` toggle can apply locally.
 pub fn populate_people<F>(
     parts: &ExploreViewParts,
     ctx: Arc<AppContext>,
@@ -127,14 +154,119 @@ pub fn populate_people<F>(
 ) where
     F: Fn(String, String) + 'static,
 {
+    *parts.cached_people.borrow_mut() = people;
+    *parts.cached_people_click.borrow_mut() = Some(Rc::new(on_click));
+    render_people(parts, ctx);
+}
+
+fn render_people(parts: &ExploreViewParts, ctx: Arc<AppContext>) {
     while let Some(child) = parts.people_row.first_child() {
         parts.people_row.remove(&child);
     }
-    parts.people_section.set_visible(!people.is_empty());
-    let on_click = Rc::new(on_click);
-    for person in people.into_iter().take(40) {
-        let tile = person_tile(ctx.clone(), &person, on_click.clone());
+    let (show_unnamed, show_hidden) = {
+        let cfg = ctx.config.read();
+        (cfg.data.show_unnamed_faces, cfg.data.show_hidden_faces)
+    };
+    let cached = parts.cached_people.borrow();
+    let filtered: Vec<&Person> = cached
+        .iter()
+        .filter(|p| show_hidden || !p.is_hidden)
+        .filter(|p| show_unnamed || !p.name.is_empty())
+        .collect();
+    parts.people_section.set_visible(!filtered.is_empty());
+    let on_click = parts.cached_people_click.borrow().clone();
+    let Some(on_click) = on_click else {
+        return;
+    };
+    for person in filtered.into_iter().take(40) {
+        let tile = person_tile(ctx.clone(), person, on_click.clone());
         parts.people_row.append(&tile);
+    }
+}
+
+/// Wire the filter MenuButton popover. Called once after the explore view is built.
+/// `on_change` is invoked when a toggle flips so the caller can re-fetch with a
+/// different `include_hidden` flag if needed.
+pub fn wire_people_filter<F>(parts: &ExploreViewParts, ctx: Arc<AppContext>, on_change: F)
+where
+    F: Fn() + 'static,
+{
+    let popover = gtk::Popover::builder().build();
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+
+    let (show_unnamed, show_hidden) = {
+        let cfg = ctx.config.read();
+        (cfg.data.show_unnamed_faces, cfg.data.show_hidden_faces)
+    };
+
+    let unnamed_check = gtk::CheckButton::builder()
+        .label("Show unnamed")
+        .active(show_unnamed)
+        .build();
+    let hidden_check = gtk::CheckButton::builder()
+        .label("Show hidden")
+        .active(show_hidden)
+        .build();
+    body.append(&unnamed_check);
+    body.append(&hidden_check);
+    popover.set_child(Some(&body));
+    parts.people_filter_button.set_popover(Some(&popover));
+
+    let on_change = Rc::new(on_change);
+
+    let ctx_a = ctx.clone();
+    let parts_a = clone_parts_handles(parts);
+    let on_change_a = on_change.clone();
+    unnamed_check.connect_toggled(move |btn| {
+        {
+            let mut cfg = ctx_a.config.write();
+            cfg.data.show_unnamed_faces = btn.is_active();
+            if !cfg.save() {
+                log::error!("Failed to save config after toggling show_unnamed_faces");
+            }
+        }
+        render_people(&parts_a, ctx_a.clone());
+        on_change_a();
+    });
+
+    let ctx_b = ctx.clone();
+    let parts_b = clone_parts_handles(parts);
+    let on_change_b = on_change.clone();
+    hidden_check.connect_toggled(move |btn| {
+        {
+            let mut cfg = ctx_b.config.write();
+            cfg.data.show_hidden_faces = btn.is_active();
+            if !cfg.save() {
+                log::error!("Failed to save config after toggling show_hidden_faces");
+            }
+        }
+        render_people(&parts_b, ctx_b.clone());
+        on_change_b();
+    });
+}
+
+/// Build a lightweight `ExploreViewParts` snapshot containing only the widget/handle
+/// references render_people needs, sharing the same `Rc` data with the original.
+fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
+    ExploreViewParts {
+        root: parts.root.clone(),
+        populated: parts.populated.clone(),
+        people_row: parts.people_row.clone(),
+        places_grid: parts.places_grid.clone(),
+        things_grid: parts.things_grid.clone(),
+        people_section: parts.people_section.clone(),
+        places_section: parts.places_section.clone(),
+        things_section: parts.things_section.clone(),
+        people_filter_button: parts.people_filter_button.clone(),
+        cached_people: parts.cached_people.clone(),
+        cached_people_click: parts.cached_people_click.clone(),
     }
 }
 

@@ -818,12 +818,13 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     }
     ui.explore.populated.set(true);
     let ctx = ui.ctx.clone();
+    explore_view::wire_people_filter(&ui.explore, ctx.clone(), || {});
 
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
         ui,
         async move {
-            let people = ctx.api_client.fetch_people().await.unwrap_or_default();
+            let people = ctx.api_client.fetch_people(true).await.unwrap_or_default();
             let sections = ctx.api_client.fetch_explore().await.unwrap_or_default();
             let places = ctx.api_client.fetch_all_places().await.unwrap_or_default();
 

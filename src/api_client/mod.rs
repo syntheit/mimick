@@ -250,6 +250,36 @@ pub struct ServerAbout {
     pub version: String,
 }
 
+/// Per-user usage row from `/api/server/statistics`.
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageByUser {
+    pub user_id: String,
+    pub user_name: String,
+    #[serde(default)]
+    pub photos: u64,
+    #[serde(default)]
+    pub videos: u64,
+    #[serde(default)]
+    pub usage: u64,
+    #[serde(default)]
+    pub quota_size_in_bytes: Option<u64>,
+}
+
+/// Server-wide statistics (admin-only). Returned by `/api/server/statistics`.
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerStatistics {
+    #[serde(default)]
+    pub photos: u64,
+    #[serde(default)]
+    pub videos: u64,
+    #[serde(default)]
+    pub usage: u64,
+    #[serde(default)]
+    pub usage_by_user: Vec<UsageByUser>,
+}
+
 /// A recognized person returned by Immich's facial recognition.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Person {
@@ -258,6 +288,8 @@ pub struct Person {
     /// Name assigned to the person.
     #[serde(default)]
     pub name: String,
+    #[serde(default, rename = "isHidden")]
+    pub is_hidden: bool,
 }
 
 /// List wrapper of recognized people returned by Immich.

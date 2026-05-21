@@ -251,6 +251,12 @@ pub struct ConfigData {
     /// In-memory thumbnail cache cap in megabytes (0 = use built-in default of 80MB).
     #[serde(default)]
     pub library_thumbnail_cache_mb: u32,
+    /// Show people with no assigned name in the Explore view.
+    #[serde(default = "default_true")]
+    pub show_unnamed_faces: bool,
+    /// Include hidden people in the Explore view.
+    #[serde(default)]
+    pub show_hidden_faces: bool,
 }
 
 impl Default for ConfigData {
@@ -274,6 +280,8 @@ impl Default for ConfigData {
             download_target_path: None,
             library_preview_full_resolution: false,
             library_thumbnail_cache_mb: 0,
+            show_unnamed_faces: true,
+            show_hidden_faces: false,
         }
     }
 }
