@@ -35,15 +35,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import io
 import os
 import random
 import shutil
 import struct
-import subprocess
+import subprocess  # nosec B404 -- hardcoded args only, no user input
 import sys
+import tempfile
 import time
-import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -59,24 +60,25 @@ from typing import Callable, Optional
 GenFn = Callable[[random.Random, int], bytes]
 
 
-def _need_pillow():
+def _need_pillow() -> bool:
+    """Return True if the Pillow imaging library is importable."""
     try:
-        import PIL  # noqa: F401
-
-        return True
-    except ImportError:
+        return importlib.util.find_spec("PIL") is not None  # type: ignore[import-not-found]
+    except (ImportError, ValueError):
         return False
 
 
-def _gen_pillow(fmt: str, save_kwargs: dict | None = None):
+def _gen_pillow(fmt: str, save_kwargs: dict | None = None) -> GenFn:
+    """Return a generator function that creates random images via Pillow."""
+
     def inner(rng: random.Random, size_hint_px: int) -> bytes:
-        from PIL import Image
+        from PIL import Image  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel
 
         w = h = max(8, size_hint_px)
         # Generate w*h*3 bytes of random RGB. os.urandom is fast and
         # incompressible, so the resulting file's size scales with size_hint_px.
         seed = rng.getrandbits(64)
-        local = random.Random(seed)
+        local = random.Random(seed)  # nosec B311 -- deterministic bench data, not crypto
         if hasattr(local, "randbytes"):
             raw = local.randbytes(w * h * 3)
         else:
@@ -89,9 +91,12 @@ def _gen_pillow(fmt: str, save_kwargs: dict | None = None):
     return inner
 
 
-def gen_svg(rng: random.Random, size_hint_px: int) -> bytes:
-    # Pure-stdlib path: a minimal but valid SVG with a unique nonce so its
-    # bytes hash differently every time. Cheap to generate; small file.
+def gen_svg(rng: random.Random, _size_hint_px: int) -> bytes:
+    """Generate a minimal but valid SVG with a unique nonce.
+
+    Pure-stdlib path: cheap to generate and produces a small file.
+    Each call hashes differently thanks to the embedded random nonce.
+    """
     nonce = rng.getrandbits(128)
     body = (
         f'<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -104,7 +109,7 @@ def gen_svg(rng: random.Random, size_hint_px: int) -> bytes:
 
 
 def gen_bmp(rng: random.Random, size_hint_px: int) -> bytes:
-    # Pure-stdlib BMP writer. 24-bit uncompressed, padded to 4-byte rows.
+    """Generate an uncompressed 24-bit BMP using only the standard library."""
     w = h = max(8, size_hint_px)
     row_padded = (w * 3 + 3) & ~3
     pixel_data_size = row_padded * h
@@ -114,7 +119,7 @@ def gen_bmp(rng: random.Random, size_hint_px: int) -> bytes:
         "<IiiHHIIIIII", 40, w, h, 1, 24, 0, pixel_data_size, 2835, 2835, 0, 0
     )
     seed = rng.getrandbits(64)
-    local = random.Random(seed)
+    local = random.Random(seed)  # nosec B311 -- deterministic bench data, not crypto
 
     use_randbytes = hasattr(local, "randbytes")
     rows = []
@@ -128,7 +133,8 @@ def gen_bmp(rng: random.Random, size_hint_px: int) -> bytes:
     return header + dib + b"".join(rows)
 
 
-def gen_ffmpeg(fmt: str):
+def gen_ffmpeg(fmt: str) -> GenFn:
+    """Return a generator that shells out to ffmpeg to produce a short video."""
     def inner(rng: random.Random, size_hint_px: int) -> bytes:
         if shutil.which("ffmpeg") is None:
             return b""
@@ -136,9 +142,6 @@ def gen_ffmpeg(fmt: str):
         w = (w + 1) // 2 * 2  # h264 requires even dimensions
         h = (h + 1) // 2 * 2
         seed = rng.getrandbits(31)
-
-        import tempfile
-
         tmp_name = os.path.join(tempfile.gettempdir(), f"mimick_bench_{seed:08x}.{fmt}")
 
         cmd = [
@@ -156,7 +159,7 @@ def gen_ffmpeg(fmt: str):
             "-y",
             tmp_name,
         ]
-        proc = subprocess.run(cmd, capture_output=True, check=False)
+        proc = subprocess.run(cmd, capture_output=True, check=False)  # nosec B603  # nosemgrep
         if proc.returncode != 0:
             if os.path.exists(tmp_name):
                 os.remove(tmp_name)
@@ -171,11 +174,12 @@ def gen_ffmpeg(fmt: str):
 
 
 def gen_dummy(rng: random.Random, size_hint_px: int) -> bytes:
-    # Generates reproducible random noise for formats where we don't have
-    # a native builder. Mimick primarily relies on the extension and file size
-    # for startup indexing, so dummy bytes work for scale benchmarking.
-    # To prevent external tools from rejecting these as fully corrupted files,
-    # we prepend a minimal valid BMP header.
+    """Generate reproducible random noise with a valid BMP header.
+
+    Mimick primarily relies on the extension and file size for startup
+    indexing, so dummy bytes work for scale benchmarking.  The BMP header
+    prevents external tools from rejecting the file as fully corrupted.
+    """
     w = h = max(8, size_hint_px)
     row_padded = (w * 3 + 3) & ~3
     pixel_data_size = row_padded * h
@@ -200,15 +204,17 @@ def gen_dummy(rng: random.Random, size_hint_px: int) -> bytes:
 
 @dataclass(frozen=True)
 class FormatSpec:
+    """Immutable descriptor for one asset format and its generator."""
+
     ext: str
     gen: GenFn
     needs_pillow: bool = False
     needs_ffmpeg: bool = False
 
 
-def build_format_registry() -> dict[str, FormatSpec]:
+def _image_formats() -> dict[str, FormatSpec]:
+    """Standard and lossy/lossless image format specs."""
     return {
-        # Standard images
         "avif": FormatSpec("avif", gen_dummy),
         "bmp": FormatSpec("bmp", gen_bmp),
         "gif": FormatSpec("gif", _gen_pillow("GIF"), needs_pillow=True),
@@ -238,7 +244,12 @@ def build_format_registry() -> dict[str, FormatSpec]:
         "webp": FormatSpec(
             "webp", _gen_pillow("WebP", {"quality": 80}), needs_pillow=True
         ),
-        # RAW Formats
+    }
+
+
+def _raw_formats() -> dict[str, FormatSpec]:
+    """Camera RAW format specs (all use the dummy generator)."""
+    return {
         "3fr": FormatSpec("3fr", gen_dummy),
         "ari": FormatSpec("ari", gen_dummy),
         "arw": FormatSpec("arw", gen_dummy),
@@ -268,7 +279,12 @@ def build_format_registry() -> dict[str, FormatSpec]:
         "srf": FormatSpec("srf", gen_dummy),
         "srw": FormatSpec("srw", gen_dummy),
         "x3f": FormatSpec("x3f", gen_dummy),
-        # Video formats
+    }
+
+
+def _video_formats() -> dict[str, FormatSpec]:
+    """Video format specs (ffmpeg-based and dummy fallbacks)."""
+    return {
         "3gp": FormatSpec("3gp", gen_ffmpeg("3gp"), needs_ffmpeg=True),
         "3gpp": FormatSpec("3gpp", gen_ffmpeg("3gp"), needs_ffmpeg=True),
         "avi": FormatSpec("avi", gen_ffmpeg("avi"), needs_ffmpeg=True),
@@ -292,6 +308,15 @@ def build_format_registry() -> dict[str, FormatSpec]:
     }
 
 
+def build_format_registry() -> dict[str, FormatSpec]:
+    """Build and return the full mapping of extension to FormatSpec."""
+    registry: dict[str, FormatSpec] = {}
+    registry.update(_image_formats())
+    registry.update(_raw_formats())
+    registry.update(_video_formats())
+    return registry
+
+
 # ----------------------------------------------------------------------------
 # Plan + write
 # ----------------------------------------------------------------------------
@@ -299,6 +324,8 @@ def build_format_registry() -> dict[str, FormatSpec]:
 
 @dataclass
 class PlanEntry:
+    """One item in the generation plan: what to create and whether it duplicates another."""
+
     index: int
     format: str
     duplicate_of: Optional[int]  # index of an earlier entry with the same content
@@ -342,56 +369,56 @@ def plan_distribution(
     return plan
 
 
+@dataclass
+class ExecutionConfig:
+    """Bundle of parameters for execute_plan to keep the argument list short."""
+
+    out: Path
+    formats: dict[str, FormatSpec]
+    size_hint_px: int
+    delay_ms: int
+    cap_bytes: Optional[int]
+    rng: random.Random
+
+
 def execute_plan(
     plan: list[PlanEntry],
-    out: Path,
-    formats: dict[str, FormatSpec],
-    size_hint_px: int,
-    delay_ms: int,
-    cap_bytes: Optional[int],
-    rng: random.Random,
+    cfg: ExecutionConfig,
 ) -> dict:
-    out.mkdir(parents=True, exist_ok=True)
+    """Write every planned asset to disk, returning summary statistics."""
+    cfg.out.mkdir(parents=True, exist_ok=True)
     cache: dict[int, bytes] = {}
-    total_bytes = 0
-    total_written = 0
-    skipped_cap = 0
-    per_format_counts: dict[str, int] = {}
+    stats = {"written": 0, "bytes": 0, "unique_hashes": 0, "per_format": {}, "skipped_cap": 0}
     unique_hashes: set[str] = set()
 
     for entry in plan:
         if entry.duplicate_of is not None and entry.duplicate_of in cache:
             data = cache[entry.duplicate_of]
         else:
-            spec = formats[entry.format]
-            data = spec.gen(rng, size_hint_px)
+            spec = cfg.formats[entry.format]
+            data = spec.gen(cfg.rng, cfg.size_hint_px)
             if not data:
                 # Generator opted out (e.g. ffmpeg missing). Skip silently;
                 # caller already warned at format-resolution time.
                 continue
             cache[entry.index] = data
 
-        if cap_bytes is not None and total_bytes + len(data) > cap_bytes:
-            skipped_cap += 1
+        if cfg.cap_bytes is not None and stats["bytes"] + len(data) > cfg.cap_bytes:
+            stats["skipped_cap"] += 1
             continue
 
-        path = out / f"asset_{entry.index:06d}.{entry.format}"
+        path = cfg.out / f"asset_{entry.index:06d}.{entry.format}"
         path.write_bytes(data)
-        total_bytes += len(data)
-        total_written += 1
-        per_format_counts[entry.format] = per_format_counts.get(entry.format, 0) + 1
-        unique_hashes.add(hashlib.sha1(data).hexdigest())
+        stats["bytes"] += len(data)
+        stats["written"] += 1
+        stats["per_format"][entry.format] = stats["per_format"].get(entry.format, 0) + 1
+        unique_hashes.add(hashlib.sha256(data).hexdigest())
 
-        if delay_ms > 0:
-            time.sleep(delay_ms / 1000.0)
+        if cfg.delay_ms > 0:
+            time.sleep(cfg.delay_ms / 1000.0)
 
-    return {
-        "written": total_written,
-        "bytes": total_bytes,
-        "unique_hashes": len(unique_hashes),
-        "per_format": per_format_counts,
-        "skipped_cap": skipped_cap,
-    }
+    stats["unique_hashes"] = len(unique_hashes)
+    return stats
 
 
 # ----------------------------------------------------------------------------
@@ -399,7 +426,8 @@ def execute_plan(
 # ----------------------------------------------------------------------------
 
 
-def parse_args() -> argparse.Namespace:
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct the ArgumentParser with all CLI flags."""
     p = argparse.ArgumentParser(
         description="Generate test assets for Mimick startup-scan / dedup benchmarks.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -413,14 +441,27 @@ def parse_args() -> argparse.Namespace:
         "--formats",
         type=str,
         default="jpg,png,webp,bmp",
-        help="Comma-separated subset of formats, or 'all'. Supports all formats from api_client.rs (e.g. jpg, png, heic, arw, mp4, mkv). Default: jpg,png,webp,bmp.",
+        help=(
+            "Comma-separated subset of formats, or 'all'. Supports all "
+            "formats from api_client.rs (e.g. jpg, png, heic, arw, mp4, "
+            "mkv). Default: jpg,png,webp,bmp."
+        ),
     )
     p.add_argument(
         "--duplicate-ratio",
         type=float,
         default=0.0,
-        help="Fraction of files (0.0–1.0) that should share content with an earlier file (default: 0.0).",
+        help=(
+            "Fraction of files (0.0-1.0) that should share content "
+            "with an earlier file (default: 0.0)."
+        ),
     )
+    _add_optional_flags(p)
+    return p
+
+
+def _add_optional_flags(p: argparse.ArgumentParser) -> None:
+    """Register optional tuning flags on the parser."""
     p.add_argument(
         "--delay-ms",
         type=int,
@@ -445,10 +486,17 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="RNG seed for reproducibility (default: 42).",
     )
-    return p.parse_args()
 
 
-def resolve_formats(requested: list[str], registry: dict[str, FormatSpec]) -> list[str]:
+def parse_args() -> argparse.Namespace:
+    """Parse and return command-line arguments."""
+    return _build_parser().parse_args()
+
+
+def resolve_formats(
+    requested: list[str], registry: dict[str, FormatSpec]
+) -> list[str]:
+    """Filter requested formats, dropping those whose dependencies are missing."""
     pillow_ok = _need_pillow()
     ffmpeg_ok = shutil.which("ffmpeg") is not None
     resolved: list[str] = []
@@ -474,8 +522,9 @@ def resolve_formats(requested: list[str], registry: dict[str, FormatSpec]) -> li
 
 
 def main() -> int:
+    """Entry point: parse arguments, plan the distribution, and generate assets."""
     args = parse_args()
-    if not (0.0 <= args.duplicate_ratio <= 1.0):
+    if not 0.0 <= args.duplicate_ratio <= 1.0:
         print("error: --duplicate-ratio must be between 0.0 and 1.0", file=sys.stderr)
         return 2
     if args.count <= 0:
@@ -492,7 +541,7 @@ def main() -> int:
         print("error: no usable formats after resolving dependencies", file=sys.stderr)
         return 2
 
-    rng = random.Random(args.seed)
+    rng = random.Random(args.seed)  # nosec B311 -- deterministic bench data, not crypto
     plan = plan_distribution(args.count, formats, args.duplicate_ratio, rng)
 
     print(
@@ -500,15 +549,15 @@ def main() -> int:
         f"{int(args.count * args.duplicate_ratio)} duplicates, seed={args.seed}",
     )
     started = time.monotonic()
-    result = execute_plan(
-        plan,
-        args.out,
-        registry,
-        args.size_hint_px,
-        args.delay_ms,
-        args.cap_bytes,
-        rng,
+    cfg = ExecutionConfig(
+        out=args.out,
+        formats=registry,
+        size_hint_px=args.size_hint_px,
+        delay_ms=args.delay_ms,
+        cap_bytes=args.cap_bytes,
+        rng=rng,
     )
+    result = execute_plan(plan, cfg)
     elapsed = time.monotonic() - started
 
     print()
