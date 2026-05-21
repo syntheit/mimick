@@ -34,7 +34,6 @@ SVG and BMP have pure-stdlib fallbacks.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import io
 import os
@@ -142,33 +141,32 @@ def gen_ffmpeg(fmt: str) -> GenFn:
         w = (w + 1) // 2 * 2  # h264 requires even dimensions
         h = (h + 1) // 2 * 2
         seed = rng.getrandbits(31)
-        tmp_name = os.path.join(tempfile.gettempdir(), f"mimick_bench_{seed:08x}.{fmt}")
 
-        cmd = [
-            "ffmpeg",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            f"nullsrc=size={w}x{h}:duration=1:rate=30",
-            "-vf",
-            f"geq=random({seed}/255):128:128",
-            "-pix_fmt",
-            "yuv420p",
-            "-y",
-            tmp_name,
-        ]
-        proc = subprocess.run(cmd, capture_output=True, check=False)  # nosec B603  # nosemgrep
-        if proc.returncode != 0:
-            if os.path.exists(tmp_name):
-                os.remove(tmp_name)
-            return b""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_name = os.path.join(tmpdir, f"mimick_bench_{seed:08x}.{fmt}")
+            cmd = [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"nullsrc=size={w}x{h}:duration=1:rate=30",
+                "-vf",
+                f"geq=random({seed}/255):128:128",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+                tmp_name,
+            ]
+            proc = subprocess.run(  # nosec B603  # nosemgrep
+                cmd, capture_output=True, check=False
+            )
+            if proc.returncode != 0:
+                return b""
 
-        with open(tmp_name, "rb") as f:
-            data = f.read()
-        os.remove(tmp_name)
-        return data
+            with open(tmp_name, "rb") as f:
+                return f.read()
 
     return inner
 
@@ -381,43 +379,64 @@ class ExecutionConfig:
     rng: random.Random
 
 
+def _exceeds_cap(stats: dict, size: int, cap: int | None) -> bool:
+    """Return True if writing `size` bytes would exceed the cap."""
+    return cap is not None and stats["bytes"] + size > cap
+
+
+def _record_write(stats: dict, fmt: str, size: int) -> None:
+    """Update running statistics after a successful file write."""
+    stats["bytes"] += size
+    stats["written"] += 1
+    stats["per_format"][fmt] = stats["per_format"].get(fmt, 0) + 1
+
+
+def _write_duplicate(
+    entry: PlanEntry, src_path: Path, cfg: ExecutionConfig, stats: dict
+) -> bool:
+    """Copy a duplicate file from the cached source. Returns True if written."""
+    file_size = src_path.stat().st_size
+    if _exceeds_cap(stats, file_size, cfg.cap_bytes):
+        stats["skipped_cap"] += 1
+        return False
+    dst_path = cfg.out / f"asset_{entry.index:06d}.{entry.format}"
+    shutil.copy2(src_path, dst_path)
+    _record_write(stats, entry.format, file_size)
+    return True
+
+
 def execute_plan(
     plan: list[PlanEntry],
     cfg: ExecutionConfig,
 ) -> dict:
     """Write every planned asset to disk, returning summary statistics."""
     cfg.out.mkdir(parents=True, exist_ok=True)
-    cache: dict[int, bytes] = {}
+    # Cache written file paths (not raw bytes) to avoid OOM on large runs.
+    cache: dict[int, Path] = {}
     stats = {"written": 0, "bytes": 0, "unique_hashes": 0, "per_format": {}, "skipped_cap": 0}
-    unique_hashes: set[str] = set()
+    unique_sources: set[int] = set()
 
     for entry in plan:
         if entry.duplicate_of is not None and entry.duplicate_of in cache:
-            data = cache[entry.duplicate_of]
+            _write_duplicate(entry, cache[entry.duplicate_of], cfg, stats)
         else:
             spec = cfg.formats[entry.format]
             data = spec.gen(cfg.rng, cfg.size_hint_px)
             if not data:
-                # Generator opted out (e.g. ffmpeg missing). Skip silently;
-                # caller already warned at format-resolution time.
                 continue
-            cache[entry.index] = data
-
-        if cfg.cap_bytes is not None and stats["bytes"] + len(data) > cfg.cap_bytes:
-            stats["skipped_cap"] += 1
-            continue
-
-        path = cfg.out / f"asset_{entry.index:06d}.{entry.format}"
-        path.write_bytes(data)
-        stats["bytes"] += len(data)
-        stats["written"] += 1
-        stats["per_format"][entry.format] = stats["per_format"].get(entry.format, 0) + 1
-        unique_hashes.add(hashlib.sha256(data).hexdigest())
+            if _exceeds_cap(stats, len(data), cfg.cap_bytes):
+                stats["skipped_cap"] += 1
+                continue
+            path = cfg.out / f"asset_{entry.index:06d}.{entry.format}"
+            path.write_bytes(data)
+            cache[entry.index] = path
+            unique_sources.add(entry.index)
+            _record_write(stats, entry.format, len(data))
 
         if cfg.delay_ms > 0:
             time.sleep(cfg.delay_ms / 1000.0)
 
-    stats["unique_hashes"] = len(unique_hashes)
+    stats["unique_hashes"] = len(unique_sources)
     return stats
 
 
