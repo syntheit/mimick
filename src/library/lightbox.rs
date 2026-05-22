@@ -4,7 +4,7 @@
 //! swipe navigation. Displays an EXIF metadata panel and provides
 //! download-to-folder and delete-to-trash actions.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use glib::clone;
@@ -17,7 +17,8 @@ use crate::library::local_exif::{self, LocalExif};
 
 use super::context_menu::show_asset_context_menu;
 use super::download::{
-    begin_download_session, finish_download_item, start_download, track_download_item,
+    begin_download_session, finish_download_item, open_local_with_default_app, start_download,
+    track_download_item,
 };
 use super::{LOCAL_ID_PREFIX, LibraryWindowUi, load_source_page, load_texture_oriented};
 
@@ -63,6 +64,19 @@ fn exif_from_local(local: &LocalExif, file_size: Option<u64>) -> ExifInfo {
         exif_image_width: local.image_width,
         exif_image_height: local.image_height,
     }
+}
+
+fn original_preview_cache_path(
+    cache_dir: &std::path::Path,
+    asset_id: &str,
+    filename: &str,
+) -> std::path::PathBuf {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or("bin");
+    cache_dir.join(format!("{asset_id}.{ext}"))
 }
 
 /// Populate the details sidebar with sectioned EXIF metadata.
@@ -399,11 +413,13 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .content_fit(gtk::ContentFit::Contain)
         .vexpand(true)
         .hexpand(true)
+        .css_classes(["mimick-lightbox-picture"])
         .build();
     let picture_b = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Contain)
         .vexpand(true)
         .hexpand(true)
+        .css_classes(["mimick-lightbox-picture"])
         .build();
     let pic_stack = gtk::Stack::builder()
         .transition_duration(180)
@@ -444,6 +460,50 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let picture_overlay = gtk::Overlay::builder().build();
     picture_overlay.set_child(Some(&scrolled_picture));
     picture_overlay.add_overlay(&loader_overlay);
+
+    let unavailable_title = gtk::Label::builder()
+        .label("Preview unavailable")
+        .css_classes(["title-3"])
+        .build();
+    let unavailable_filename = gtk::Label::builder()
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .max_width_chars(42)
+        .build();
+    let unavailable_mime = gtk::Label::builder().css_classes(["dim-label"]).build();
+    let unavailable_open = gtk::Button::builder()
+        .label("Open in external app")
+        .css_classes(["suggested-action"])
+        .build();
+    let unavailable_path = Rc::new(RefCell::new(None::<String>));
+    unavailable_open.connect_clicked({
+        let unavailable_path = unavailable_path.clone();
+        move |_| {
+            if let Some(path) = unavailable_path.borrow().as_deref() {
+                open_local_with_default_app(path);
+            }
+        }
+    });
+    let unavailable_card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .css_classes(["mimick-preview-unavailable"])
+        .build();
+    unavailable_card.append(&unavailable_title);
+    unavailable_card.append(&unavailable_filename);
+    unavailable_card.append(&unavailable_mime);
+    unavailable_card.append(&unavailable_open);
+    let unavailable_overlay = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::Crossfade)
+        .transition_duration(180)
+        .reveal_child(false)
+        .halign(gtk::Align::Fill)
+        .valign(gtk::Align::Fill)
+        .child(&unavailable_card)
+        .build();
+    picture_overlay.add_overlay(&unavailable_overlay);
     let active_a = Rc::new(Cell::new(true));
     let zoom_level = Rc::new(Cell::new(1.0_f64));
     let initial_full = ui.ctx.config.read().data.library_preview_full_resolution;
@@ -573,9 +633,35 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let load_into_picture = Rc::new({
         let ui = ui.clone();
         let loader_overlay = loader_overlay.clone();
-        move |target: gtk::Picture, asset_id: String, local_path: String, full_res: bool| {
+        let unavailable_overlay = unavailable_overlay.clone();
+        let unavailable_filename = unavailable_filename.clone();
+        let unavailable_mime = unavailable_mime.clone();
+        let unavailable_open = unavailable_open.clone();
+        let unavailable_path = unavailable_path.clone();
+        move |target: gtk::Picture,
+              asset_id: String,
+              filename: String,
+              mime: String,
+              local_path: String,
+              full_res: bool| {
             let ui = ui.clone();
             let loader = loader_overlay.clone();
+            let unavailable_overlay = unavailable_overlay.clone();
+            let unavailable_filename = unavailable_filename.clone();
+            let unavailable_mime = unavailable_mime.clone();
+            let unavailable_open = unavailable_open.clone();
+            let unavailable_path = unavailable_path.clone();
+            unavailable_overlay.set_reveal_child(false);
+            *unavailable_path.borrow_mut() = None;
+            if let Some(texture) = ui
+                .ctx
+                .thumbnail_cache
+                .get_cached(&asset_id, ThumbnailSize::Preview)
+            {
+                target.set_paintable(Some(&texture));
+            } else {
+                target.set_paintable(None::<&gtk::gdk::Paintable>);
+            }
             // Don't flash the spinner for the synchronous local-file path —
             // it'll be gone before the user perceives anything. For network
             // / decode paths we reveal after a 120ms delay to avoid flicker
@@ -596,20 +682,34 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 );
             }
             glib::MainContext::default().spawn_local(async move {
+                let show_unavailable = |path: Option<String>| {
+                    unavailable_filename.set_label(&filename);
+                    unavailable_mime.set_label(&mime);
+                    unavailable_open.set_visible(path.is_some());
+                    *unavailable_path.borrow_mut() = path;
+                    unavailable_overlay.set_reveal_child(true);
+                };
                 if !local_path.is_empty() {
-                    if let Some(texture) = load_texture_oriented(std::path::Path::new(&local_path))
+                    if let Some(texture) =
+                        load_texture_oriented(std::path::Path::new(&local_path)).await
                     {
                         target.set_paintable(Some(&texture));
+                        cancel_loader.set(true);
+                        loader.set_reveal_child(false);
+                        return;
                     }
-                    cancel_loader.set(true);
-                    loader.set_reveal_child(false);
-                    return;
+                    if asset_id.starts_with(crate::library::LOCAL_ID_PREFIX) {
+                        show_unavailable(Some(local_path));
+                        cancel_loader.set(true);
+                        loader.set_reveal_child(false);
+                        return;
+                    }
                 }
                 if full_res {
                     if let Some(cache_dir) = crate::profile::cache_dir().map(|p| p.join("preview"))
                     {
                         let _ = std::fs::create_dir_all(&cache_dir);
-                        let temp = cache_dir.join(format!("{}.bin", asset_id));
+                        let temp = original_preview_cache_path(&cache_dir, &asset_id, &filename);
                         if !temp.exists()
                             && let Err(err) = {
                                 begin_download_session(&ui.ctx, format!("preview {asset_id}"));
@@ -629,21 +729,29 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                             }
                         {
                             log::warn!("Lightbox original fetch failed: {}", err);
+                            show_unavailable(None);
                             cancel_loader.set(true);
                             loader.set_reveal_child(false);
                             return;
                         }
-                        if let Some(texture) = load_texture_oriented(&temp) {
+                        if let Some(texture) = load_texture_oriented(&temp).await {
                             target.set_paintable(Some(&texture));
+                        } else {
+                            show_unavailable(Some(temp.display().to_string()));
                         }
+                    } else {
+                        show_unavailable(None);
                     }
-                } else if let Ok(texture) = ui
-                    .ctx
-                    .thumbnail_cache
-                    .load_thumbnail(&asset_id, ThumbnailSize::Preview)
-                    .await
-                {
-                    target.set_paintable(Some(&texture));
+                } else {
+                    match ui
+                        .ctx
+                        .thumbnail_cache
+                        .load_thumbnail(&asset_id, ThumbnailSize::Preview)
+                        .await
+                    {
+                        Ok(texture) => target.set_paintable(Some(&texture)),
+                        Err(_) => show_unavailable(None),
+                    }
                 }
                 cancel_loader.set(true);
                 loader.set_reveal_child(false);
@@ -732,6 +840,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             (*load_into_picture)(
                 target,
                 asset_id.clone(),
+                filename.clone(),
+                mime.clone(),
                 local_path.clone(),
                 resolution_toggle.is_active(),
             );
@@ -1255,4 +1365,22 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
 
     ui.nav.push(&page);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::original_preview_cache_path;
+
+    #[test]
+    fn original_preview_cache_path_keeps_decoder_extension() {
+        let cache = std::path::Path::new("/tmp/previews");
+        assert_eq!(
+            original_preview_cache_path(cache, "remote-id", "PXL_20250516_222429137.dng"),
+            cache.join("remote-id.dng")
+        );
+        assert_eq!(
+            original_preview_cache_path(cache, "remote-id", "extensionless"),
+            cache.join("remote-id.bin")
+        );
+    }
 }

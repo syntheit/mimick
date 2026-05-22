@@ -477,9 +477,20 @@ fn schedule_thumbnail_load(
         let cache = ctx.thumbnail_cache.clone();
         let result = match local_path {
             Some(path) => {
-                cache
+                let local_res = cache
                     .load_local_thumbnail_cancellable(&asset_id, &path, is_cancelled.clone())
-                    .await
+                    .await;
+                if local_res.is_err() && !asset_id.starts_with(crate::library::LOCAL_ID_PREFIX) {
+                    cache
+                        .load_thumbnail_cancellable(
+                            &asset_id,
+                            crate::api_client::ThumbnailSize::Thumbnail,
+                            is_cancelled.clone(),
+                        )
+                        .await
+                } else {
+                    local_res
+                }
             }
             None => {
                 cache

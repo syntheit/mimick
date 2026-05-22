@@ -364,8 +364,21 @@ impl ThumbnailCache {
             let pixbuf = raw.apply_embedded_orientation().unwrap_or(raw);
             let _ = std::fs::create_dir_all(&cache_dir);
             let _ = pixbuf.savev(&cache_file, "png", &[]);
-            #[allow(deprecated)]
-            Ok(Texture::for_pixbuf(&pixbuf))
+            let format = if pixbuf.has_alpha() {
+                gdk4::MemoryFormat::R8g8b8a8
+            } else {
+                gdk4::MemoryFormat::R8g8b8
+            };
+            let bytes = pixbuf.read_pixel_bytes();
+            let mem_tex = gdk4::MemoryTexture::new(
+                pixbuf.width(),
+                pixbuf.height(),
+                format,
+                &bytes,
+                pixbuf.rowstride() as usize,
+            );
+            use gtk::prelude::Cast;
+            Ok(mem_tex.upcast::<Texture>())
         })
         .await
         .map_err(|err| err.to_string())??;
@@ -481,8 +494,21 @@ async fn decode_to_scaled_texture(bytes: Vec<u8>) -> Result<Texture, String> {
             gtk::gio::Cancellable::NONE,
         )
         .map_err(|err| err.to_string())?;
-        #[allow(deprecated)]
-        Ok(Texture::for_pixbuf(&pixbuf))
+        let format = if pixbuf.has_alpha() {
+            gdk4::MemoryFormat::R8g8b8a8
+        } else {
+            gdk4::MemoryFormat::R8g8b8
+        };
+        let bytes = pixbuf.read_pixel_bytes();
+        let mem_tex = gdk4::MemoryTexture::new(
+            pixbuf.width(),
+            pixbuf.height(),
+            format,
+            &bytes,
+            pixbuf.rowstride() as usize,
+        );
+        use gtk::prelude::Cast;
+        Ok(mem_tex.upcast::<Texture>())
     })
     .await
     .map_err(|err| err.to_string())?

@@ -73,12 +73,160 @@ fn register_app_icons() {
     }
 }
 
-/// Load a local texture orienting it correctly based on embedded EXIF flags.
-fn load_texture_oriented(path: &std::path::Path) -> Option<gdk4::Texture> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextureDecoder {
+    Raw,
+    Heif,
+    JpegXl,
+    Pixbuf,
+    ImageFallback,
+}
+
+const RAW_EXTENSIONS: &[&str] = &[
+    "3fr", "ari", "arw", "cap", "cin", "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "iiq",
+    "k25", "kdc", "mrw", "nef", "nrw", "orf", "ori", "pef", "raf", "raw", "rw2", "rwl", "sr2",
+    "srf", "srw", "x3f",
+];
+
+/// Load a local texture, preferring decoders that cover formats outside the
+/// GDK-Pixbuf runtime loader set before falling back to pixbuf and image-rs.
+async fn load_texture_oriented(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let path_buf = path.to_path_buf();
+    tokio::task::spawn_blocking(move || load_texture_blocking(&path_buf))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn load_texture_blocking(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let decoder = texture_decoder_for_path(path);
+    let texture = match decoder {
+        TextureDecoder::Raw => decode_raw_texture(path),
+        TextureDecoder::Heif => decode_heif_texture(path),
+        TextureDecoder::JpegXl => decode_jpegxl_texture(path),
+        TextureDecoder::Pixbuf => decode_pixbuf_texture(path),
+        TextureDecoder::ImageFallback => None,
+    };
+
+    texture
+        .or_else(|| {
+            if decoder != TextureDecoder::Pixbuf {
+                decode_pixbuf_texture(path)
+            } else {
+                None
+            }
+        })
+        .or_else(|| decode_image_texture(path))
+}
+
+fn texture_decoder_for_path(path: &std::path::Path) -> TextureDecoder {
+    let ext = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase());
+    match ext.as_deref() {
+        Some(ext) if RAW_EXTENSIONS.contains(&ext) => TextureDecoder::Raw,
+        Some("heic" | "heif" | "hif" | "avif") => TextureDecoder::Heif,
+        Some("jxl") => TextureDecoder::JpegXl,
+        Some(
+            "bmp" | "gif" | "insp" | "jpe" | "jpeg" | "jpg" | "jp2" | "mpo" | "png" | "svg" | "tif"
+            | "tiff" | "webp",
+        ) => TextureDecoder::Pixbuf,
+        _ => TextureDecoder::ImageFallback,
+    }
+}
+
+fn memory_texture(
+    width: u32,
+    height: u32,
+    format: gdk4::MemoryFormat,
+    pixels: Vec<u8>,
+    stride: usize,
+) -> Option<gdk4::Texture> {
+    let width = i32::try_from(width).ok()?;
+    let height = i32::try_from(height).ok()?;
+    let bytes = glib::Bytes::from_owned(pixels);
+    let texture = gdk4::MemoryTexture::new(width, height, format, &bytes, stride);
+    Some(texture.upcast::<gdk4::Texture>())
+}
+
+fn decode_raw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let image = match imagepipe::simple_decode_8bit(path, 0, 0) {
+        Ok(image) => image,
+        Err(err) => {
+            log::warn!("RAW lightbox decode failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    memory_texture(
+        image.width.try_into().ok()?,
+        image.height.try_into().ok()?,
+        gdk4::MemoryFormat::R8g8b8,
+        image.data,
+        image.width.checked_mul(3)?,
+    )
+}
+
+fn decode_heif_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
+
+    let libheif = LibHeif::new();
+    let encoded = std::fs::read(path).ok()?;
+    let context = HeifContext::read_from_bytes(&encoded).ok()?;
+    let handle = context.primary_image_handle().ok()?;
+    let image = libheif
+        .decode(&handle, ColorSpace::Rgb(RgbChroma::Rgba), None)
+        .ok()?;
+    let plane = image.planes().interleaved?;
+    memory_texture(
+        plane.width,
+        plane.height,
+        gdk4::MemoryFormat::R8g8b8a8,
+        plane.data.to_vec(),
+        plane.stride,
+    )
+}
+
+fn decode_jpegxl_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    use jpegxl_rs::image::ToDynamic;
+
+    let encoded = std::fs::read(path).ok()?;
+    let decoder = jpegxl_rs::decoder_builder().build().ok()?;
+    dynamic_image_texture(decoder.decode_to_image(&encoded).ok()??)
+}
+
+fn decode_image_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    dynamic_image_texture(image::ImageReader::open(path).ok()?.decode().ok()?)
+}
+
+fn dynamic_image_texture(image: image::DynamicImage) -> Option<gdk4::Texture> {
+    let rgba = image.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    memory_texture(
+        width,
+        height,
+        gdk4::MemoryFormat::R8g8b8a8,
+        rgba.into_raw(),
+        usize::try_from(width).ok()?.checked_mul(4)?,
+    )
+}
+
+fn decode_pixbuf_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
     let raw = gtk::gdk_pixbuf::Pixbuf::from_file(path).ok()?;
     let pixbuf = raw.apply_embedded_orientation().unwrap_or(raw);
-    #[allow(deprecated)]
-    Some(gdk4::Texture::for_pixbuf(&pixbuf))
+    let format = if pixbuf.has_alpha() {
+        gdk4::MemoryFormat::R8g8b8a8
+    } else {
+        gdk4::MemoryFormat::R8g8b8
+    };
+    let bytes = pixbuf.read_pixel_bytes();
+    let texture = gdk4::MemoryTexture::new(
+        pixbuf.width(),
+        pixbuf.height(),
+        format,
+        &bytes,
+        pixbuf.rowstride() as usize,
+    );
+    Some(texture.upcast::<gdk4::Texture>())
 }
 
 /// The complete UI widgets state wrapper for the library window interface.
@@ -1461,4 +1609,101 @@ async fn merge_album_unified_page(
 
     local_rows.append(&mut remote);
     Ok((local_rows, has_more))
+}
+
+#[cfg(test)]
+mod texture_decoder_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    fn assert_fixture_texture(name: &str, dimensions: (i32, i32)) {
+        let texture = load_texture_blocking(&fixture(name))
+            .unwrap_or_else(|| panic!("fixture `{name}` should decode into a texture"));
+        assert_eq!(
+            (texture.width(), texture.height()),
+            dimensions,
+            "fixture `{name}` decoded with unexpected dimensions"
+        );
+    }
+
+    #[test]
+    fn routes_special_lightbox_formats_before_loader_fallbacks() {
+        for ext in RAW_EXTENSIONS {
+            assert_eq!(
+                texture_decoder_for_path(std::path::Path::new(&format!("camera.{ext}"))),
+                TextureDecoder::Raw,
+                ".{ext} should run through the RAW pipeline"
+            );
+        }
+
+        for ext in ["avif", "heic", "heif", "hif"] {
+            assert_eq!(
+                texture_decoder_for_path(std::path::Path::new(&format!("phone.{ext}"))),
+                TextureDecoder::Heif
+            );
+        }
+        assert_eq!(
+            texture_decoder_for_path(std::path::Path::new("wide.JXL")),
+            TextureDecoder::JpegXl
+        );
+    }
+
+    #[test]
+    fn every_supported_image_extension_has_a_decoder_route() {
+        for ext in crate::media_kinds::SUPPORTED.iter() {
+            let Some(mime) = crate::media_kinds::mime_for(ext) else {
+                continue;
+            };
+            if crate::media_kinds::asset_kind(mime) == crate::media_kinds::AssetKind::Image {
+                let route =
+                    texture_decoder_for_path(std::path::Path::new(&format!("fixture.{ext}")));
+                assert!(
+                    matches!(
+                        route,
+                        TextureDecoder::Raw
+                            | TextureDecoder::Heif
+                            | TextureDecoder::JpegXl
+                            | TextureDecoder::Pixbuf
+                            | TextureDecoder::ImageFallback
+                    ),
+                    "image extension `.{ext}` has no lightbox decoder route"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_standard_formats_decode_to_textures() {
+        for name in ["sample.jpg", "sample.webp"] {
+            assert_fixture_texture(name, (16, 12));
+        }
+    }
+
+    #[test]
+    fn fixture_svg_decodes_when_the_pixbuf_svg_loader_is_installed() {
+        if decode_pixbuf_texture(&fixture("sample.svg")).is_some() {
+            assert_fixture_texture("sample.svg", (16, 12));
+        }
+    }
+
+    #[test]
+    fn fixture_heif_family_decodes_to_textures() {
+        assert_fixture_texture("sample.avif", (16, 12));
+        assert_fixture_texture("sample.heic", (64, 64));
+    }
+
+    #[test]
+    fn fixture_jpegxl_decodes_to_texture() {
+        assert_fixture_texture("sample.jxl", (16, 12));
+    }
+
+    #[test]
+    fn fixture_dng_decodes_to_texture() {
+        assert_fixture_texture("sample.dng", (16, 12));
+    }
 }

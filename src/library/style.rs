@@ -235,6 +235,18 @@ image.mimick-loader-icon {
     -gtk-icon-shadow: 0 2px 12px alpha(black, 0.45);
     animation: mimick-icon-spin 2.4s ease-in-out infinite;
 }
+
+picture.mimick-lightbox-picture {
+    background-color: alpha(@view_fg_color, 0.05);
+}
+
+box.mimick-preview-unavailable {
+    min-width: 240px;
+    padding: 20px;
+    border-radius: 8px;
+    background-color: alpha(@window_bg_color, 0.92);
+    border: 1px solid alpha(@view_fg_color, 0.16);
+}
 "#;
 
 static REGISTERED: OnceLock<()> = OnceLock::new();

@@ -34,6 +34,11 @@ flexi_logger = "0.31.8"
 thumbhash = "0.1"
 base64 = "0.22"
 nom-exif = "3.4.2"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "bmp", "tiff", "webp", "avif"] }
+libheif-rs = { version = "2.7.0", default-features = false, features = ["v1_20"] }
+jpegxl-rs = "0.14.0"
+rawloader = "0.37.1"
+imagepipe = "0.5.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
