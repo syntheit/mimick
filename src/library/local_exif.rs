@@ -34,9 +34,6 @@ pub struct LocalExif {
     pub image_width: Option<u32>,
     pub image_height: Option<u32>,
     pub description: Option<String>,
-    /// EXIF orientation tag (1..=8). The lightbox texture loader already
-    /// applies orientation, but the details pane surfaces it explicitly.
-    pub orientation: Option<u16>,
 }
 
 impl LocalExif {
@@ -55,7 +52,6 @@ impl LocalExif {
             && self.image_width.is_none()
             && self.image_height.is_none()
             && self.description.is_none()
-            && self.orientation.is_none()
     }
 }
 
@@ -81,6 +77,7 @@ pub fn read_exif(path: &Path) -> Option<LocalExif> {
         return None;
     }
     let meta = rexiv2::Metadata::new_from_path(path).ok()?;
+    let gps = meta.get_gps_info();
 
     let exif = LocalExif {
         make: tag_string(&meta, "Exif.Image.Make"),
@@ -101,14 +98,13 @@ pub fn read_exif(path: &Path) -> Option<LocalExif> {
                 .or_else(|| tag_string(&meta, "Exif.Photo.OffsetTime"))
                 .as_deref(),
         ),
-        latitude: meta.get_gps_info().map(|gps| gps.latitude),
-        longitude: meta.get_gps_info().map(|gps| gps.longitude),
+        latitude: gps.map(|g| g.latitude),
+        longitude: gps.map(|g| g.longitude),
         image_width: meta.get_pixel_width().try_into().ok(),
         image_height: meta.get_pixel_height().try_into().ok(),
         description: tag_string(&meta, "Exif.Image.ImageDescription")
             .or_else(|| tag_string(&meta, "Xmp.dc.description"))
             .filter(|s| !s.trim().is_empty()),
-        orientation: tag_u32(&meta, "Exif.Image.Orientation").and_then(|n| u16::try_from(n).ok()),
     };
 
     if exif.is_empty() { None } else { Some(exif) }
@@ -196,7 +192,10 @@ fn tag_string(meta: &rexiv2::Metadata, tag: &str) -> Option<String> {
 }
 
 fn tag_u32(meta: &rexiv2::Metadata, tag: &str) -> Option<u32> {
-    meta.get_tag_numeric(tag).try_into().ok()
+    // rexiv2 returns 0 for both "tag absent" and "value is 0"; treat <= 0
+    // as absent since ISO 0 and orientation 0 are invalid EXIF values.
+    let v = meta.get_tag_numeric(tag);
+    if v <= 0 { None } else { u32::try_from(v).ok() }
 }
 
 fn tag_rational(meta: &rexiv2::Metadata, tag: &str) -> Option<f64> {
@@ -217,8 +216,7 @@ fn parse_exif_datetime(raw: Option<&str>, offset: Option<&str>) -> Option<String
         return None;
     }
     // Replace the two date colons with dashes: `2024:01:15 14:25:15` -> `2024-01-15 14:25:15`.
-    let bytes = raw.as_bytes();
-    if bytes.len() < 19 {
+    if !raw.is_ascii() || raw.len() < 19 {
         return None;
     }
     let mut out = String::with_capacity(25);
@@ -240,6 +238,22 @@ fn parse_exif_datetime(raw: Option<&str>, offset: Option<&str>) -> Option<String
 /// used by the thumbnail cache. Created lazily on first cache miss.
 pub fn cache_root() -> PathBuf {
     crate::profile::cache_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+/// Linker shim: rexiv2 0.10 references `gexiv2_metadata_free` but
+/// gexiv2 >= 0.14 removed it. Forwards to `g_object_unref`.
+// nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gexiv2_metadata_free(metadata: *mut std::ffi::c_void) {
+    unsafe extern "C" {
+        fn g_object_unref(object: *mut std::ffi::c_void);
+    }
+    if !metadata.is_null() {
+        // SAFETY: pointer is a live GObject owned by rexiv2::Metadata being dropped.
+        unsafe {
+            g_object_unref(metadata);
+        }
+    }
 }
 
 #[cfg(test)]

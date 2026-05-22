@@ -559,9 +559,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             active_a.set(target_is_a);
             nav_dir.set(0);
 
-            if is_local {
-                // Local-only asset: parse the file's own metadata on a blocking
-                // worker. Hits the on-disk EXIF cache so repeat opens are cheap.
+            if is_local
+                && crate::media_kinds::asset_kind(&mime) != crate::media_kinds::AssetKind::Video
+            {
+                // Local image: parse EXIF on a blocking worker.
+                // Hits the on-disk cache so repeat opens are cheap.
                 details_loading.set_visible(true);
                 let pos_cell_async = pos_cell.clone();
                 let details_loading = details_loading.clone();
