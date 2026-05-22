@@ -90,6 +90,11 @@ fn spawn_enqueue(ctx: Arc<AppContext>, album: Option<(String, String)>, paths: V
                 album_id: album.as_ref().map(|(id, _)| id.clone()),
                 album_name: album.as_ref().map(|(_, name)| name.clone()),
                 reassociate_only: false,
+                // When the user uploads from the library / albums / explore
+                // view (album=None) the asset must land album-less; the
+                // queue's parent-dir-as-album fallback would otherwise create
+                // a junk album named after the user's file system layout.
+                skip_album: album.is_none(),
             };
             if ctx.queue_manager.add_to_queue(task).await {
                 queued += 1;

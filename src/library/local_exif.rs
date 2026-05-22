@@ -1,22 +1,23 @@
 //! EXIF / XMP metadata extraction for local files.
 //!
-//! Uses `rexiv2` (binding to `gexiv2` → `exiv2`) so the tag reader handles
-//! every container exiv2 supports: JPEG, TIFF, PNG, WebP, JXL, HEIC/HEIF/AVIF,
-//! and the major RAW formats (CR2/CR3, NEF, ARW, RAF, ORF, RW2, DNG, ...).
+//! Uses `nom-exif` — pure-Rust, no native dependencies. Reads metadata from
+//! JPEG, PNG, TIFF, WebP, HEIF / HEIC, JXL and MP4 / MOV. RAW formats fall
+//! through as "no metadata"; that case is hidden in the UI rather than shown
+//! as an error.
 //!
-//! Results are cached on disk under the existing app cache directory, keyed by
-//! `(canonical_path, mtime_nanos, size_bytes)` — re-reading a multi-megabyte
-//! RAW each time the user reopens the details pane would be wasteful.
+//! Results are cached on disk keyed by `(mtime, size)` so re-opening the
+//! lightbox on the same file doesn't re-parse a multi-megabyte image.
 
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
+use nom_exif::{EntryValue, Exif, ExifTag, read_exif as nom_read_exif};
 use serde::{Deserialize, Serialize};
 
-/// Subset of EXIF/XMP fields the details pane renders. Mirrors the shape of
-/// the remote `ExifInfo` returned by Immich so the renderer can be source-agnostic.
+/// Subset of EXIF fields the details pane renders. Field shape mirrors the
+/// remote `ExifInfo` returned by Immich so the lightbox renderer can be
+/// source-agnostic.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LocalExif {
     pub make: Option<String>,
@@ -26,8 +27,8 @@ pub struct LocalExif {
     pub focal_length: Option<f64>,
     pub iso: Option<u32>,
     pub exposure_time: Option<String>,
-    /// RFC3339 string when available so we can reuse the existing
-    /// `format_datetime_display` helper without a second parser.
+    /// RFC3339 string when available so the lightbox formatter can convert to
+    /// local time with the existing `format_datetime_display` helper.
     pub date_time_original: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
@@ -37,7 +38,7 @@ pub struct LocalExif {
 }
 
 impl LocalExif {
-    /// True when no useful fields were parsed (helpful for hiding empty groups).
+    /// True when no useful fields were parsed.
     pub fn is_empty(&self) -> bool {
         self.make.is_none()
             && self.model.is_none()
@@ -55,64 +56,40 @@ impl LocalExif {
     }
 }
 
-static INIT: OnceLock<bool> = OnceLock::new();
-
-/// Initialize gexiv2 once per process. The underlying library wraps a non-thread-safe
-/// XML parser and must be primed before any worker hits the API.
-fn ensure_initialized() -> bool {
-    *INIT.get_or_init(|| match rexiv2::initialize() {
-        Ok(()) => true,
-        Err(err) => {
-            log::warn!("rexiv2 initialization failed; local EXIF disabled: {}", err);
-            false
-        }
-    })
-}
-
-/// Read EXIF/XMP for `path`. Returns `None` when the file can't be opened or
-/// has no recognisable metadata container; consumers should hide their EXIF UI
-/// in that case.
+/// Parse EXIF directly from disk. Returns `None` when the file has no
+/// recognisable metadata container.
 pub fn read_exif(path: &Path) -> Option<LocalExif> {
-    if !ensure_initialized() {
-        return None;
-    }
-    let meta = rexiv2::Metadata::new_from_path(path).ok()?;
-    let gps = meta.get_gps_info();
+    let exif = nom_read_exif(path)
+        .map_err(|err| {
+            log::debug!("nom-exif read failed for {}: {}", path.display(), err);
+            err
+        })
+        .ok()?;
 
-    let exif = LocalExif {
-        make: tag_string(&meta, "Exif.Image.Make"),
-        model: tag_string(&meta, "Exif.Image.Model"),
-        lens_model: tag_string(&meta, "Exif.Photo.LensModel")
-            .or_else(|| tag_string(&meta, "Exif.NikonLd3.LensIDNumber"))
-            .or_else(|| tag_string(&meta, "Xmp.aux.Lens")),
-        f_number: tag_rational(&meta, "Exif.Photo.FNumber"),
-        focal_length: tag_rational(&meta, "Exif.Photo.FocalLength"),
-        iso: tag_u32(&meta, "Exif.Photo.ISOSpeedRatings")
-            .or_else(|| tag_u32(&meta, "Exif.Photo.PhotographicSensitivity")),
-        exposure_time: tag_string(&meta, "Exif.Photo.ExposureTime"),
-        date_time_original: parse_exif_datetime(
-            tag_string(&meta, "Exif.Photo.DateTimeOriginal")
-                .or_else(|| tag_string(&meta, "Exif.Image.DateTime"))
-                .as_deref(),
-            tag_string(&meta, "Exif.Photo.OffsetTimeOriginal")
-                .or_else(|| tag_string(&meta, "Exif.Photo.OffsetTime"))
-                .as_deref(),
-        ),
-        latitude: gps.map(|g| g.latitude),
-        longitude: gps.map(|g| g.longitude),
-        image_width: meta.get_pixel_width().try_into().ok(),
-        image_height: meta.get_pixel_height().try_into().ok(),
-        description: tag_string(&meta, "Exif.Image.ImageDescription")
-            .or_else(|| tag_string(&meta, "Xmp.dc.description"))
-            .filter(|s| !s.trim().is_empty()),
+    let local = LocalExif {
+        make: text(&exif, ExifTag::Make),
+        model: text(&exif, ExifTag::Model),
+        lens_model: text(&exif, ExifTag::LensModel).or_else(|| text(&exif, ExifTag::LensMake)),
+        f_number: rational_f64(&exif, ExifTag::FNumber),
+        focal_length: rational_f64(&exif, ExifTag::FocalLength),
+        iso: integer_u32(&exif, ExifTag::ISOSpeedRatings),
+        exposure_time: exposure_time(&exif),
+        date_time_original: datetime_rfc3339(&exif),
+        latitude: exif.gps_info().and_then(|g| g.latitude_decimal()),
+        longitude: exif.gps_info().and_then(|g| g.longitude_decimal()),
+        image_width: integer_u32(&exif, ExifTag::ImageWidth)
+            .or_else(|| integer_u32(&exif, ExifTag::ExifImageWidth)),
+        image_height: integer_u32(&exif, ExifTag::ImageHeight)
+            .or_else(|| integer_u32(&exif, ExifTag::ExifImageHeight)),
+        description: text(&exif, ExifTag::ImageDescription).filter(|s| !s.trim().is_empty()),
     };
 
-    if exif.is_empty() { None } else { Some(exif) }
+    if local.is_empty() { None } else { Some(local) }
 }
 
 /// Load cached EXIF for `path` if the cache entry is still fresh, otherwise
-/// parse, store, and return. Cheap when warm; honours `(mtime, size)`
-/// invalidation so edits to the file aren't masked.
+/// parse, store, and return. The cache key is `(mtime_nanos, size)` so a
+/// file edit invalidates the cached entry automatically.
 pub fn load_or_extract(cache_root: &Path, path: &Path) -> Option<LocalExif> {
     let key = cache_key(path)?;
     let cache_path = cache_root.join("exif").join(format!("{}.json", key.digest));
@@ -178,82 +155,102 @@ fn cache_key(path: &Path) -> Option<CacheKey> {
     })
 }
 
-fn tag_string(meta: &rexiv2::Metadata, tag: &str) -> Option<String> {
-    meta.get_tag_interpreted_string(tag)
-        .ok()
+fn text(exif: &Exif, tag: ExifTag) -> Option<String> {
+    let value = exif.get(tag)?;
+    value
+        .as_str()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            meta.get_tag_string(tag)
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
 }
 
-fn tag_u32(meta: &rexiv2::Metadata, tag: &str) -> Option<u32> {
-    // rexiv2 returns 0 for both "tag absent" and "value is 0"; treat <= 0
-    // as absent since ISO 0 and orientation 0 are invalid EXIF values.
-    let v = meta.get_tag_numeric(tag);
-    if v <= 0 { None } else { u32::try_from(v).ok() }
+fn integer_u32(exif: &Exif, tag: ExifTag) -> Option<u32> {
+    let value = exif.get(tag)?;
+    match value {
+        EntryValue::U32(v) => Some(*v),
+        EntryValue::U16(v) => Some(u32::from(*v)),
+        EntryValue::U8(v) => Some(u32::from(*v)),
+        _ => None,
+    }
 }
 
-fn tag_rational(meta: &rexiv2::Metadata, tag: &str) -> Option<f64> {
-    let v = meta.get_tag_rational(tag)?;
-    let denom = *v.denom();
-    if denom == 0 {
+fn rational_f64(exif: &Exif, tag: ExifTag) -> Option<f64> {
+    let value = exif.get(tag)?;
+    if let Some(r) = value.as_urational() {
+        let n = r.numerator();
+        let d = r.denominator();
+        if d == 0 || n == 0 {
+            return None;
+        }
+        return Some(f64::from(n) / f64::from(d));
+    }
+    value.as_f64()
+}
+
+/// Format ExposureTime as the user-recognisable "1/250" rather than the raw
+/// rational. Returns None for absent or zero values so the row stays hidden.
+fn exposure_time(exif: &Exif) -> Option<String> {
+    let r = exif.get(ExifTag::ExposureTime)?.as_urational()?;
+    let n = r.numerator();
+    let d = r.denominator();
+    if d == 0 || n == 0 {
         return None;
     }
-    Some(f64::from(*v.numer()) / f64::from(denom))
+    if n == 1 {
+        Some(format!("1/{d}"))
+    } else if n > d {
+        // Long exposures like 2/1 → "2 s"
+        let secs = f64::from(n) / f64::from(d);
+        Some(format!("{secs:.1} s"))
+    } else {
+        // Reduce 5/100 → "1/20"-ish display by formatting as the fraction.
+        Some(format!("{n}/{d}"))
+    }
 }
 
-/// EXIF stores `DateTimeOriginal` as `YYYY:MM:DD HH:MM:SS` (no timezone) with
-/// an optional sibling `OffsetTimeOriginal` (`+HH:MM`). Normalise to RFC3339
-/// so the lightbox formatter can convert to local time consistently.
-fn parse_exif_datetime(raw: Option<&str>, offset: Option<&str>) -> Option<String> {
-    let raw = raw?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    // Replace the two date colons with dashes: `2024:01:15 14:25:15` -> `2024-01-15 14:25:15`.
-    if !raw.is_ascii() || raw.len() < 19 {
-        return None;
-    }
-    let mut out = String::with_capacity(25);
-    out.push_str(&raw[..4]);
-    out.push('-');
-    out.push_str(&raw[5..7]);
-    out.push('-');
-    out.push_str(&raw[8..10]);
-    out.push('T');
-    out.push_str(&raw[11..19]);
-    match offset.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(off) => out.push_str(off),
-        None => out.push('Z'),
-    }
-    Some(out)
+/// Combine DateTimeOriginal with OffsetTimeOriginal (when present) into a
+/// stable RFC3339 string.
+fn datetime_rfc3339(exif: &Exif) -> Option<String> {
+    use nom_exif::ExifDateTime;
+    let dt = exif.get(ExifTag::DateTimeOriginal)?.as_datetime()?;
+    let formatted = match dt {
+        ExifDateTime::Aware(dt) => dt.to_rfc3339(),
+        ExifDateTime::Naive(naive) => {
+            // Try to attach an offset if one was recorded separately.
+            let offset = exif
+                .get(ExifTag::OffsetTimeOriginal)
+                .and_then(|v| v.as_str())
+                .and_then(parse_offset);
+            match offset {
+                Some(off) => format!("{}{}", naive.format("%Y-%m-%dT%H:%M:%S"), off),
+                None => format!("{}Z", naive.format("%Y-%m-%dT%H:%M:%S")),
+            }
+        }
+    };
+    Some(formatted)
 }
 
-/// Build the on-disk EXIF cache directory rooted under the same cache parent
-/// used by the thumbnail cache. Created lazily on first cache miss.
+/// Validate a raw "+HH:MM" / "-HH:MM" offset string from OffsetTimeOriginal.
+fn parse_offset(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.len() != 6 || !s.is_ascii() {
+        return None;
+    }
+    let sign = s.as_bytes()[0];
+    if sign != b'+' && sign != b'-' {
+        return None;
+    }
+    if s.as_bytes()[3] != b':' {
+        return None;
+    }
+    s[1..3].parse::<u8>().ok().filter(|h| *h <= 14)?;
+    s[4..6].parse::<u8>().ok().filter(|m| *m <= 59)?;
+    Some(s.to_string())
+}
+
+/// Cache directory for EXIF entries; lives under the same XDG cache root used
+/// by the thumbnail cache.
 pub fn cache_root() -> PathBuf {
     crate::profile::cache_dir().unwrap_or_else(std::env::temp_dir)
-}
-
-/// Linker shim: rexiv2 0.10 references `gexiv2_metadata_free` but
-/// gexiv2 >= 0.14 removed it. Forwards to `g_object_unref`.
-// nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gexiv2_metadata_free(metadata: *mut std::ffi::c_void) {
-    unsafe extern "C" {
-        fn g_object_unref(object: *mut std::ffi::c_void);
-    }
-    if !metadata.is_null() {
-        // SAFETY: pointer is a live GObject owned by rexiv2::Metadata being dropped.
-        unsafe {
-            g_object_unref(metadata);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -281,45 +278,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_exif_datetime_with_offset() {
-        assert_eq!(
-            parse_exif_datetime(Some("2024:01:15 19:55:15"), Some("+05:30")),
-            Some("2024-01-15T19:55:15+05:30".to_string())
-        );
+    fn parse_offset_accepts_typical_form() {
+        assert_eq!(parse_offset("+05:30").as_deref(), Some("+05:30"));
+        assert_eq!(parse_offset("-08:00").as_deref(), Some("-08:00"));
     }
 
     #[test]
-    fn parse_exif_datetime_defaults_to_z_without_offset() {
-        assert_eq!(
-            parse_exif_datetime(Some("2024:01:15 19:55:15"), None),
-            Some("2024-01-15T19:55:15Z".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_exif_datetime_treats_empty_offset_as_missing() {
-        assert_eq!(
-            parse_exif_datetime(Some("2024:01:15 19:55:15"), Some("   ")),
-            Some("2024-01-15T19:55:15Z".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_exif_datetime_rejects_short_input() {
-        assert_eq!(parse_exif_datetime(Some("2024:01:15"), None), None);
-    }
-
-    #[test]
-    fn parse_exif_datetime_returns_none_for_empty_and_missing() {
-        assert_eq!(parse_exif_datetime(Some("   "), None), None);
-        assert_eq!(parse_exif_datetime(None, None), None);
+    fn parse_offset_rejects_bad_strings() {
+        assert!(parse_offset("0530").is_none());
+        assert!(parse_offset("+5:30").is_none());
+        assert!(parse_offset("+15:00").is_none());
+        assert!(parse_offset("+05:60").is_none());
+        assert!(parse_offset("").is_none());
     }
 
     #[test]
     fn cache_key_invalidates_on_mtime_change() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let k1 = cache_key(tmp.path()).expect("key1");
-        // Touching the file with a different mtime should yield a different key.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(tmp.path(), b"changed").unwrap();
         let k2 = cache_key(tmp.path()).expect("key2");
@@ -332,18 +308,18 @@ mod tests {
 
     #[test]
     fn load_or_extract_caches_negative_result() {
-        // A plain text file has no EXIF; we still cache the `None` so we don't
-        // re-parse on every open.
+        // A plain text file has no EXIF; verify we persist the negative
+        // result so we don't re-parse on every reopen.
         let cache_dir = tempfile::tempdir().expect("cache dir");
         let mut data = tempfile::NamedTempFile::new().expect("tempfile");
         use std::io::Write;
         data.write_all(b"not an image").unwrap();
         let first = load_or_extract(cache_dir.path(), data.path());
-        let cache_file_count = std::fs::read_dir(cache_dir.path().join("exif"))
+        let count_after_first = std::fs::read_dir(cache_dir.path().join("exif"))
             .map(|d| d.count())
             .unwrap_or(0);
         let second = load_or_extract(cache_dir.path(), data.path());
         assert_eq!(first.is_some(), second.is_some());
-        assert_eq!(cache_file_count, 1, "negative result is persisted once");
+        assert_eq!(count_after_first, 1, "negative result is persisted once");
     }
 }

@@ -184,6 +184,57 @@ progressbar.mimick-transfer-progress progress {
     background-color: alpha(@accent_bg_color, 0.18);
     opacity: 0.85;
 }
+
+/* Details-pane group accents. The icon classes paint just the prefix icon,
+   keeping the row text in the standard foreground for legibility. */
+.mimick-detail-icon {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 6px;
+    border-radius: 10px;
+    margin: 2px 0;
+    -gtk-icon-size: 16px;
+}
+
+.mimick-accent-camera {
+    color: @accent_color;
+    background-color: alpha(@accent_bg_color, 0.18);
+}
+
+.mimick-accent-image {
+    color: @success_color;
+    background-color: alpha(@success_bg_color, 0.20);
+}
+
+.mimick-accent-location {
+    color: @warning_color;
+    background-color: alpha(@warning_bg_color, 0.22);
+}
+
+scrolledwindow.mimick-details-pane {
+    background: alpha(@window_bg_color, 0.30);
+}
+
+scrolledwindow.mimick-details-pane > viewport > box {
+    padding: 4px;
+}
+
+/* Lightbox image-load spinner. The Mimick app icon eases in from slow
+   rotation, accelerates through the middle of the cycle, then eases back
+   out — giving the breathing rhythm requested for "ramp up / ramp down". */
+@keyframes mimick-icon-spin {
+    0%   { transform: rotate(0deg); }
+    20%  { transform: rotate(40deg); }
+    50%  { transform: rotate(220deg); }
+    80%  { transform: rotate(320deg); }
+    100% { transform: rotate(360deg); }
+}
+
+image.mimick-loader-icon {
+    opacity: 0.85;
+    -gtk-icon-shadow: 0 2px 12px alpha(black, 0.45);
+    animation: mimick-icon-spin 2.4s ease-in-out infinite;
+}
 "#;
 
 static REGISTERED: OnceLock<()> = OnceLock::new();

@@ -543,6 +543,7 @@ async fn main() {
                                 album_id,
                                 album_name,
                                 reassociate_only,
+                                skip_album: false,
                             })
                             .await;
                     }

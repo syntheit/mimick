@@ -288,11 +288,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .transition_type(gtk::StackTransitionType::Crossfade)
         .transition_duration(180)
         .build();
-    let loading_view = build_status_view(
-        "view-refresh-symbolic",
-        "Loading…",
-        "Fetching library data from the Immich server",
-    );
+    let loading_view = build_loading_view();
     let empty_view = build_status_view(
         "image-x-generic-symbolic",
         "Nothing to show",
@@ -1281,6 +1277,41 @@ fn update_transfer_ui(ui: &LibraryWindowUi) {
 }
 
 /// Construct a styled placeholder view containing an icon, header title, and description text.
+/// Centered Mimick-icon spinner used while library data is fetching. Shares
+/// the `mimick-loader-icon` animation with the lightbox image-load spinner.
+fn build_loading_view() -> gtk::Box {
+    let container = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .vexpand(true)
+        .hexpand(true)
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::Center)
+        .css_classes(vec!["mimick-empty".to_string()])
+        .build();
+    let icon = gtk::Image::builder()
+        .icon_name("dev.nicx.mimick")
+        .pixel_size(72)
+        .css_classes(["mimick-loader-icon"])
+        .build();
+    let title = gtk::Label::builder()
+        .label("Loading…")
+        .css_classes(vec!["mimick-empty-title".to_string()])
+        .build();
+    let subtitle = gtk::Label::builder()
+        .label("Fetching library data from the Immich server")
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .justify(gtk::Justification::Center)
+        .max_width_chars(28)
+        .css_classes(vec!["mimick-empty-subtitle".to_string()])
+        .build();
+    container.append(&icon);
+    container.append(&title);
+    container.append(&subtitle);
+    container
+}
+
 fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
     let container = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -1301,6 +1332,7 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .justify(gtk::Justification::Center)
+        .max_width_chars(28)
         .css_classes(vec!["mimick-empty-title".to_string()])
         .build();
     let subtitle_label = gtk::Label::builder()
@@ -1308,6 +1340,7 @@ fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .justify(gtk::Justification::Center)
+        .max_width_chars(28)
         .css_classes(vec!["mimick-empty-subtitle".to_string()])
         .build();
     container.append(&icon);

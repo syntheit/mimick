@@ -21,6 +21,26 @@ use super::download::{
 };
 use super::{LOCAL_ID_PREFIX, LibraryWindowUi, load_source_page, load_texture_oriented};
 
+/// Everything we can learn about a local file off the main thread before
+/// handing the data back to GTK. `exif` is the cached EXIF parse; `dims`
+/// comes from a pixbuf header-only read; `mtime_iso` falls back when the
+/// file has no `DateTimeOriginal` so we always show *some* date.
+struct LocalProbe {
+    exif: Option<LocalExif>,
+    file_size: Option<u64>,
+    mtime_iso: Option<String>,
+    dims: Option<(u32, u32)>,
+}
+
+/// Render a `SystemTime` as an RFC3339 string in the local timezone so the
+/// existing `format_datetime_display` pipeline can format it consistently
+/// with EXIF-derived timestamps.
+fn systemtime_to_rfc3339(t: std::time::SystemTime) -> String {
+    use chrono::{DateTime, Local};
+    let dt: DateTime<Local> = t.into();
+    dt.to_rfc3339()
+}
+
 /// Project local-file metadata into the API EXIF shape so the existing
 /// renderer handles both sources uniformly.
 fn exif_from_local(local: &LocalExif, file_size: Option<u64>) -> ExifInfo {
@@ -45,91 +65,201 @@ fn exif_from_local(local: &LocalExif, file_size: Option<u64>) -> ExifInfo {
     }
 }
 
-/// Populate a vertical container box with structured EXIF metadata rows.
-fn fill_exif_box(container: &gtk::Box, exif: &crate::api_client::ExifInfo) {
-    let mut rows: Vec<(String, String)> = Vec::new();
-    let dims = match (exif.exif_image_width, exif.exif_image_height) {
-        (Some(w), Some(h)) => Some(format!("{} × {}", w, h)),
-        _ => None,
-    };
-    if let Some(d) = dims {
-        rows.push(("Dimensions".into(), d));
+/// Populate the details sidebar with sectioned EXIF metadata.
+///
+/// Groups fall into three categories — Camera, Image, Location — each rendered
+/// as an `AdwPreferencesGroup` with accent-coloured prefix icons. Empty groups
+/// (e.g. an image with no GPS) are skipped so the pane stays compact.
+///
+/// `taken_label` decides whether the date row reads "Taken" (EXIF
+/// DateTimeOriginal — the camera's capture moment) or "Modified" (filesystem
+/// mtime fallback when no capture timestamp exists).
+fn fill_exif_box(container: &gtk::Box, exif: &crate::api_client::ExifInfo, taken_label: &str) {
+    let camera_group = libadwaita::PreferencesGroup::builder()
+        .title("Camera")
+        .build();
+    let mut camera_rows = 0u32;
+    if let Some(c) = format_camera(exif) {
+        camera_group.add(&accent_row(
+            "camera-photo-symbolic",
+            "mimick-accent-camera",
+            "Body",
+            &c,
+        ));
+        camera_rows += 1;
     }
-    if let Some(size) = exif.file_size_in_byte {
-        rows.push(("Size".into(), format_bytes(size)));
-    }
-    if let Some(dt) = &exif.date_time_original {
-        rows.push(("Taken".into(), format_datetime_display(dt)));
-    }
-    let camera = match (&exif.make, &exif.model) {
-        (Some(m), Some(n)) => Some(format!("{} {}", m, n)),
-        (Some(m), None) => Some(m.clone()),
-        (None, Some(n)) => Some(n.clone()),
-        _ => None,
-    };
-    if let Some(c) = camera {
-        rows.push(("Camera".into(), c));
-    }
-    if let Some(l) = &exif.lens_model {
-        rows.push(("Lens".into(), l.clone()));
-    }
-    let mut shot = Vec::new();
-    if let Some(f) = exif.f_number {
-        shot.push(format!("ƒ/{:.1}", f));
-    }
-    if let Some(et) = &exif.exposure_time {
-        shot.push(et.clone());
-    }
-    if let Some(iso) = exif.iso {
-        shot.push(format!("ISO {}", iso));
-    }
-    if let Some(focal) = exif.focal_length {
-        shot.push(format!("{:.0}mm", focal));
-    }
-    if !shot.is_empty() {
-        rows.push(("Exposure".into(), shot.join(" · ")));
-    }
-    let location = match (&exif.city, &exif.state, &exif.country) {
-        (Some(c), Some(s), Some(co)) => Some(format!("{}, {}, {}", c, s, co)),
-        (Some(c), None, Some(co)) => Some(format!("{}, {}", c, co)),
-        (Some(c), _, _) => Some(c.clone()),
-        (_, Some(s), Some(co)) => Some(format!("{}, {}", s, co)),
-        (_, _, Some(co)) => Some(co.clone()),
-        _ => None,
-    };
-    if let Some(loc) = location {
-        rows.push(("Location".into(), loc));
-    }
-    if let (Some(lat), Some(lon)) = (exif.latitude, exif.longitude) {
-        rows.push(("GPS".into(), format!("{:.5}, {:.5}", lat, lon)));
-    }
-    if let Some(desc) = &exif.description
-        && !desc.is_empty()
+    if let Some(l) = &exif.lens_model
+        && !l.trim().is_empty()
     {
-        rows.push(("Description".into(), desc.clone()));
+        camera_group.add(&accent_row(
+            "view-fullscreen-symbolic",
+            "mimick-accent-camera",
+            "Lens",
+            l,
+        ));
+        camera_rows += 1;
+    }
+    if let Some(exposure) = format_exposure(exif) {
+        camera_group.add(&accent_row(
+            "weather-clear-symbolic",
+            "mimick-accent-camera",
+            "Exposure",
+            &exposure,
+        ));
+        camera_rows += 1;
     }
 
-    for (key, value) in rows {
-        let row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(2)
+    let image_group = libadwaita::PreferencesGroup::builder()
+        .title("Image")
+        .build();
+    let mut image_rows = 0u32;
+    if let (Some(w), Some(h)) = (exif.exif_image_width, exif.exif_image_height) {
+        image_group.add(&accent_row(
+            "view-grid-symbolic",
+            "mimick-accent-image",
+            "Dimensions",
+            &format!("{w} × {h}"),
+        ));
+        image_rows += 1;
+    }
+    if let Some(size) = exif.file_size_in_byte {
+        image_group.add(&accent_row(
+            "drive-harddisk-symbolic",
+            "mimick-accent-image",
+            "Size",
+            &format_bytes(size),
+        ));
+        image_rows += 1;
+    }
+    if let Some(dt) = &exif.date_time_original
+        && !dt.trim().is_empty()
+    {
+        image_group.add(&accent_row(
+            "x-office-calendar-symbolic",
+            "mimick-accent-image",
+            taken_label,
+            &format_datetime_display(dt),
+        ));
+        image_rows += 1;
+    }
+
+    let location_group = libadwaita::PreferencesGroup::builder()
+        .title("Location")
+        .build();
+    let mut location_rows = 0u32;
+    if let Some(loc) = format_location(exif) {
+        location_group.add(&accent_row(
+            "mark-location-symbolic",
+            "mimick-accent-location",
+            "Place",
+            &loc,
+        ));
+        location_rows += 1;
+    }
+    if let (Some(lat), Some(lon)) = (exif.latitude, exif.longitude) {
+        location_group.add(&accent_row(
+            "find-location-symbolic",
+            "mimick-accent-location",
+            "Coordinates",
+            &format!("{lat:.5}, {lon:.5}"),
+        ));
+        location_rows += 1;
+    }
+
+    if camera_rows > 0 {
+        container.append(&camera_group);
+    }
+    if image_rows > 0 {
+        container.append(&image_group);
+    }
+    if location_rows > 0 {
+        container.append(&location_group);
+    }
+
+    if let Some(desc) = &exif.description
+        && !desc.trim().is_empty()
+    {
+        let note_group = libadwaita::PreferencesGroup::builder()
+            .title("Description")
             .build();
-        let k = gtk::Label::builder()
-            .label(&key)
-            .xalign(0.0)
-            .css_classes(vec!["caption".to_string(), "dim-label".to_string()])
+        let row = libadwaita::ActionRow::builder()
+            .title(desc.as_str())
+            .title_lines(0)
+            .css_classes(["property"])
             .build();
-        let v = gtk::Label::builder()
-            .label(&value)
-            .xalign(0.0)
-            .wrap(true)
-            .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .max_width_chars(28)
-            .selectable(true)
-            .build();
-        row.append(&k);
-        row.append(&v);
-        container.append(&row);
+        note_group.add(&row);
+        container.append(&note_group);
+    }
+}
+
+fn accent_row(icon: &str, accent_class: &str, title: &str, value: &str) -> libadwaita::ActionRow {
+    let prefix = gtk::Image::builder()
+        .icon_name(icon)
+        .pixel_size(16)
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::Center)
+        .css_classes(["mimick-detail-icon", accent_class])
+        .build();
+    let row = libadwaita::ActionRow::builder()
+        .title(title)
+        .subtitle(value)
+        .subtitle_lines(2)
+        .css_classes(["property"])
+        .build();
+    row.add_prefix(&prefix);
+    row
+}
+
+fn format_camera(exif: &crate::api_client::ExifInfo) -> Option<String> {
+    match (&exif.make, &exif.model) {
+        (Some(m), Some(n)) => {
+            let m = m.trim();
+            let n = n.trim();
+            if n.starts_with(m) {
+                Some(n.to_string())
+            } else {
+                Some(format!("{m} {n}"))
+            }
+        }
+        (Some(m), None) => Some(m.trim().to_string()),
+        (None, Some(n)) => Some(n.trim().to_string()),
+        _ => None,
+    }
+    .filter(|s| !s.is_empty())
+}
+
+fn format_exposure(exif: &crate::api_client::ExifInfo) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(f) = exif.f_number {
+        parts.push(format!("ƒ/{f:.1}"));
+    }
+    if let Some(et) = &exif.exposure_time
+        && !et.trim().is_empty()
+    {
+        parts.push(et.trim().to_string());
+    }
+    if let Some(iso) = exif.iso {
+        parts.push(format!("ISO {iso}"));
+    }
+    if let Some(focal) = exif.focal_length {
+        parts.push(format!("{focal:.0}mm"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn format_location(exif: &crate::api_client::ExifInfo) -> Option<String> {
+    let parts: Vec<&str> = [&exif.city, &exif.state, &exif.country]
+        .into_iter()
+        .filter_map(|s| s.as_deref().map(str::trim).filter(|t| !t.is_empty()))
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
     }
 }
 
@@ -291,6 +421,29 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .hexpand(true)
         .min_content_width(120)
         .build();
+
+    // Spinner overlay: a centered Mimick app icon that rotates while a
+    // full-resolution texture is being fetched / decoded. Hidden by default;
+    // the load_into_picture closure toggles it.
+    let loader_icon = gtk::Image::builder()
+        .icon_name("dev.nicx.mimick")
+        .pixel_size(72)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .css_classes(["mimick-loader-icon"])
+        .build();
+    let loader_overlay = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::Crossfade)
+        .transition_duration(180)
+        .reveal_child(false)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .child(&loader_icon)
+        .can_target(false)
+        .build();
+    let picture_overlay = gtk::Overlay::builder().build();
+    picture_overlay.set_child(Some(&scrolled_picture));
+    picture_overlay.add_overlay(&loader_overlay);
     let active_a = Rc::new(Cell::new(true));
     let zoom_level = Rc::new(Cell::new(1.0_f64));
     let initial_full = ui.ctx.config.read().data.library_preview_full_resolution;
@@ -334,16 +487,16 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     actions.append(&actions_spacer);
     actions.append(&resolution_toggle);
     actions.append(&download);
-    viewer.append(&scrolled_picture);
+    viewer.append(&picture_overlay);
     viewer.append(&actions);
 
     let details_inner = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
+        .spacing(14)
+        .margin_top(14)
+        .margin_bottom(14)
+        .margin_start(10)
+        .margin_end(10)
         .build();
     let details_pane = gtk::ScrolledWindow::builder()
         .child(&details_inner)
@@ -419,14 +572,37 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let pos_cell = Rc::new(Cell::new(position));
     let load_into_picture = Rc::new({
         let ui = ui.clone();
+        let loader_overlay = loader_overlay.clone();
         move |target: gtk::Picture, asset_id: String, local_path: String, full_res: bool| {
             let ui = ui.clone();
+            let loader = loader_overlay.clone();
+            // Don't flash the spinner for the synchronous local-file path —
+            // it'll be gone before the user perceives anything. For network
+            // / decode paths we reveal after a 120ms delay to avoid flicker
+            // on cache hits.
+            let arm_delay_ms = if local_path.is_empty() { 120 } else { 0 };
+            let loader_for_arm = loader.clone();
+            let arm = if arm_delay_ms > 0 {
+                Some(glib::timeout_add_local(
+                    std::time::Duration::from_millis(arm_delay_ms),
+                    move || {
+                        loader_for_arm.set_reveal_child(true);
+                        glib::ControlFlow::Break
+                    },
+                ))
+            } else {
+                None
+            };
             glib::MainContext::default().spawn_local(async move {
                 if !local_path.is_empty() {
                     if let Some(texture) = load_texture_oriented(std::path::Path::new(&local_path))
                     {
                         target.set_paintable(Some(&texture));
                     }
+                    if let Some(src) = arm {
+                        src.remove();
+                    }
+                    loader.set_reveal_child(false);
                     return;
                 }
                 if full_res {
@@ -453,6 +629,10 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                             }
                         {
                             log::warn!("Lightbox original fetch failed: {}", err);
+                            if let Some(src) = arm {
+                                src.remove();
+                            }
+                            loader.set_reveal_child(false);
                             return;
                         }
                         if let Some(texture) = load_texture_oriented(&temp) {
@@ -467,6 +647,10 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 {
                     target.set_paintable(Some(&texture));
                 }
+                if let Some(src) = arm {
+                    src.remove();
+                }
+                loader.set_reveal_child(false);
             });
         }
     });
@@ -572,11 +756,30 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 glib::MainContext::default().spawn_local(async move {
                     let cache_root = local_exif::cache_root();
                     let path_for_blocking = local_path_async.clone();
-                    let parsed = tokio::task::spawn_blocking(move || {
+                    let probed = tokio::task::spawn_blocking(move || {
                         let path = std::path::Path::new(&path_for_blocking);
-                        let file_size = std::fs::metadata(path).ok().map(|m| m.len());
+                        let meta = std::fs::metadata(path).ok();
+                        let file_size = meta.as_ref().map(|m| m.len());
+                        let mtime_iso = meta
+                            .as_ref()
+                            .and_then(|m| m.modified().ok())
+                            .map(systemtime_to_rfc3339);
+                        // Pixbuf header-only read — covers JPEG, PNG, GIF,
+                        // TIFF, WebP and HEIF/AVIF (when loaders installed).
+                        let dims = gtk::gdk_pixbuf::Pixbuf::file_info(path)
+                            .map(|(_, w, h)| (w, h))
+                            .and_then(|(w, h)| {
+                                let w = u32::try_from(w).ok()?;
+                                let h = u32::try_from(h).ok()?;
+                                Some((w, h))
+                            });
                         let exif = local_exif::load_or_extract(&cache_root, path);
-                        (exif, file_size)
+                        LocalProbe {
+                            exif,
+                            file_size,
+                            mtime_iso,
+                            dims,
+                        }
                     })
                     .await
                     .ok();
@@ -584,11 +787,41 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         return;
                     }
                     details_loading.set_visible(false);
-                    let Some((Some(exif), file_size)) = parsed else {
+                    // Render whatever we have. Files without an EXIF block
+                    // (Unsplash, screenshots, edited copies) still get the
+                    // Image group populated from filesystem + Pixbuf, so the
+                    // user always sees *something* in the details pane.
+                    let Some(probe) = probed else {
                         return;
                     };
-                    let info = exif_from_local(&exif, file_size);
-                    fill_exif_box(&details_exif, &info);
+                    if probe.exif.is_none()
+                        && probe.file_size.is_none()
+                        && probe.dims.is_none()
+                        && probe.mtime_iso.is_none()
+                    {
+                        return;
+                    }
+                    let mut info = probe
+                        .exif
+                        .as_ref()
+                        .map_or_else(LocalExif::default, Clone::clone);
+                    if info.image_width.is_none() {
+                        info.image_width = probe.dims.map(|(w, _)| w);
+                    }
+                    if info.image_height.is_none() {
+                        info.image_height = probe.dims.map(|(_, h)| h);
+                    }
+                    let used_mtime_fallback = info.date_time_original.is_none();
+                    if used_mtime_fallback {
+                        info.date_time_original = probe.mtime_iso.clone();
+                    }
+                    let taken_label = if used_mtime_fallback {
+                        "Modified"
+                    } else {
+                        "Taken"
+                    };
+                    let projected = exif_from_local(&info, probe.file_size);
+                    fill_exif_box(&details_exif, &projected, taken_label);
                     details_exif.set_visible(true);
                 });
                 return;
@@ -612,7 +845,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 details_loading.set_visible(false);
                 let Ok(details) = result else { return };
                 if let Some(exif) = details.exif_info {
-                    fill_exif_box(&details_exif, &exif);
+                    fill_exif_box(&details_exif, &exif, "Taken");
                     details_exif.set_visible(true);
                 }
             });

@@ -333,6 +333,7 @@ pub async fn execute_uploads(
             album_id: Some(album_id.clone()),
             album_name: Some(album_name.clone()),
             reassociate_only: false,
+            skip_album: false,
         };
         if ctx.queue_manager.add_to_queue(task).await {
             queued += 1;

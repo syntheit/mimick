@@ -20,32 +20,6 @@ finish-args:
   - --share=network
 
 modules:
-  - name: exiv2
-    buildsystem: cmake-ninja
-    builddir: true
-    config-opts:
-      - -DCMAKE_BUILD_TYPE=Release
-      - -DEXIV2_ENABLE_BMFF=ON
-      - -DEXIV2_BUILD_SAMPLES=OFF
-      - -DEXIV2_BUILD_EXIV2_COMMAND=OFF
-      - -DEXIV2_ENABLE_INIH=OFF
-    sources:
-      - type: archive
-        url: https://github.com/Exiv2/exiv2/archive/refs/tags/v0.28.8.tar.gz
-        sha256: ea51b0609f58a9afa063b60daa1539948b62247721e154f4fff0ad3aec9f9756
-
-  - name: gexiv2
-    buildsystem: meson
-    config-opts:
-      - -Dintrospection=false
-      - -Dvapi=false
-      - -Dpython3=false
-      - -Dtests=false
-    sources:
-      - type: archive
-        url: https://download.gnome.org/sources/gexiv2/0.14/gexiv2-0.14.6.tar.xz
-        sha256: 606c28aaae7b1f3ef5c8eabe5e7dffd7c5a1c866d25b7671fb847fe287a72b8b
-
   - name: mimick
     buildsystem: simple
     build-commands:
