@@ -22,6 +22,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed gtk4 libadwaita glib2 pkgconf base-devel libsecret git jre-openjdk-headless unzip curl gexiv2
+          ln -sf /usr/lib/pkgconfig/gexiv2-*.pc /usr/lib/pkgconfig/gexiv2.pc
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
