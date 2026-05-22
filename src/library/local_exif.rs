@@ -242,6 +242,21 @@ pub fn cache_root() -> PathBuf {
     crate::profile::cache_dir().unwrap_or_else(std::env::temp_dir)
 }
 
+/// FFI compatibility helper defining `gexiv2_metadata_free`.
+///
+/// Calls `g_object_unref` for the metadata object pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gexiv2_metadata_free(metadata: *mut std::ffi::c_void) {
+    unsafe extern "C" {
+        fn g_object_unref(object: *mut std::ffi::c_void);
+    }
+    if !metadata.is_null() {
+        unsafe {
+            g_object_unref(metadata);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,18 +346,5 @@ mod tests {
         let second = load_or_extract(cache_dir.path(), data.path());
         assert_eq!(first.is_some(), second.is_some());
         assert_eq!(cache_file_count, 1, "negative result is persisted once");
-    }
-}
-
-/// FFI compatibility helper defining `gexiv2_metadata_free`.
-///
-/// Calls `g_object_unref` for the metadata object pointer.
-#[no_mangle]
-pub unsafe extern "C" fn gexiv2_metadata_free(metadata: *mut std::ffi::c_void) {
-    extern "C" {
-        fn g_object_unref(object: *mut std::ffi::c_void);
-    }
-    if !metadata.is_null() {
-        g_object_unref(metadata);
     }
 }
