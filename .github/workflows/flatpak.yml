@@ -8,6 +8,15 @@ on:
       - "site/**"
       - "wiki/**"
       - ".github/ISSUE_TEMPLATE/**"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "pv_docs/**"
+      - "site/**"
+      - "wiki/**"
+      - ".github/ISSUE_TEMPLATE/**"
 
 name: CI Build Flatpak
 
