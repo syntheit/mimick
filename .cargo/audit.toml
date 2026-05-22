@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+    "RUSTSEC-2025-0141", # bincode is unmaintained (via imagepipe)
+    "RUSTSEC-2024-0436", # paste is unmaintained (via rav1e/image)
+    "RUSTSEC-2024-0320", # yaml-rust is unmaintained (via serde_yaml/imagepipe)
+]
