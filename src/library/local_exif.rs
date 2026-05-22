@@ -346,4 +346,3 @@ pub unsafe extern "C" fn gexiv2_metadata_free(metadata: *mut std::ffi::c_void) {
         g_object_unref(metadata);
     }
 }
-
