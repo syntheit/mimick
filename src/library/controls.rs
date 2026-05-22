@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use glib::clone;
 use gtk::prelude::*;
+use libadwaita::prelude::*;
 
 use crate::library::asset_object::AssetObject;
 use crate::library::state::{LibrarySortMode, LibrarySource};
@@ -49,6 +50,35 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
         }
     ));
     ui.window.add_action(&action_refresh);
+
+    ui.sidebar.connection_row.connect_activated(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            super::server_stats_dialog::present(ui.ctx.clone(), &ui.window);
+        }
+    ));
+    ui.sidebar.server_row.connect_activated(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            super::server_stats_dialog::present(ui.ctx.clone(), &ui.window);
+        }
+    ));
+
+    ui.upload_button.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            let album = match ui.ctx.library_state.lock().source.clone() {
+                LibrarySource::Album { id, name }
+                | LibrarySource::AlbumLocal { id, name }
+                | LibrarySource::AlbumUnified { id, name } => Some((id, name)),
+                _ => None,
+            };
+            super::upload_picker::pick_and_upload(&ui.window, ui.ctx.clone(), album);
+        }
+    ));
 
     ui.back_button.connect_clicked(clone!(
         #[strong]
@@ -94,6 +124,46 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
         }
     ));
     ui.window.add_controller(f5_controller);
+
+    // Rebuild the sort dropdown model when the visible content view changes:
+    // each view has its own sort taxonomy.
+    ui.content_stack.connect_visible_child_notify(clone!(
+        #[strong]
+        ui,
+        move |stack| {
+            let view = stack.visible_child_name();
+            match view.as_deref() {
+                Some("albums") => {
+                    let model = gtk::StringList::new(&["Newest", "Name", "Most assets"]);
+                    ui.sort_mode.set_model(Some(&model));
+                    ui.sort_mode.set_selected(0);
+                    // Re-purpose the search entry's placeholder to make the
+                    // context-shift obvious to the user.
+                    ui.search_entry.set_placeholder_text(Some("Filter albums"));
+                    let query = ui.search_entry.text().to_string();
+                    super::albums_view::set_search_filter(&ui.albums, &query);
+                }
+                Some("explore") => {
+                    let model = gtk::StringList::new(&["Default"]);
+                    ui.sort_mode.set_model(Some(&model));
+                    ui.sort_mode.set_selected(0);
+                    ui.search_entry.set_placeholder_text(Some("Filter people"));
+                    let query = ui.search_entry.text().to_string();
+                    super::explore_view::set_people_search(&ui.explore, &query);
+                }
+                _ => {
+                    let model = gtk::StringList::new(&["Newest", "Filename", "File Type"]);
+                    ui.sort_mode.set_model(Some(&model));
+                    ui.sort_mode.set_selected(0);
+                    ui.search_entry
+                        .set_placeholder_text(Some("Search filenames"));
+                    // Clear list-view filters when leaving Albums/Explore.
+                    super::albums_view::set_search_filter(&ui.albums, "");
+                    super::explore_view::set_people_search(&ui.explore, "");
+                }
+            }
+        }
+    ));
 
     ui.source_mode.connect_selected_notify(clone!(
         #[strong]
@@ -165,6 +235,20 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
         ui,
         move |entry| {
             let query = entry.text().trim().to_string();
+            // On Albums and Explore pages the search entry filters the
+            // in-memory list rather than hitting the asset-search endpoints.
+            let view = ui.content_stack.visible_child_name();
+            match view.as_deref() {
+                Some("albums") => {
+                    super::albums_view::set_search_filter(&ui.albums, &query);
+                    return;
+                }
+                Some("explore") => {
+                    super::explore_view::set_people_search(&ui.explore, &query);
+                    return;
+                }
+                _ => {}
+            }
             if query.is_empty() {
                 return;
             }
@@ -182,6 +266,25 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
             apply_timeline_ui_state(&ui, &request.1);
             load_source_page(ui.clone(), request, false);
             update_back_button(&ui);
+        }
+    ));
+
+    // Live-filter list views as the user types, without round-tripping the server.
+    ui.search_entry.connect_search_changed(clone!(
+        #[strong]
+        ui,
+        move |entry| {
+            let view = ui.content_stack.visible_child_name();
+            let query = entry.text().to_string();
+            match view.as_deref() {
+                Some("albums") => {
+                    super::albums_view::set_search_filter(&ui.albums, &query);
+                }
+                Some("explore") => {
+                    super::explore_view::set_people_search(&ui.explore, &query);
+                }
+                _ => {}
+            }
         }
     ));
 
@@ -219,6 +322,19 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ui,
         move |dropdown| {
+            // Route sort selection by active view. Albums uses an
+            // album-specific sort taxonomy; Explore intentionally doesn't
+            // sort the people row (curated server order).
+            let view = ui.content_stack.visible_child_name();
+            if view.as_deref() == Some("albums") {
+                let mode = match dropdown.selected() {
+                    1 => super::albums_view::AlbumsSort::Name,
+                    2 => super::albums_view::AlbumsSort::MostAssets,
+                    _ => super::albums_view::AlbumsSort::Newest,
+                };
+                super::albums_view::set_sort_mode(&ui.albums, mode);
+                return;
+            }
             let sort_mode = match dropdown.selected() {
                 1 => LibrarySortMode::Filename,
                 2 => LibrarySortMode::FileType,

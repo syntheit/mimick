@@ -963,4 +963,69 @@ mod tests {
 
         assert_eq!(client.active_route_label().await.as_deref(), Some("WAN"));
     }
+
+    #[test]
+    fn person_deserializes_with_is_hidden_field() {
+        let person: Person = serde_json::from_value(serde_json::json!({
+            "id": "p1",
+            "name": "Alice",
+            "isHidden": true
+        }))
+        .expect("person json");
+        assert_eq!(person.id, "p1");
+        assert_eq!(person.name, "Alice");
+        assert!(person.is_hidden);
+    }
+
+    #[test]
+    fn person_defaults_is_hidden_when_missing() {
+        let person: Person = serde_json::from_value(serde_json::json!({
+            "id": "p2",
+            "name": ""
+        }))
+        .expect("person json");
+        assert!(!person.is_hidden, "missing isHidden must default to false");
+    }
+
+    #[test]
+    fn server_statistics_parses_usage_by_user() {
+        let stats: ServerStatistics = serde_json::from_value(serde_json::json!({
+            "photos": 42,
+            "videos": 7,
+            "usage": 1024,
+            "usageByUser": [
+                {
+                    "userId": "u1",
+                    "userName": "alice",
+                    "photos": 10,
+                    "videos": 2,
+                    "usage": 512,
+                    "quotaSizeInBytes": 4096
+                }
+            ]
+        }))
+        .expect("server statistics json");
+        assert_eq!(stats.photos, 42);
+        assert_eq!(stats.videos, 7);
+        assert_eq!(stats.usage, 1024);
+        assert_eq!(stats.usage_by_user.len(), 1);
+        let user = &stats.usage_by_user[0];
+        assert_eq!(user.user_name, "alice");
+        assert_eq!(user.photos, 10);
+        assert_eq!(user.quota_size_in_bytes, Some(4096));
+    }
+
+    #[test]
+    fn server_statistics_tolerates_missing_quota() {
+        let stats: ServerStatistics = serde_json::from_value(serde_json::json!({
+            "photos": 0,
+            "videos": 0,
+            "usage": 0,
+            "usageByUser": [
+                { "userId": "u1", "userName": "anon", "photos": 0, "videos": 0, "usage": 0 }
+            ]
+        }))
+        .expect("server statistics json");
+        assert_eq!(stats.usage_by_user[0].quota_size_in_bytes, None);
+    }
 }

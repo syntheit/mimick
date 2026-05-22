@@ -69,9 +69,67 @@ picture.mimick-person-avatar {
     background-color: alpha(@view_fg_color, 0.08);
 }
 
-picture.mimick-explore-tile {
+picture.mimick-explore-tile,
+overlay.mimick-explore-tile {
     border-radius: 6px;
     background-color: alpha(@view_fg_color, 0.08);
+}
+
+box.mimick-explore-spacer {
+    min-width: 130px;
+    min-height: 100px;
+}
+
+window.mimick-wide box.mimick-explore-spacer {
+    min-width: 220px;
+    min-height: 150px;
+}
+
+box.mimick-stat-card {
+    border-radius: 12px;
+    padding: 14px;
+    background: alpha(@accent_bg_color, 0.08);
+}
+
+box.mimick-stat-card.photo-card {
+    background: alpha(#6a9fc7, 0.14);
+}
+
+box.mimick-stat-card.video-card {
+    background: alpha(#d16c96, 0.14);
+}
+
+box.mimick-stat-card.storage-card {
+    background: alpha(#7bb876, 0.14);
+}
+
+label.mimick-stat-value {
+    font-size: 1.6em;
+    font-weight: 800;
+}
+
+label.mimick-stat-label {
+    font-size: 0.85em;
+    font-weight: 600;
+    opacity: 0.60;
+}
+
+progressbar.mimick-quota-bar trough {
+    min-height: 6px;
+    border-radius: 999px;
+    background: alpha(@window_fg_color, 0.10);
+}
+
+progressbar.mimick-quota-bar progress {
+    min-height: 6px;
+    border-radius: 999px;
+    background: mix(@accent_bg_color, #d16c96, 0.45);
+}
+
+box.mimick-version-badge {
+    border-radius: 999px;
+    padding: 4px 12px;
+    background: alpha(@accent_bg_color, 0.12);
 }
 
 picture.mimick-grid-thumb {
@@ -116,6 +174,15 @@ progressbar.mimick-transfer-progress progress {
     min-height: 18px;
     border-radius: 999px;
     background: mix(@accent_bg_color, #d16c96, 0.45);
+}
+
+.mimick-pressable {
+    transition: background-color 90ms ease-out, opacity 90ms ease-out;
+}
+
+.mimick-pressable:active {
+    background-color: alpha(@accent_bg_color, 0.18);
+    opacity: 0.85;
 }
 "#;
 

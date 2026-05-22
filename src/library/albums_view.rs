@@ -4,7 +4,7 @@
 //! in a responsive flow layout. Selecting a tile navigates the main
 //! grid to that album's contents.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -14,6 +14,15 @@ use crate::api_client::{LibraryAlbum, ThumbnailSize};
 use crate::app_context::AppContext;
 
 pub type AlbumClick = Rc<dyn Fn(&str, String)>;
+
+/// Sort modes available for the albums landing page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AlbumsSort {
+    #[default]
+    Newest,
+    Name,
+    MostAssets,
+}
 
 /// Contains references to individual grid widgets of the albums overview display.
 pub struct AlbumsViewParts {
@@ -26,6 +35,11 @@ pub struct AlbumsViewParts {
     recent_section: gtk::Box,
     owned_section: gtk::Box,
     shared_section: gtk::Box,
+    cached_albums: Rc<RefCell<Vec<LibraryAlbum>>>,
+    cached_click: Rc<RefCell<Option<AlbumClick>>>,
+    pub search_query: Rc<RefCell<String>>,
+    pub sort_mode: Rc<Cell<AlbumsSort>>,
+    cached_ctx: Rc<RefCell<Option<Arc<AppContext>>>>,
 }
 
 /// Construct the hierarchical panels and containers for the albums listing page.
@@ -80,6 +94,11 @@ pub fn build_albums_view() -> AlbumsViewParts {
         recent_section,
         owned_section,
         shared_section,
+        cached_albums: Rc::new(RefCell::new(Vec::new())),
+        cached_click: Rc::new(RefCell::new(None)),
+        search_query: Rc::new(RefCell::new(String::new())),
+        sort_mode: Rc::new(Cell::new(AlbumsSort::default())),
+        cached_ctx: Rc::new(RefCell::new(None)),
     }
 }
 
@@ -90,24 +109,96 @@ pub fn populate_albums(
     albums: Vec<LibraryAlbum>,
     on_click: AlbumClick,
 ) {
+    *parts.cached_albums.borrow_mut() = albums;
+    *parts.cached_click.borrow_mut() = Some(on_click);
+    *parts.cached_ctx.borrow_mut() = Some(ctx);
+    render_albums(parts);
+}
+
+/// Set the current search filter and re-render. Empty string clears the filter.
+pub fn set_search_filter(parts: &AlbumsViewParts, query: &str) {
+    *parts.search_query.borrow_mut() = query.to_string();
+    render_albums(parts);
+}
+
+/// Set the current sort mode and re-render.
+pub fn set_sort_mode(parts: &AlbumsViewParts, mode: AlbumsSort) {
+    parts.sort_mode.set(mode);
+    render_albums(parts);
+}
+
+/// Pure projection over the cached album list. Returns the (recent, owned,
+/// shared) buckets that drive the three Albums-view rows after applying the
+/// active search filter and sort mode. Extracted from `render_albums` so the
+/// ordering rules can be unit-tested without GTK.
+pub(crate) fn project_albums<'a>(
+    albums: &'a [LibraryAlbum],
+    current_user: &str,
+    query: &str,
+    sort: AlbumsSort,
+) -> (
+    Vec<&'a LibraryAlbum>,
+    Vec<&'a LibraryAlbum>,
+    Vec<&'a LibraryAlbum>,
+) {
+    let query = query.to_ascii_lowercase();
+    let filtered: Vec<&LibraryAlbum> = albums
+        .iter()
+        .filter(|a| query.is_empty() || a.album_name.to_ascii_lowercase().contains(&query))
+        .collect();
+
+    let mut sorted: Vec<&LibraryAlbum> = filtered.clone();
+    match sort {
+        AlbumsSort::Newest => sorted.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+        AlbumsSort::Name => sorted.sort_by(|a, b| {
+            a.album_name
+                .to_ascii_lowercase()
+                .cmp(&b.album_name.to_ascii_lowercase())
+        }),
+        AlbumsSort::MostAssets => sorted.sort_by_key(|a| std::cmp::Reverse(a.asset_count)),
+    }
+
+    // The "Recent" bucket always reflects creation order, even when the user
+    // picks a different sort for the main owned/shared rows.
+    let recent: Vec<&LibraryAlbum> = if matches!(sort, AlbumsSort::Newest) {
+        sorted.iter().copied().take(8).collect()
+    } else {
+        let mut by_date: Vec<&LibraryAlbum> = filtered.clone();
+        by_date.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        by_date.into_iter().take(8).collect()
+    };
+
+    let owned: Vec<&LibraryAlbum> = sorted
+        .iter()
+        .copied()
+        .filter(|a| !current_user.is_empty() && a.owner_id == current_user)
+        .collect();
+    let shared: Vec<&LibraryAlbum> = sorted
+        .iter()
+        .copied()
+        .filter(|a| !current_user.is_empty() && a.owner_id != current_user)
+        .collect();
+
+    (recent, owned, shared)
+}
+
+fn render_albums(parts: &AlbumsViewParts) {
+    let ctx_opt = parts.cached_ctx.borrow().clone();
+    let on_click_opt = parts.cached_click.borrow().clone();
+    let (Some(ctx), Some(on_click)) = (ctx_opt, on_click_opt) else {
+        return;
+    };
+
     clear(&parts.recent_grid);
     clear(&parts.owned_grid);
     clear(&parts.shared_grid);
 
     let current_user = ctx.current_user_id.lock().clone().unwrap_or_default();
+    let query = parts.search_query.borrow().clone();
+    let sort = parts.sort_mode.get();
 
-    let mut recent: Vec<&LibraryAlbum> = albums.iter().collect();
-    recent.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let recent: Vec<&LibraryAlbum> = recent.into_iter().take(8).collect();
-
-    let owned: Vec<&LibraryAlbum> = albums
-        .iter()
-        .filter(|a| !current_user.is_empty() && a.owner_id == current_user)
-        .collect();
-    let shared: Vec<&LibraryAlbum> = albums
-        .iter()
-        .filter(|a| !current_user.is_empty() && a.owner_id != current_user)
-        .collect();
+    let albums = parts.cached_albums.borrow();
+    let (recent, owned, shared) = project_albums(&albums, &current_user, &query, sort);
 
     for album in &recent {
         parts
@@ -144,11 +235,12 @@ fn build_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
         .build();
     let grid = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
-        .max_children_per_line(6)
+        .max_children_per_line(20)
         .min_children_per_line(2)
         .row_spacing(12)
         .column_spacing(12)
         .homogeneous(true)
+        .halign(gtk::Align::Start)
         .build();
     section.append(&label);
     section.append(&grid);
@@ -160,16 +252,25 @@ fn album_tile(ctx: Arc<AppContext>, album: &LibraryAlbum, on_click: AlbumClick) 
     let tile_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
-        .hexpand(true)
+        .build();
+
+    // Fixed-height thumbnail container (same pattern as explore_tile):
+    // the Overlay sizes itself from the spacer child (100px) so portrait
+    // cover images cannot inflate the row height.
+    let thumb = gtk::Overlay::builder()
+        .overflow(gtk::Overflow::Hidden)
+        .css_classes(vec!["mimick-explore-tile".to_string()])
+        .build();
+    let spacer = gtk::Box::builder()
+        .css_classes(vec!["mimick-explore-spacer".to_string()])
         .build();
     let picture = gtk::Picture::builder()
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Cover)
-        .height_request(100)
-        .hexpand(true)
-        .vexpand(false)
-        .css_classes(vec!["mimick-explore-tile".to_string()])
         .build();
+    thumb.set_child(Some(&spacer));
+    thumb.add_overlay(&picture);
+
     let meta_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
@@ -194,14 +295,12 @@ fn album_tile(ctx: Arc<AppContext>, album: &LibraryAlbum, on_click: AlbumClick) 
         .build();
     meta_row.append(&title_label);
     meta_row.append(&count_label);
-    tile_box.append(&picture);
+    tile_box.append(&thumb);
     tile_box.append(&meta_row);
 
     let button = gtk::Button::builder()
         .child(&tile_box)
         .css_classes(vec!["flat".to_string()])
-        .hexpand(true)
-        .halign(gtk::Align::Fill)
         .build();
 
     if let Some(thumb_id) = album.thumbnail_asset_id.clone() {
@@ -240,5 +339,116 @@ fn spawn_thumbnail(ctx: Arc<AppContext>, asset_id: String, picture: gtk::Picture
 fn clear(flow: &gtk::FlowBox) {
     while let Some(child) = flow.first_child() {
         flow.remove(&child);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn album(id: &str, name: &str, owner: &str, count: u32, created: &str) -> LibraryAlbum {
+        LibraryAlbum {
+            id: id.into(),
+            album_name: name.into(),
+            asset_count: count,
+            thumbnail_asset_id: None,
+            created_at: created.into(),
+            updated_at: created.into(),
+            description: String::new(),
+            owner_id: owner.into(),
+            shared: false,
+        }
+    }
+
+    fn fixture() -> Vec<LibraryAlbum> {
+        vec![
+            album("a1", "Beach Trip", "me", 200, "2024-06-01T00:00:00Z"),
+            album("a2", "Family", "friend", 50, "2025-01-10T00:00:00Z"),
+            album("a3", "Archive 2020", "me", 1000, "2020-12-31T00:00:00Z"),
+            album("a4", "beach-volleyball", "me", 12, "2023-09-15T00:00:00Z"),
+        ]
+    }
+
+    #[test]
+    fn project_filters_by_case_insensitive_substring() {
+        let items = fixture();
+        let (_, owned, _) = project_albums(&items, "me", "beach", AlbumsSort::Name);
+        let names: Vec<&str> = owned.iter().map(|a| a.album_name.as_str()).collect();
+        assert_eq!(names, vec!["Beach Trip", "beach-volleyball"]);
+    }
+
+    #[test]
+    fn project_sort_newest_orders_by_created_desc() {
+        let items = fixture();
+        let (_, owned, _) = project_albums(&items, "me", "", AlbumsSort::Newest);
+        let ids: Vec<&str> = owned.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["a1", "a4", "a3"]);
+    }
+
+    #[test]
+    fn project_sort_name_is_case_insensitive() {
+        let items = fixture();
+        let (_, owned, _) = project_albums(&items, "me", "", AlbumsSort::Name);
+        let names: Vec<&str> = owned.iter().map(|a| a.album_name.as_str()).collect();
+        // "Archive 2020", "Beach Trip", "beach-volleyball" — lowercase-sorted.
+        assert_eq!(
+            names,
+            vec!["Archive 2020", "Beach Trip", "beach-volleyball"]
+        );
+    }
+
+    #[test]
+    fn project_sort_most_assets_descends() {
+        let items = fixture();
+        let (_, owned, _) = project_albums(&items, "me", "", AlbumsSort::MostAssets);
+        let counts: Vec<u32> = owned.iter().map(|a| a.asset_count).collect();
+        assert_eq!(counts, vec![1000, 200, 12]);
+    }
+
+    #[test]
+    fn project_buckets_by_owner() {
+        let items = fixture();
+        let (_, owned, shared) = project_albums(&items, "me", "", AlbumsSort::Newest);
+        assert_eq!(owned.len(), 3);
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].id, "a2");
+    }
+
+    #[test]
+    fn project_empty_current_user_excludes_from_both_buckets() {
+        // Without a known user id we can't safely classify owner vs shared,
+        // so both buckets stay empty to avoid mis-labeling.
+        let items = fixture();
+        let (recent, owned, shared) = project_albums(&items, "", "", AlbumsSort::Newest);
+        assert!(owned.is_empty());
+        assert!(shared.is_empty());
+        // Recent still populates regardless of user identity.
+        assert_eq!(recent.len(), 4);
+    }
+
+    #[test]
+    fn project_recent_always_by_date_even_under_alternate_sort() {
+        let items = fixture();
+        let (recent, _, _) = project_albums(&items, "me", "", AlbumsSort::MostAssets);
+        let ids: Vec<&str> = recent.iter().map(|a| a.id.as_str()).collect();
+        // Recent is creation-order, not asset-count, so the "Family" album
+        // (newest) leads even though it's not the largest.
+        assert_eq!(ids[0], "a2");
+    }
+
+    #[test]
+    fn project_recent_caps_at_eight() {
+        let mut items = Vec::new();
+        for i in 0..20 {
+            items.push(album(
+                &format!("id{i}"),
+                &format!("Album {i}"),
+                "me",
+                i,
+                &format!("2024-01-{:02}T00:00:00Z", i + 1),
+            ));
+        }
+        let (recent, _, _) = project_albums(&items, "me", "", AlbumsSort::Newest);
+        assert_eq!(recent.len(), 8);
     }
 }

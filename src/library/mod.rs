@@ -46,6 +46,7 @@ pub mod asset_model;
 pub mod asset_object;
 pub mod explore_view;
 pub mod grid_view;
+pub mod local_exif;
 pub mod local_source;
 pub mod sidebar;
 pub mod state;
@@ -59,6 +60,8 @@ mod controls;
 mod download;
 mod filters;
 mod lightbox;
+mod server_stats_dialog;
+mod upload_picker;
 
 const PAGE_SIZE: u32 = 50;
 
@@ -98,6 +101,8 @@ struct LibraryWindowUi {
     search_mode: gtk::DropDown,
     sort_mode: gtk::DropDown,
     source_mode: gtk::DropDown,
+    source_revealer: gtk::Revealer,
+    upload_button: gtk::Button,
     filters_button: gtk::Button,
     timeline_toggle: gtk::ToggleButton,
     timeline_banner: gtk::Label,
@@ -138,11 +143,13 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .icon_name("sidebar-show-symbolic")
         .tooltip_text("Toggle sidebar (F9)")
         .active(true)
+        .css_classes(["mimick-pressable"])
         .build();
     let back_button = gtk::Button::builder()
         .icon_name("go-previous-symbolic")
         .tooltip_text("Back (Alt+Left)")
         .sensitive(false)
+        .css_classes(["mimick-pressable"])
         .build();
     let menu = gtk::gio::Menu::new();
     menu.append(Some("Refresh"), Some("win.refresh"));
@@ -152,6 +159,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .icon_name("open-menu-symbolic")
         .menu_model(&menu)
         .tooltip_text("Menu")
+        .css_classes(["mimick-pressable"])
         .build();
     header.pack_start(&sidebar_toggle);
     header.pack_start(&back_button);
@@ -201,7 +209,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .placeholder_text("Search filenames")
         .hexpand(true)
         .width_chars(6)
-        .max_width_chars(24)
+        .max_width_chars(18)
         .build();
     let filters_button = gtk::Button::builder()
         .icon_name("view-more-symbolic")
@@ -213,11 +221,26 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .selected(0)
         .build();
 
+    let upload_button = gtk::Button::builder()
+        .icon_name("document-send-symbolic")
+        .tooltip_text("Upload to library")
+        .css_classes(["suggested-action", "mimick-pressable"])
+        .build();
+
+    // Source mode (Remote/Local/Unified) is meaningful only inside a linked
+    // album; the revealer is unhidden by `apply_view_chrome` per source kind.
+    let source_revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideRight)
+        .transition_duration(180)
+        .reveal_child(false)
+        .build();
+    source_revealer.set_child(Some(&source_mode));
+
     let source_group = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .build();
-    source_group.append(&source_mode);
+    source_group.append(&source_revealer);
     source_group.append(&timeline_toggle);
 
     let search_group = gtk::Box::builder()
@@ -234,6 +257,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .spacing(8)
         .build();
     sort_group.append(&sort_mode);
+    sort_group.append(&upload_button);
 
     let controls = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -258,7 +282,12 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .margin_start(12)
         .build();
 
-    let content_stack = gtk::Stack::builder().vexpand(true).hexpand(true).build();
+    let content_stack = gtk::Stack::builder()
+        .vexpand(true)
+        .hexpand(true)
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .transition_duration(180)
+        .build();
     let loading_view = build_status_view(
         "view-refresh-symbolic",
         "Loading…",
@@ -414,7 +443,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     window.set_content(Some(&nav));
 
     let breakpoint = libadwaita::Breakpoint::new(
-        libadwaita::BreakpointCondition::parse("max-width: 750sp")
+        libadwaita::BreakpointCondition::parse("max-width: 600sp")
             .expect("valid breakpoint condition"),
     );
     breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
@@ -430,7 +459,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     window.add_breakpoint(breakpoint);
 
     let desktop_bp = libadwaita::Breakpoint::new(
-        libadwaita::BreakpointCondition::parse("min-width: 750sp")
+        libadwaita::BreakpointCondition::parse("min-width: 600sp")
             .expect("valid breakpoint condition"),
     );
     let window_for_desktop_apply = window.clone();
@@ -497,6 +526,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         search_mode,
         sort_mode,
         source_mode,
+        source_revealer,
+        upload_button: upload_button.clone(),
         filters_button: filters_button.clone(),
         timeline_toggle,
         timeline_banner,
@@ -697,6 +728,12 @@ fn apply_timeline_ui_state(ui: &LibraryWindowUi, source: &LibrarySource) {
             | LibrarySource::UnifiedSearch { .. }
             | LibrarySource::AlbumUnified { .. }
     );
+    let in_album = matches!(
+        source,
+        LibrarySource::Album { .. }
+            | LibrarySource::AlbumLocal { .. }
+            | LibrarySource::AlbumUnified { .. }
+    );
     let remote_search_allowed = !is_local && !is_unified;
     let is_narrow = ui.narrow.get();
     ui.search_mode
@@ -705,6 +742,15 @@ fn apply_timeline_ui_state(ui: &LibraryWindowUi, source: &LibrarySource) {
         .set_visible(remote_search_allowed && !is_narrow);
     if !remote_search_allowed {
         ui.search_mode.set_selected(0);
+    }
+
+    // Source-mode (Remote/Local/Unified) only relevant inside an album.
+    ui.source_revealer.set_reveal_child(in_album);
+
+    if in_album {
+        ui.upload_button.set_tooltip_text(Some("Upload to album"));
+    } else {
+        ui.upload_button.set_tooltip_text(Some("Upload to library"));
     }
 
     // Keep source dropdown visually consistent with the active source so
@@ -884,6 +930,7 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
     if !append {
         ui.content_stack.set_visible_child_name("loading");
     }
+    log::debug!("Loading library source {:?} page={}", request.1, request.2);
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
         ui,
@@ -1018,13 +1065,19 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                                 .reset(&ui.ctx, &state.assets, &state.sort_mode);
                         }
                     }
+                    // Lock is released before touching GTK widgets so that
+                    // signal handlers triggered by the stack transition
+                    // can safely re-acquire library_state.
                     sync_content_state(&ui);
                     reload_sidebar(&ui);
                     update_timeline_banner_if_active(&ui, &ui.grid.scrolled.vadjustment());
                 }
                 Err(err) => {
-                    let mut state = ui.ctx.library_state.lock();
-                    state.mark_error(generation, err.clone());
+                    {
+                        let mut state = ui.ctx.library_state.lock();
+                        state.mark_error(generation, err.clone());
+                    }
+                    // Lock dropped before GTK calls (same pattern as Ok path).
                     ui.error_label
                         .set_label(&format!("Could not load library assets: {}", err));
                     ui.content_stack.set_visible_child_name("error");
@@ -1110,27 +1163,46 @@ fn select_fixed_row(list: &gtk::ListBox, key: &str) {
 }
 
 /// Sync the visibility of the grid, loading, empty, and error page widgets.
+///
+/// The lock on `library_state` is released **before** calling
+/// `set_visible_child_name` because that GTK call triggers widget
+/// realization, factory binds, and signal handlers that may need to
+/// re-acquire the same lock.  Holding it across the call caused a
+/// parking_lot deadlock on first library open.
 fn sync_content_state(ui: &LibraryWindowUi) {
-    match &ui.ctx.library_state.lock().load_state {
-        LibraryLoadState::Idle | LibraryLoadState::Loading => {
-            ui.content_stack.set_visible_child_name("loading");
+    let (child_name, error_msg) = {
+        let state = ui.ctx.library_state.lock();
+        match &state.load_state {
+            LibraryLoadState::Idle | LibraryLoadState::Loading => ("loading", None),
+            LibraryLoadState::Loaded => ("grid", None),
+            LibraryLoadState::Empty => ("empty", None),
+            LibraryLoadState::Error(msg) => ("error", Some(msg.clone())),
         }
-        LibraryLoadState::Loaded => {
-            ui.content_stack.set_visible_child_name("grid");
-        }
-        LibraryLoadState::Empty => {
-            ui.content_stack.set_visible_child_name("empty");
-        }
-        LibraryLoadState::Error(message) => {
-            ui.error_label.set_label(message);
-            ui.content_stack.set_visible_child_name("error");
-        }
+    };
+    if let Some(msg) = error_msg {
+        ui.error_label.set_label(&msg);
     }
+    ui.content_stack.set_visible_child_name(child_name);
 }
 
 /// Update the status sidebar rows with the current server route and statistics.
 fn update_footer(ui: &LibraryWindowUi, route: Option<String>) {
-    let state = ui.ctx.library_state.lock();
+    let (stats_text, about_text) = {
+        let state = ui.ctx.library_state.lock();
+        let stats = state
+            .status
+            .stats
+            .as_ref()
+            .map(|stats| format!("{} photos, {} videos", stats.images, stats.videos))
+            .unwrap_or_else(|| "Statistics unavailable".to_string());
+        let about = state
+            .status
+            .about
+            .as_ref()
+            .map(|about| format!("Immich {}", about.version))
+            .unwrap_or_else(|| "Version unavailable".to_string());
+        (stats, about)
+    };
     let route_subtitle = route
         .as_deref()
         .map(|route| match route {
@@ -1140,22 +1212,9 @@ fn update_footer(ui: &LibraryWindowUi, route: Option<String>) {
         })
         .unwrap_or("Offline");
     ui.sidebar.connection_row.set_subtitle(route_subtitle);
-
-    let stats = state
-        .status
-        .stats
-        .as_ref()
-        .map(|stats| format!("{} photos, {} videos", stats.images, stats.videos))
-        .unwrap_or_else(|| "Statistics unavailable".to_string());
-    let about = state
-        .status
-        .about
-        .as_ref()
-        .map(|about| format!("Immich {}", about.version))
-        .unwrap_or_else(|| "Version unavailable".to_string());
     ui.sidebar
         .server_row
-        .set_subtitle(&format!("{stats} | {about}"));
+        .set_subtitle(&format!("{stats_text} | {about_text}"));
 }
 
 /// Synchronize the ongoing upload/download progress indicator bar and rate information text.

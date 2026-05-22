@@ -614,4 +614,39 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn face_visibility_defaults_favour_discoverable_named_only() {
+        let data = ConfigData::default();
+        assert!(
+            data.show_unnamed_faces,
+            "unnamed people should be visible by default so users see them"
+        );
+        assert!(
+            !data.show_hidden_faces,
+            "hidden people stay hidden by default"
+        );
+    }
+
+    #[test]
+    fn face_visibility_flags_round_trip_through_json() {
+        let data = ConfigData {
+            show_unnamed_faces: false,
+            show_hidden_faces: true,
+            ..ConfigData::default()
+        };
+        let json = serde_json::to_string(&data).expect("serialize");
+        let restored: ConfigData = serde_json::from_str(&json).expect("deserialize");
+        assert!(!restored.show_unnamed_faces);
+        assert!(restored.show_hidden_faces);
+    }
+
+    #[test]
+    fn face_visibility_flags_default_when_absent_in_json() {
+        // Older config files written before the flags existed must still load.
+        let json = serde_json::to_string(&serde_json::json!({})).unwrap();
+        let restored: ConfigData = serde_json::from_str(&json).expect("deserialize legacy config");
+        assert!(restored.show_unnamed_faces);
+        assert!(!restored.show_hidden_faces);
+    }
 }

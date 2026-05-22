@@ -11,14 +11,39 @@ use glib::clone;
 use gtk::prelude::*;
 use libadwaita::prelude::*;
 
-use crate::api_client::ThumbnailSize;
+use crate::api_client::{ExifInfo, ThumbnailSize};
 use crate::library::asset_object::AssetObject;
+use crate::library::local_exif::{self, LocalExif};
 
 use super::context_menu::show_asset_context_menu;
 use super::download::{
     begin_download_session, finish_download_item, start_download, track_download_item,
 };
 use super::{LOCAL_ID_PREFIX, LibraryWindowUi, load_source_page, load_texture_oriented};
+
+/// Project local-file metadata into the API EXIF shape so the existing
+/// renderer handles both sources uniformly.
+fn exif_from_local(local: &LocalExif, file_size: Option<u64>) -> ExifInfo {
+    ExifInfo {
+        make: local.make.clone(),
+        model: local.model.clone(),
+        lens_model: local.lens_model.clone(),
+        f_number: local.f_number,
+        focal_length: local.focal_length,
+        iso: local.iso,
+        exposure_time: local.exposure_time.clone(),
+        file_size_in_byte: file_size,
+        date_time_original: local.date_time_original.clone(),
+        city: None,
+        state: None,
+        country: None,
+        latitude: local.latitude,
+        longitude: local.longitude,
+        description: local.description.clone(),
+        exif_image_width: local.image_width,
+        exif_image_height: local.image_height,
+    }
+}
 
 /// Populate a vertical container box with structured EXIF metadata rows.
 fn fill_exif_box(container: &gtk::Box, exif: &crate::api_client::ExifInfo) {
@@ -527,7 +552,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             (*load_into_picture)(
                 target,
                 asset_id.clone(),
-                local_path,
+                local_path.clone(),
                 resolution_toggle.is_active(),
             );
             pic_stack.set_visible_child_name(if target_is_a { "a" } else { "b" });
@@ -535,7 +560,35 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             nav_dir.set(0);
 
             if is_local {
-                details_loading.set_visible(false);
+                // Local-only asset: parse the file's own metadata on a blocking
+                // worker. Hits the on-disk EXIF cache so repeat opens are cheap.
+                details_loading.set_visible(true);
+                let pos_cell_async = pos_cell.clone();
+                let details_loading = details_loading.clone();
+                let details_exif = details_exif.clone();
+                let local_path_async = local_path.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let cache_root = local_exif::cache_root();
+                    let path_for_blocking = local_path_async.clone();
+                    let parsed = tokio::task::spawn_blocking(move || {
+                        let path = std::path::Path::new(&path_for_blocking);
+                        let file_size = std::fs::metadata(path).ok().map(|m| m.len());
+                        let exif = local_exif::load_or_extract(&cache_root, path);
+                        (exif, file_size)
+                    })
+                    .await
+                    .ok();
+                    if pos_cell_async.get() != pos {
+                        return;
+                    }
+                    details_loading.set_visible(false);
+                    let Some((Some(exif), file_size)) = parsed else {
+                        return;
+                    };
+                    let info = exif_from_local(&exif, file_size);
+                    fill_exif_box(&details_exif, &info);
+                    details_exif.set_visible(true);
+                });
                 return;
             }
 

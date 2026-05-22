@@ -31,6 +31,8 @@ pub struct ExploreViewParts {
     pub people_filter_button: gtk::MenuButton,
     cached_people: Rc<RefCell<Vec<Person>>>,
     cached_people_click: Rc<RefCell<Option<PersonClick>>>,
+    pub search_query: Rc<RefCell<String>>,
+    cached_ctx: Rc<RefCell<Option<Arc<AppContext>>>>,
 }
 
 /// Construct the hierarchical panels and containers for the explore dashboard view.
@@ -71,6 +73,8 @@ pub fn build_explore_view() -> ExploreViewParts {
         people_filter_button,
         cached_people: Rc::new(RefCell::new(Vec::new())),
         cached_people_click: Rc::new(RefCell::new(None)),
+        search_query: Rc::new(RefCell::new(String::new())),
+        cached_ctx: Rc::new(RefCell::new(None)),
     }
 }
 
@@ -125,8 +129,9 @@ fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
         .row_spacing(8)
         .column_spacing(8)
         .min_children_per_line(2)
-        .max_children_per_line(6)
+        .max_children_per_line(20)
         .homogeneous(true)
+        .halign(gtk::Align::Start)
         .build();
     section.append(&grid);
     (section, grid)
@@ -156,6 +161,18 @@ pub fn populate_people<F>(
 {
     *parts.cached_people.borrow_mut() = people;
     *parts.cached_people_click.borrow_mut() = Some(Rc::new(on_click));
+    *parts.cached_ctx.borrow_mut() = Some(ctx.clone());
+    render_people(parts, ctx);
+}
+
+/// Apply (or clear) the search filter on the people row. Pass an empty string
+/// to disable filtering. Caller drives this from the header-bar search entry
+/// when the Explore view is the active content stack child.
+pub fn set_people_search(parts: &ExploreViewParts, query: &str) {
+    *parts.search_query.borrow_mut() = query.to_string();
+    let Some(ctx) = parts.cached_ctx.borrow().clone() else {
+        return;
+    };
     render_people(parts, ctx);
 }
 
@@ -168,10 +185,12 @@ fn render_people(parts: &ExploreViewParts, ctx: Arc<AppContext>) {
         (cfg.data.show_unnamed_faces, cfg.data.show_hidden_faces)
     };
     let cached = parts.cached_people.borrow();
+    let query = parts.search_query.borrow().to_ascii_lowercase();
     let filtered: Vec<&Person> = cached
         .iter()
         .filter(|p| show_hidden || !p.is_hidden)
         .filter(|p| show_unnamed || !p.name.is_empty())
+        .filter(|p| query.is_empty() || p.name.to_ascii_lowercase().contains(&query))
         .collect();
     parts.people_section.set_visible(!filtered.is_empty());
     let on_click = parts.cached_people_click.borrow().clone();
@@ -267,6 +286,8 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         people_filter_button: parts.people_filter_button.clone(),
         cached_people: parts.cached_people.clone(),
         cached_people_click: parts.cached_people_click.clone(),
+        search_query: parts.search_query.clone(),
+        cached_ctx: parts.cached_ctx.clone(),
     }
 }
 
@@ -387,14 +408,23 @@ fn explore_tile(
     asset_id: &str,
     on_click: ExploreClick,
 ) -> gtk::Button {
+    // Fixed-height thumbnail container: the Overlay sizes itself from the
+    // spacer child (100px) so portrait thumbnails cannot inflate the row
+    // height.  The Picture overlay fills that space with ContentFit::Cover.
+    let thumb = gtk::Overlay::builder()
+        .overflow(gtk::Overflow::Hidden)
+        .css_classes(vec!["mimick-explore-tile".to_string()])
+        .build();
+    let spacer = gtk::Box::builder()
+        .css_classes(vec!["mimick-explore-spacer".to_string()])
+        .build();
     let picture = gtk::Picture::builder()
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Cover)
-        .height_request(100)
-        .hexpand(true)
-        .vexpand(false)
-        .css_classes(vec!["mimick-explore-tile".to_string()])
         .build();
+    thumb.set_child(Some(&spacer));
+    thumb.add_overlay(&picture);
+
     let label = gtk::Label::builder()
         .label(value)
         .xalign(0.0)
@@ -406,16 +436,13 @@ fn explore_tile(
     let inner = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
-        .hexpand(true)
         .build();
-    inner.append(&picture);
+    inner.append(&thumb);
     inner.append(&label);
 
     let button = gtk::Button::builder()
         .child(&inner)
         .css_classes(vec!["flat".to_string()])
-        .hexpand(true)
-        .halign(gtk::Align::Fill)
         .build();
 
     let value_owned = value.to_string();
