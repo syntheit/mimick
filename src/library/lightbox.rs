@@ -582,26 +582,26 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             // on cache hits.
             let arm_delay_ms = if local_path.is_empty() { 120 } else { 0 };
             let loader_for_arm = loader.clone();
-            let arm = if arm_delay_ms > 0 {
-                Some(glib::timeout_add_local(
+            let cancel_loader = Rc::new(Cell::new(false));
+            let cancel_for_arm = cancel_loader.clone();
+            if arm_delay_ms > 0 {
+                glib::timeout_add_local(
                     std::time::Duration::from_millis(arm_delay_ms),
                     move || {
-                        loader_for_arm.set_reveal_child(true);
+                        if !cancel_for_arm.get() {
+                            loader_for_arm.set_reveal_child(true);
+                        }
                         glib::ControlFlow::Break
                     },
-                ))
-            } else {
-                None
-            };
+                );
+            }
             glib::MainContext::default().spawn_local(async move {
                 if !local_path.is_empty() {
                     if let Some(texture) = load_texture_oriented(std::path::Path::new(&local_path))
                     {
                         target.set_paintable(Some(&texture));
                     }
-                    if let Some(src) = arm {
-                        src.remove();
-                    }
+                    cancel_loader.set(true);
                     loader.set_reveal_child(false);
                     return;
                 }
@@ -629,9 +629,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                             }
                         {
                             log::warn!("Lightbox original fetch failed: {}", err);
-                            if let Some(src) = arm {
-                                src.remove();
-                            }
+                            cancel_loader.set(true);
                             loader.set_reveal_child(false);
                             return;
                         }
@@ -647,9 +645,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 {
                     target.set_paintable(Some(&texture));
                 }
-                if let Some(src) = arm {
-                    src.remove();
-                }
+                cancel_loader.set(true);
                 loader.set_reveal_child(false);
             });
         }

@@ -386,7 +386,11 @@ pub(super) fn connect_sidebar_handlers(ui: Rc<LibraryWindowUi>) {
                     if let Some(parent) = ui.album_link_row.parent() {
                         parent.set_visible(false);
                     }
-                    ui.content_stack.set_visible_child_name("albums");
+                    if !ui.albums.populated.get() {
+                        ui.content_stack.set_visible_child_name("loading");
+                    } else {
+                        ui.content_stack.set_visible_child_name("albums");
+                    }
                     refresh_albums_view(ui.clone());
                 }
                 _ => {}

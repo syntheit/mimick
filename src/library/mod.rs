@@ -677,8 +677,16 @@ fn refresh_albums_view(ui: Rc<LibraryWindowUi>) {
             Ok(albums) => {
                 let on_click = album_click_handler(ui.clone());
                 populate_albums(&ui.albums, ui.ctx.clone(), albums, on_click);
+                ui.content_stack.set_visible_child_name("albums");
             }
-            Err(err) => log::warn!("Albums fetch failed: {}", err),
+            Err(err) => {
+                log::warn!("Albums fetch failed: {}", err);
+                if !ui.albums.populated.get() {
+                    ui.error_label
+                        .set_label(&format!("Could not load albums: {}", err));
+                    ui.content_stack.set_visible_child_name("error");
+                }
+            }
         }
     });
 }
@@ -854,10 +862,11 @@ fn load_status(ui: Rc<LibraryWindowUi>) {
 
 /// Load smart/metadata sections onto the Explore dashboard view.
 fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
-    ui.content_stack.set_visible_child_name("explore");
     if ui.explore.populated.get() {
+        ui.content_stack.set_visible_child_name("explore");
         return;
     }
+    ui.content_stack.set_visible_child_name("loading");
     ui.explore.populated.set(true);
     let ctx = ui.ctx.clone();
     explore_view::wire_people_filter(&ui.explore, ctx.clone(), || {});
@@ -913,6 +922,7 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                     load_source_page(click_ui.clone(), request, false);
                 },
             );
+            ui.content_stack.set_visible_child_name("explore");
         }
     ));
 }
