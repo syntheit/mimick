@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Lightbox trackpad pinch-to-zoom now works reliably and is smooth. Zoom is now jitter-free: scroll adjustment ranges are pre-set synchronously to match the new content size so the scroll position applies in the same frame as the resize, eliminating the one-frame flicker from the previous deferred update.
 - Album/explore tile thumbnails now maintain uniform sizes within a viewport and display correctly at 360px window width, with no collapse on window-height changes.
 - FlowBox children per line constraints adjusted (min 2, max 6 for albums) to ensure 2-column layout on mobile while limiting tile width growth on desktop.
 - Raw asset handling and EXIF metadata extraction now properly exports `gexiv2_metadata_free` for modern gexiv2 linking compatibility.

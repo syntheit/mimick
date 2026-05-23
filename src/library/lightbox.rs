@@ -328,17 +328,20 @@ fn truncate_filename(name: &str, max_chars: usize) -> String {
 }
 
 /// Apply zoom to a lightbox Picture. Zoom is fit-relative: 1.0 = the size the
-/// texture would occupy inside `viewer` under Contain layout. > 1.0 overflows
-/// the viewer for panning. At 1.0 we restore (-1, -1) so the picture
-/// auto-resizes with the window.
-fn apply_lightbox_zoom(picture: &gtk::Picture, viewer: &gtk::ScrolledWindow, zoom: f64) {
+/// texture would occupy inside `viewer` under Contain layout. >1.0 overflows
+/// the viewer for panning. Returns the computed content dimensions when zoomed.
+fn apply_lightbox_zoom(
+    picture: &gtk::Picture,
+    viewer: &gtk::ScrolledWindow,
+    zoom: f64,
+) -> Option<(f64, f64)> {
     if (zoom - 1.0).abs() < 0.001 {
         picture.set_size_request(-1, -1);
-        return;
+        return None;
     }
     let Some(paintable) = picture.paintable() else {
         picture.set_size_request(-1, -1);
-        return;
+        return None;
     };
     let nw = paintable.intrinsic_width().max(1) as f64;
     let nh = paintable.intrinsic_height().max(1) as f64;
@@ -351,7 +354,10 @@ fn apply_lightbox_zoom(picture: &gtk::Picture, viewer: &gtk::ScrolledWindow, zoo
     } else {
         (viewer_w, viewer_w / texture_aspect)
     };
-    picture.set_size_request((fit_w * zoom) as i32, (fit_h * zoom) as i32);
+    let cw = fit_w * zoom;
+    let ch = fit_h * zoom;
+    picture.set_size_request(cw as i32, ch as i32);
+    Some((cw, ch))
 }
 
 /// Construct and present the fullscreen lightbox view for a selected asset.
@@ -435,6 +441,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .child(&pic_stack)
         .vexpand(true)
         .hexpand(true)
+        .kinetic_scrolling(false)
         .min_content_width(120)
         .build();
 
@@ -502,6 +509,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .halign(gtk::Align::Fill)
         .valign(gtk::Align::Fill)
         .child(&unavailable_card)
+        .can_target(false)
         .build();
     picture_overlay.add_overlay(&unavailable_overlay);
     let active_a = Rc::new(Cell::new(true));
@@ -652,6 +660,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let unavailable_open = unavailable_open.clone();
             let unavailable_path = unavailable_path.clone();
             unavailable_overlay.set_reveal_child(false);
+            unavailable_overlay.set_can_target(false);
             *unavailable_path.borrow_mut() = None;
             if let Some(texture) = ui
                 .ctx
@@ -687,6 +696,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     unavailable_mime.set_label(&mime);
                     unavailable_open.set_visible(path.is_some());
                     *unavailable_path.borrow_mut() = path;
+                    unavailable_overlay.set_can_target(true);
                     unavailable_overlay.set_reveal_child(true);
                 };
                 if !local_path.is_empty() {
@@ -1106,15 +1116,26 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let target_scroll_y = (scroll_y + fy) * ratio - fy;
 
             zoom_level.set(z_new);
-            apply_lightbox_zoom(&active_picture(), &scrolled_picture, z_new);
+            let content = apply_lightbox_zoom(&active_picture(), &scrolled_picture, z_new);
             zoom_reset_btn.set_label(&format!("{}%", (z_new * 100.0).round() as i32));
 
-            // Defer scroll-position update until after layout has run, so the
-            // ScrolledWindow's adjustment ranges reflect the new picture size.
-            glib::idle_add_local_once(move || {
-                hadj.set_value(target_scroll_x);
-                vadj.set_value(target_scroll_y);
-            });
+            // Pre-set adjustment ranges to match the new content size so the
+            // scroll position can be applied in the same frame. Without this
+            // the value would be clamped to the stale (old-zoom) range and
+            // corrected only after layout, causing a one-frame flicker.
+            if let Some((cw, ch)) = content {
+                hadj.set_upper(cw.max(viewer_w));
+                hadj.set_page_size(viewer_w);
+                vadj.set_upper(ch.max(viewer_h));
+                vadj.set_page_size(viewer_h);
+            } else {
+                hadj.set_upper(viewer_w);
+                hadj.set_page_size(viewer_w);
+                vadj.set_upper(viewer_h);
+                vadj.set_page_size(viewer_h);
+            }
+            hadj.set_value(target_scroll_x);
+            vadj.set_value(target_scroll_y);
         }
     ));
 
@@ -1153,6 +1174,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
 
     // Trackpad pinch-to-zoom.
+    // Attached to the pic_stack (inside the ScrolledWindow) so the gesture
+    // receives touchpad pinch events before the ScrolledWindow's own handlers.
     let pinch = gtk::GestureZoom::new();
     let pinch_start = Rc::new(Cell::new(1.0_f64));
     pinch.connect_begin(clone!(
@@ -1173,7 +1196,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             (*set_zoom)(pinch_start.get() * scale);
         }
     ));
-    scrolled_picture.add_controller(pinch);
+    pic_stack.add_controller(pinch.clone());
 
     // Click-and-drag panning: only acts when zoomed in (otherwise scrollbars
     // have nowhere to scroll to). Snapshots scroll position on begin and
@@ -1203,7 +1226,9 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             scrolled_picture.vadjustment().set_value(sy0 - off_y);
         }
     ));
-    scrolled_picture.add_controller(drag);
+    // Group drag with pinch so GTK treats them as mutually exclusive.
+    drag.group_with(&pinch);
+    pic_stack.add_controller(drag);
 
     // Double-click on the picture: zoom in 2x toward the click position.
     let double_click = gtk::GestureClick::new();
