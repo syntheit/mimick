@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pixbuf and image-rs decode failures in the lightbox now log at debug level instead of silently returning, making future format-support issues diagnosable from `mimick.log`.
 - Dropped MPO from the supported-extensions registry; Immich's server rejects the format, so mimick no longer queues `.mpo` files for upload or tries to render them in the lightbox.
 - Centralized the RAW-extension list in `media_kinds` (next to MIME mappings) and removed the duplicate hardcoded list from `library/mod.rs`. New `media_kinds::is_raw_ext()` helper for callers.
+- Local folder thumbnails now generate correctly for RAW images (CR3, NEF, ARW, DNG, ORF, etc.) and other formats without built-in gdk-pixbuf loaders (HEIF, JXL, JP2, PSD). When `Pixbuf::from_file_at_scale` fails, the thumbnail cache falls back to `load_texture_blocking` (the same decoder pipeline used by the lightbox) and converts the result via `TextureDownloader` (GDK 4.10+) for scaling and disk caching. Previously these assets showed as broken/missing thumbnails in the linked folder local view.
 
 ## [9.5.4] - 2026-05-17
 
