@@ -149,8 +149,11 @@ fn memory_texture(
     Some(texture.upcast::<gdk4::Texture>())
 }
 
+/// Max RAW dimension; full-sensor demosaic OOMs on 24+ MP files.
+const RAW_MAX_DIMENSION: usize = 4096;
+
 fn decode_raw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
-    let image = match imagepipe::simple_decode_8bit(path, 0, 0) {
+    let image = match imagepipe::simple_decode_8bit(path, RAW_MAX_DIMENSION, RAW_MAX_DIMENSION) {
         Ok(image) => image,
         Err(err) => {
             log::warn!("RAW lightbox decode failed for {}: {}", path.display(), err);
@@ -189,9 +192,36 @@ fn decode_heif_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
 fn decode_jpegxl_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
     use jpegxl_rs::image::ToDynamic;
 
-    let encoded = std::fs::read(path).ok()?;
-    let decoder = jpegxl_rs::decoder_builder().build().ok()?;
-    dynamic_image_texture(decoder.decode_to_image(&encoded).ok()??)
+    let encoded = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("JXL read failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let decoder = match jpegxl_rs::decoder_builder().build() {
+        Ok(decoder) => decoder,
+        Err(err) => {
+            log::warn!("JXL decoder init failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    // Force u8; auto-detect picks Float32 for HDR which silently maps to None.
+    let dynamic = match decoder.decode_to_image_with::<u8>(&encoded) {
+        Ok(Some(image)) => image,
+        Ok(None) => {
+            log::warn!(
+                "JXL decoder returned no image for {}: unsupported pixel layout",
+                path.display()
+            );
+            return None;
+        }
+        Err(err) => {
+            log::warn!("JXL decode failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    dynamic_image_texture(dynamic)
 }
 
 fn decode_image_texture(path: &std::path::Path) -> Option<gdk4::Texture> {

@@ -7,17 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Face visibility filters in the Explore view allowing users to show/hide face-tagged assets with server-side filtering via new `personVisibility` parameter.
+- Server Statistics Dialog displaying key library metrics (total assets, photos, videos, archive count, person count, etc.) in a responsive FlowBox layout that adapts to window size.
+- Cargo audit configuration to ignore unmaintained EXIF dependencies, streamlining the security audit workflow.
+
 ### Changed
 
 - Mobile and narrow viewport UI overhaul: optimized component dimensions for 360px width screens, adjusted album and explore tile layouts to 2-column on mobile with uniform sizing, reduced header controls footprint, and improved overall narrow-screen usability.
 - Album and explore view tile rendering now uses fixed 100px height with viewport-responsive width (via FlowBox homogeneous layout), ensuring consistent thumbnail aspect ratios and eliminating layout jitter on window resizes.
 - Grid view minimum columns reduced from 3 to 2 on narrow viewports to fit within 360px width constraints without overflow.
 - Added comprehensive rustdoc comments across all source files: module-level `//!` docs expanded to multi-line descriptions, and doc comments added to all public and private structs, enums, functions, and fields.
+- Top toolbar redesigned with context-aware search, sorting, and action triggers, providing better integration with face filters and statistics features.
+- Explore and album cover layouts now use breakpoint-driven responsive sizing (600sp threshold) to prevent image stretching on different viewport sizes.
+- Server statistics API endpoints enhanced to support library metrics and aggregation queries.
 
 ### Fixed
 
 - Album/explore tile thumbnails now maintain uniform sizes within a viewport and display correctly at 360px window width, with no collapse on window-height changes.
 - FlowBox children per line constraints adjusted (min 2, max 6 for albums) to ensure 2-column layout on mobile while limiting tile width growth on desktop.
+- Raw asset handling and EXIF metadata extraction now properly exports `gexiv2_metadata_free` for modern gexiv2 linking compatibility.
 
 ## [9.5.4] - 2026-05-17
 

@@ -70,7 +70,6 @@ CLAUDE.md
 scripts/sstool.py
 .zed/settings.json
 
-
-#Ignore vscode AI rules
 .github/instructions/codacy.instructions.md
 /.codacy
+tests/fixtures/web_assets

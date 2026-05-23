@@ -7,6 +7,7 @@
 //!
 //! Results are cached on disk keyed by `(mtime, size)` so re-opening the
 //! lightbox on the same file doesn't re-parse a multi-megabyte image.
+//! EXIF / XMP extraction via `nom-exif`. Disk-cached by `(mtime, size)`.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -15,9 +16,7 @@ use std::path::{Path, PathBuf};
 use nom_exif::{EntryValue, Exif, ExifTag, read_exif as nom_read_exif};
 use serde::{Deserialize, Serialize};
 
-/// Subset of EXIF fields the details pane renders. Field shape mirrors the
-/// remote `ExifInfo` returned by Immich so the lightbox renderer can be
-/// source-agnostic.
+/// Mirrors remote `ExifInfo` so the renderer is source-agnostic.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LocalExif {
     pub make: Option<String>,
@@ -27,8 +26,7 @@ pub struct LocalExif {
     pub focal_length: Option<f64>,
     pub iso: Option<u32>,
     pub exposure_time: Option<String>,
-    /// RFC3339 string when available so the lightbox formatter can convert to
-    /// local time with the existing `format_datetime_display` helper.
+    /// RFC3339; consumed by `format_datetime_display`.
     pub date_time_original: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
@@ -56,8 +54,7 @@ impl LocalExif {
     }
 }
 
-/// Parse EXIF directly from disk. Returns `None` when the file has no
-/// recognisable metadata container.
+/// Returns `None` if the file has no recognisable metadata.
 pub fn read_exif(path: &Path) -> Option<LocalExif> {
     let exif = nom_read_exif(path)
         .map_err(|err| {
@@ -87,9 +84,7 @@ pub fn read_exif(path: &Path) -> Option<LocalExif> {
     if local.is_empty() { None } else { Some(local) }
 }
 
-/// Load cached EXIF for `path` if the cache entry is still fresh, otherwise
-/// parse, store, and return. The cache key is `(mtime_nanos, size)` so a
-/// file edit invalidates the cached entry automatically.
+/// Disk-cached `read_exif`; key is `(mtime_nanos, size)`.
 pub fn load_or_extract(cache_root: &Path, path: &Path) -> Option<LocalExif> {
     let key = cache_key(path)?;
     let cache_path = cache_root.join("exif").join(format!("{}.json", key.digest));
@@ -186,8 +181,7 @@ fn rational_f64(exif: &Exif, tag: ExifTag) -> Option<f64> {
     value.as_f64()
 }
 
-/// Format ExposureTime as the user-recognisable "1/250" rather than the raw
-/// rational. Returns None for absent or zero values so the row stays hidden.
+/// Display exposure as "1/250" rather than the raw rational.
 fn exposure_time(exif: &Exif) -> Option<String> {
     let r = exif.get(ExifTag::ExposureTime)?.as_urational()?;
     let n = r.numerator();
