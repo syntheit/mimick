@@ -314,6 +314,10 @@ fn write_raw_decode_cache(path: &std::path::Path, texture: &gdk4::Texture) {
 fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: Interfacing with the external LibRaw C API via FFI bindings.
+    // We check that the context is initialized successfully (non-null),
+    // and wrap the raw pointers in custom RAII guards (LibrawHandle, MemImage)
+    // to guarantee that resources are cleaned up correctly when they go out of scope.
     unsafe {
         let lr = libraw_sys::libraw_init(0);
         if lr.is_null() {
@@ -322,6 +326,7 @@ fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
         struct LibrawHandle(*mut libraw_sys::libraw_data_t);
         impl Drop for LibrawHandle {
             fn drop(&mut self) {
+                // SAFETY: The handle is verified to be non-null and is safe to close.
                 unsafe { libraw_sys::libraw_close(self.0) };
             }
         }
@@ -350,11 +355,15 @@ fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
         struct MemImage(*mut libraw_sys::libraw_processed_image_t);
         impl Drop for MemImage {
             fn drop(&mut self) {
+                // SAFETY: The image buffer is verified to be non-null and is safe to clear.
                 unsafe { libraw_sys::libraw_dcraw_clear_mem(self.0) };
             }
         }
         let _img_guard = MemImage(img);
         let data_size = (*img).data_size as usize;
+        // SAFETY: The image buffer is owned by the `img` memory structure, and its layout is
+        // guaranteed to have at least `data_size` bytes. The slice does not outlive its owner
+        // (as it is dropped prior to `_img_guard` and its contents are immediately copied).
         let bytes = std::slice::from_raw_parts((*img).data.as_ptr(), data_size);
 
         if (*img).type_ == libraw_sys::LibRaw_image_formats_LIBRAW_IMAGE_JPEG {
@@ -482,6 +491,10 @@ fn decode_libraw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
     }
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: Interfacing with the external LibRaw C API via FFI bindings.
+    // We check that the context is initialized successfully (non-null),
+    // and wrap the raw pointers in custom RAII guards (LibrawHandle, MemImage)
+    // to guarantee that resources are cleaned up correctly when they go out of scope.
     unsafe {
         let lr = libraw_sys::libraw_init(0);
         if lr.is_null() {
@@ -491,6 +504,7 @@ fn decode_libraw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
         struct LibrawHandle(*mut libraw_sys::libraw_data_t);
         impl Drop for LibrawHandle {
             fn drop(&mut self) {
+                // SAFETY: The handle is verified to be non-null and is safe to close.
                 unsafe { libraw_sys::libraw_close(self.0) };
             }
         }
@@ -531,6 +545,7 @@ fn decode_libraw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
         struct MemImage(*mut libraw_sys::libraw_processed_image_t);
         impl Drop for MemImage {
             fn drop(&mut self) {
+                // SAFETY: The image buffer is verified to be non-null and is safe to clear.
                 unsafe { libraw_sys::libraw_dcraw_clear_mem(self.0) };
             }
         }
@@ -547,6 +562,9 @@ fn decode_libraw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
             );
             return None;
         }
+        // SAFETY: The image buffer is owned by the `img` memory structure, and its layout is
+        // guaranteed to have at least `data_size` bytes. The slice does not outlive its owner
+        // (as it is dropped prior to `_img_guard` and its contents are immediately copied).
         let pixels = std::slice::from_raw_parts((*img).data.as_ptr(), data_size).to_vec();
         let texture = memory_texture(
             width,

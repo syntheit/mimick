@@ -93,6 +93,9 @@ pub fn build_grid_view(
                 selection_for_toggle.unselect_item(pos);
             }
         });
+        // SAFETY: glib::ObjectExt::set_data is unsafe because GLib's data store is type-erased.
+        // We guarantee safety by strictly pairing POS_DATA_KEY with the `(Rc<Cell<u32>>, Rc<Cell<bool>>)` type
+        // on both storage and retrieval.
         unsafe {
             checkbox.set_data::<(Rc<Cell<u32>>, Rc<Cell<bool>>)>(
                 POS_DATA_KEY,
@@ -139,6 +142,9 @@ pub fn build_grid_view(
         container.add_overlay(&checkbox);
         container.add_overlay(&status);
         container.add_overlay(&video_badge);
+        // SAFETY: glib::ObjectExt::set_data is unsafe because GLib's data store is type-erased.
+        // We guarantee safety by strictly pairing POS_DATA_KEY with the `Rc<Cell<u32>>` type
+        // on both storage and retrieval for the overlay container.
         unsafe {
             container.set_data::<Rc<Cell<u32>>>(POS_DATA_KEY, pos_cell);
         }
@@ -266,6 +272,9 @@ pub fn build_grid_view(
         let mut node = Some(picked);
         while let Some(widget) = node {
             if widget.has_css_class("mimick-cell") {
+                // SAFETY: glib::ObjectExt::data is unsafe because GLib's data store is type-erased.
+                // We guarantee safety because `widget` represents the overlay container ("mimick-cell"),
+                // which is strictly paired with the `Rc<Cell<u32>>` type under POS_DATA_KEY.
                 let pos = unsafe {
                     widget
                         .data::<Rc<Cell<u32>>>(POS_DATA_KEY)
@@ -303,6 +312,9 @@ pub fn build_grid_view(
         let mut node = Some(picked);
         while let Some(widget) = node {
             if widget.has_css_class("mimick-cell") {
+                // SAFETY: glib::ObjectExt::data is unsafe because GLib's data store is type-erased.
+                // We guarantee safety because `widget` represents the overlay container ("mimick-cell"),
+                // which is strictly paired with the `Rc<Cell<u32>>` type under POS_DATA_KEY.
                 let pos = unsafe {
                     widget
                         .data::<Rc<Cell<u32>>>(POS_DATA_KEY)
@@ -367,6 +379,9 @@ fn find_select_checkbox(container: &gtk::Overlay) -> Option<gtk::CheckButton> {
 
 /// Synchronize the checkbutton state with list selection without triggering loops.
 fn sync_checkbox_state(checkbox: &gtk::CheckButton, position: u32, selected: bool) {
+    // SAFETY: glib::ObjectExt::data is unsafe because GLib's data store is type-erased.
+    // We guarantee safety because `checkbox` is strictly paired with the `(Rc<Cell<u32>>, Rc<Cell<bool>>)`
+    // type under POS_DATA_KEY.
     let data = unsafe {
         checkbox
             .data::<(Rc<Cell<u32>>, Rc<Cell<bool>>)>(POS_DATA_KEY)
@@ -519,6 +534,8 @@ const GEN_DATA_KEY: &str = "mimick-cell-gen";
 
 /// Retrieve or initialize the cell generation cell tracking counter.
 fn generation_cell(picture: &gtk::Picture) -> Rc<Cell<u64>> {
+    // SAFETY: glib::ObjectExt::data is unsafe because GLib's data store is type-erased.
+    // We guarantee safety by strictly pairing GEN_DATA_KEY with the `Rc<Cell<u64>>` type on `picture`.
     let existing = unsafe {
         picture
             .data::<Rc<Cell<u64>>>(GEN_DATA_KEY)
@@ -528,6 +545,8 @@ fn generation_cell(picture: &gtk::Picture) -> Rc<Cell<u64>> {
         return cell;
     }
     let cell = Rc::new(Cell::new(0u64));
+    // SAFETY: glib::ObjectExt::set_data is unsafe because GLib's data store is type-erased.
+    // We guarantee safety by strictly pairing GEN_DATA_KEY with the `Rc<Cell<u64>>` type on `picture`.
     unsafe {
         picture.set_data::<Rc<Cell<u64>>>(GEN_DATA_KEY, cell.clone());
     }
