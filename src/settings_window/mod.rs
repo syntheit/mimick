@@ -571,6 +571,26 @@ pub fn build_settings_window_with_parent(
         }
     });
 
+    let raw_cache_row = adw::SwitchRow::builder()
+        .title("Cache Decoded RAW Files")
+        .subtitle(
+            "Store demosaiced RAW images on disk so re-opens are instant. \
+             Disable to save storage.",
+        )
+        .build();
+    library_group.add(&raw_cache_row);
+
+    let ctx_for_raw_cache = ctx.clone();
+    raw_cache_row.connect_active_notify(move |row| {
+        let active = row.is_active();
+        crate::library::set_raw_cache_enabled(active);
+        let mut cfg = ctx_for_raw_cache.config.write();
+        if cfg.data.raw_decode_cache_enabled != active {
+            cfg.data.raw_decode_cache_enabled = active;
+            cfg.save();
+        }
+    });
+
     let cache_adj = gtk::Adjustment::new(80.0, 16.0, 1024.0, 16.0, 64.0, 0.0);
     let cache_size_row = adw::SpinRow::builder()
         .title("Thumbnail Memory Cache (MB)")
@@ -641,6 +661,8 @@ pub fn build_settings_window_with_parent(
         library_view_row,
         #[weak]
         preview_full_row,
+        #[weak]
+        raw_cache_row,
         #[weak]
         cache_size_row,
         #[weak]
@@ -732,6 +754,7 @@ pub fn build_settings_window_with_parent(
             let notifications_enabled = notifications_row.is_active();
             let library_view_enabled = library_view_row.is_active();
             let library_preview_full_resolution = preview_full_row.is_active();
+            let raw_decode_cache_enabled = raw_cache_row.is_active();
             let library_thumbnail_cache_mb = cache_size_row.value() as u32;
             let upload_concurrency = concurrency_row.value() as u8;
             let quiet_hours_enabled = quiet_hours_row.is_active();
@@ -858,6 +881,8 @@ pub fn build_settings_window_with_parent(
                         new_config.data.library_view_enabled = library_view_enabled;
                         new_config.data.library_preview_full_resolution =
                             library_preview_full_resolution;
+                        new_config.data.raw_decode_cache_enabled = raw_decode_cache_enabled;
+                        crate::library::set_raw_cache_enabled(raw_decode_cache_enabled);
                         new_config.data.library_thumbnail_cache_mb = library_thumbnail_cache_mb;
                         new_config.data.startup_catchup_mode = catchup_mode;
                         new_config.data.upload_concurrency = upload_concurrency;
@@ -1286,6 +1311,7 @@ pub fn build_settings_window_with_parent(
     notifications_row.set_active(config.data.notifications_enabled);
     library_view_row.set_active(config.data.library_view_enabled);
     preview_full_row.set_active(config.data.library_preview_full_resolution);
+    raw_cache_row.set_active(config.data.raw_decode_cache_enabled);
     if config.data.library_thumbnail_cache_mb > 0 {
         cache_size_row.set_value(config.data.library_thumbnail_cache_mb as f64);
     }

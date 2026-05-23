@@ -251,6 +251,10 @@ pub struct ConfigData {
     /// In-memory thumbnail cache cap in megabytes (0 = use built-in default of 80MB).
     #[serde(default)]
     pub library_thumbnail_cache_mb: u32,
+    /// When true, decoded RAW textures are cached to disk for faster re-opens.
+    /// Disable to save storage; each cached file is a full-resolution PNG.
+    #[serde(default)]
+    pub raw_decode_cache_enabled: bool,
     /// Show people with no assigned name in the Explore view.
     #[serde(default = "default_true")]
     pub show_unnamed_faces: bool,
@@ -280,6 +284,7 @@ impl Default for ConfigData {
             download_target_path: None,
             library_preview_full_resolution: false,
             library_thumbnail_cache_mb: 0,
+            raw_decode_cache_enabled: false,
             show_unnamed_faces: true,
             show_hidden_faces: false,
         }

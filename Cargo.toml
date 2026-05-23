@@ -68,10 +68,12 @@ jxl-oxide = "0.12.5"
 rawloader = "0.37.1"
 imagepipe = "0.5.0"
 libraw-rs = "0.0.4"
+libraw-rs-sys = "0.0.4"
 resvg = { version = "0.47.0", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 jpeg2k = { version = "0.10.1", default-features = false, features = ["openjpeg-sys", "threads"] }
 turbojpeg = { version = "1.4.0", default-features = false, features = ["cmake"] }
 webp = { version = "0.3.1", default-features = false }
+psd = "0.3.5"
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -83,5 +85,6 @@ glib-build-tools = "0.22"
 opt-level = "z"   # Optimise for binary size (less code = less mapped pages)
 codegen-units = 1 # Full whole-program optimisation
 lto = true        # Link-Time Optimisation – dead code is stripped at link time
-panic = "abort"   # Remove panic unwinding machinery (~60-100 KB of runtime)
+panic = "unwind"  # Keep unwinding so catch_unwind can recover from third-party
+                  # decoder panics (rawloader OOB on malformed RAW files etc.)
 strip = true      # Strip debug symbols from the final binary

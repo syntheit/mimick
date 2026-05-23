@@ -1055,14 +1055,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/flexi_logger/flexi_logger-0.31.8.crate",
-        "sha256": "aea7feddba9b4e83022270d49a58d4a1b3fdad04b34f78cf1ce471f698e42672",
-        "dest": "cargo/vendor/flexi_logger-0.31.8"
+        "url": "https://static.crates.io/crates/flexi_logger/flexi_logger-0.31.9.crate",
+        "sha256": "2e90140a77c0ffbe2e4839e062983ec4ec60d4473e41a4fcce0884809d1b76d6",
+        "dest": "cargo/vendor/flexi_logger-0.31.9"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"aea7feddba9b4e83022270d49a58d4a1b3fdad04b34f78cf1ce471f698e42672\", \"files\": {}}",
-        "dest": "cargo/vendor/flexi_logger-0.31.8",
+        "contents": "{\"package\": \"2e90140a77c0ffbe2e4839e062983ec4ec60d4473e41a4fcce0884809d1b76d6\", \"files\": {}}",
+        "dest": "cargo/vendor/flexi_logger-0.31.9",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -3572,6 +3572,19 @@
         "type": "inline",
         "contents": "{\"package\": \"8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934\", \"files\": {}}",
         "dest": "cargo/vendor/proc-macro2-1.0.106",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/psd/psd-0.3.5.crate",
+        "sha256": "9a25f9b8cfffd65d911baf31a033239f7a0facb755faa2481575b70db5dc9195",
+        "dest": "cargo/vendor/psd-0.3.5"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"9a25f9b8cfffd65d911baf31a033239f7a0facb755faa2481575b70db5dc9195\", \"files\": {}}",
+        "dest": "cargo/vendor/psd-0.3.5",
         "dest-filename": ".cargo-checksum.json"
     },
     {

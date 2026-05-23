@@ -638,6 +638,10 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .connect_notify_local(Some("collapsed"), move |_, _| sync_clone());
 
     let pos_cell = Rc::new(Cell::new(position));
+    // Increments on every navigation. Async load tasks capture the generation
+    // they were started for and skip UI writes if the user has navigated away
+    // by the time their decode finishes (relevant for slow RAW files).
+    let load_gen = Rc::new(Cell::new(0u64));
     let load_into_picture = Rc::new({
         let ui = ui.clone();
         let loader_overlay = loader_overlay.clone();
@@ -646,7 +650,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let unavailable_mime = unavailable_mime.clone();
         let unavailable_open = unavailable_open.clone();
         let unavailable_path = unavailable_path.clone();
+        let load_gen = load_gen.clone();
+        let pic_stack = pic_stack.clone();
+        let active_a = active_a.clone();
         move |target: gtk::Picture,
+              target_is_a: bool,
               asset_id: String,
               filename: String,
               mime: String,
@@ -659,6 +667,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let unavailable_mime = unavailable_mime.clone();
             let unavailable_open = unavailable_open.clone();
             let unavailable_path = unavailable_path.clone();
+            let load_gen = load_gen.clone();
+            let pic_stack = pic_stack.clone();
+            let active_a = active_a.clone();
+            let our_gen = load_gen.get().wrapping_add(1);
+            load_gen.set(our_gen);
             unavailable_overlay.set_reveal_child(false);
             unavailable_overlay.set_can_target(false);
             *unavailable_path.borrow_mut() = None;
@@ -668,8 +681,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 .get_cached(&asset_id, ThumbnailSize::Preview)
             {
                 target.set_paintable(Some(&texture));
-            } else {
-                target.set_paintable(None::<&gtk::gdk::Paintable>);
             }
             // Don't flash the spinner for the synchronous local-file path —
             // it'll be gone before the user perceives anything. For network
@@ -691,6 +702,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 );
             }
             glib::MainContext::default().spawn_local(async move {
+                let is_current = || load_gen.get() == our_gen;
+                let commit_visible = || {
+                    pic_stack.set_visible_child_name(if target_is_a { "a" } else { "b" });
+                    active_a.set(target_is_a);
+                };
                 let show_unavailable = |path: Option<String>| {
                     unavailable_filename.set_label(&filename);
                     unavailable_mime.set_label(&mime);
@@ -703,15 +719,21 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     if let Some(texture) =
                         load_texture_oriented(std::path::Path::new(&local_path)).await
                     {
-                        target.set_paintable(Some(&texture));
-                        cancel_loader.set(true);
-                        loader.set_reveal_child(false);
+                        if is_current() {
+                            target.set_paintable(Some(&texture));
+                            commit_visible();
+                            cancel_loader.set(true);
+                            loader.set_reveal_child(false);
+                        }
                         return;
                     }
                     if asset_id.starts_with(crate::library::LOCAL_ID_PREFIX) {
-                        show_unavailable(Some(local_path));
-                        cancel_loader.set(true);
-                        loader.set_reveal_child(false);
+                        if is_current() {
+                            show_unavailable(Some(local_path));
+                            commit_visible();
+                            cancel_loader.set(true);
+                            loader.set_reveal_child(false);
+                        }
                         return;
                     }
                 }
@@ -739,32 +761,47 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                             }
                         {
                             log::warn!("Lightbox original fetch failed: {}", err);
-                            show_unavailable(None);
-                            cancel_loader.set(true);
-                            loader.set_reveal_child(false);
+                            if is_current() {
+                                show_unavailable(None);
+                                commit_visible();
+                                cancel_loader.set(true);
+                                loader.set_reveal_child(false);
+                            }
                             return;
                         }
-                        if let Some(texture) = load_texture_oriented(&temp).await {
+                        let decoded = load_texture_oriented(&temp).await;
+                        if !is_current() {
+                            return;
+                        }
+                        if let Some(texture) = decoded {
                             target.set_paintable(Some(&texture));
                         } else {
                             show_unavailable(Some(temp.display().to_string()));
                         }
-                    } else {
+                        commit_visible();
+                    } else if is_current() {
                         show_unavailable(None);
+                        commit_visible();
                     }
                 } else {
-                    match ui
+                    let thumb_result = ui
                         .ctx
                         .thumbnail_cache
                         .load_thumbnail(&asset_id, ThumbnailSize::Preview)
-                        .await
-                    {
+                        .await;
+                    if !is_current() {
+                        return;
+                    }
+                    match thumb_result {
                         Ok(texture) => target.set_paintable(Some(&texture)),
                         Err(_) => show_unavailable(None),
                     }
+                    commit_visible();
                 }
-                cancel_loader.set(true);
-                loader.set_reveal_child(false);
+                if is_current() {
+                    cancel_loader.set(true);
+                    loader.set_reveal_child(false);
+                }
             });
         }
     });
@@ -832,7 +869,9 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             resolution_toggle.set_visible(!is_local);
             download.set_visible(!is_local);
 
-            // Pick the *inactive* picture to load into, then transition to it.
+            // Load into the *inactive* picture; commit the slide transition
+            // after the texture is set so the user sees the current image
+            // (with loader spinner) until the new one is actually ready.
             let target_is_a = !active_a.get();
             let target = if target_is_a {
                 picture_a.clone()
@@ -849,14 +888,13 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             });
             (*load_into_picture)(
                 target,
+                target_is_a,
                 asset_id.clone(),
                 filename.clone(),
                 mime.clone(),
                 local_path.clone(),
                 resolution_toggle.is_active(),
             );
-            pic_stack.set_visible_child_name(if target_is_a { "a" } else { "b" });
-            active_a.set(target_is_a);
             nav_dir.set(0);
 
             if is_local
@@ -1226,9 +1264,10 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             scrolled_picture.vadjustment().set_value(sy0 - off_y);
         }
     ));
-    // Group drag with pinch so GTK treats them as mutually exclusive.
+    // Attach drag, then group with pinch — GTK requires both controllers
+    // to be on the same widget before grouping.
+    pic_stack.add_controller(drag.clone());
     drag.group_with(&pinch);
-    pic_stack.add_controller(drag);
 
     // Double-click on the picture: zoom in 2x toward the click position.
     let double_click = gtk::GestureClick::new();

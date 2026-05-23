@@ -17,14 +17,23 @@ pub enum AssetKind {
 }
 
 /// Static set of all supported file extensions for quick membership lookups.
+/// Mirrors Immich's server-accepted formats; MPO is intentionally excluded.
 pub static SUPPORTED: phf::Set<&'static str> = phf_set! {
     "3fr", "3gp", "3gpp", "ari", "arw", "avi", "avif", "bmp", "cap", "cin",
     "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "flv", "gif", "heic",
     "heif", "hif", "iiq", "insp", "insv", "jp2", "jpe", "jpeg", "jpg", "jxl",
     "k25", "kdc", "m2t", "m2ts", "m4v", "mkv", "mov", "mp4", "mpe", "mpeg",
-    "mpg", "mpo", "mrw", "mts", "mxf", "nef", "nrw", "orf", "ori", "pef",
+    "mpg", "mrw", "mts", "mxf", "nef", "nrw", "orf", "ori", "pef",
     "png", "psd", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "svg",
     "tif", "tiff", "ts", "vob", "webm", "webp", "wmv", "x3f",
+};
+
+/// Camera RAW extensions — subset of SUPPORTED that needs RAW-specific
+/// decoding (libraw / imagepipe) instead of pixbuf or image-rs.
+pub static RAW_EXTENSIONS: phf::Set<&'static str> = phf_set! {
+    "3fr", "ari", "arw", "cap", "cin", "cr2", "cr3", "crw", "dcr", "dng",
+    "erf", "fff", "iiq", "k25", "kdc", "mrw", "nef", "nrw", "orf", "ori",
+    "pef", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "x3f",
 };
 
 /// Compile-time mapping from lowercased file extensions to standard MIME types.
@@ -41,7 +50,6 @@ static MIME_BY_EXT: phf::Map<&'static str, &'static str> = phf_map! {
     "jpg" => "image/jpeg",
     "jp2" => "image/jp2",
     "jxl" => "image/jxl",
-    "mpo" => "image/jpeg",
     "png" => "image/png",
     "psd" => "image/vnd.adobe.photoshop",
     "svg" => "image/svg+xml",
@@ -112,6 +120,11 @@ pub fn is_supported_path(path: &Path) -> bool {
 /// Check if a lowercased extension is present in the supported set.
 pub fn is_supported_ext(ext: &str) -> bool {
     SUPPORTED.contains(ext)
+}
+
+/// Whether the extension is a camera RAW format.
+pub fn is_raw_ext(ext: &str) -> bool {
+    RAW_EXTENSIONS.contains(ext)
 }
 
 /// MIME type for a known extension (already lowercased).

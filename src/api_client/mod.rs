@@ -794,7 +794,7 @@ mod tests {
             "iiq", "k25", "kdc", "mrw", "nef", "nrw", "orf", "ori", "pef", "psd", "raf", "raw",
             "rw2", "rwl", "sr2", "srf", "srw", "x3f", // Web image
             "avif", "bmp", "gif", "jpeg", "jpg", "png", "webp", // Other image
-            "heic", "heif", "hif", "insp", "jp2", "jpe", "jxl", "mpo", "svg", "tif", "tiff",
+            "heic", "heif", "hif", "insp", "jp2", "jpe", "jxl", "svg", "tif", "tiff",
             // Video
             "3gp", "3gpp", "avi", "flv", "insv", "m2t", "m2ts", "m4v", "mkv", "mov", "mp4", "mpe",
             "mpeg", "mpg", "mts", "mxf", "ts", "vob", "webm", "wmv",

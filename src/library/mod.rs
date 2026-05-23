@@ -65,6 +65,15 @@ mod upload_picker;
 
 const PAGE_SIZE: u32 = 50;
 
+/// Runtime flag controlling the on-disk RAW decode cache.
+/// Initialised from config at startup; toggled live from the settings UI.
+static RAW_CACHE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Update the runtime RAW cache flag (called from settings and startup).
+pub fn set_raw_cache_enabled(enabled: bool) {
+    RAW_CACHE_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Register application custom icons with the Gtk icon theme system.
 fn register_app_icons() {
     if let Some(display) = gtk::gdk::Display::default() {
@@ -82,15 +91,10 @@ enum TextureDecoder {
     Jpeg,
     Webp,
     Jpeg2k,
+    Psd,
     Pixbuf,
     ImageFallback,
 }
-
-const RAW_EXTENSIONS: &[&str] = &[
-    "3fr", "ari", "arw", "cap", "cin", "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "iiq",
-    "k25", "kdc", "mrw", "nef", "nrw", "orf", "ori", "pef", "raf", "raw", "rw2", "rwl", "sr2",
-    "srf", "srw", "x3f",
-];
 
 /// Load a local texture, preferring decoders that cover formats outside the
 /// GDK-Pixbuf runtime loader set before falling back to pixbuf and image-rs.
@@ -112,6 +116,7 @@ fn load_texture_blocking(path: &std::path::Path) -> Option<gdk4::Texture> {
         TextureDecoder::Jpeg => decode_jpeg_texture(path),
         TextureDecoder::Webp => decode_webp_texture(path),
         TextureDecoder::Jpeg2k => decode_jpeg2k_texture(path),
+        TextureDecoder::Psd => decode_psd_texture(path),
         TextureDecoder::Pixbuf => decode_pixbuf_texture(path),
         TextureDecoder::ImageFallback => None,
     };
@@ -132,13 +137,14 @@ fn texture_decoder_for_path(path: &std::path::Path) -> TextureDecoder {
         .extension()
         .map(|ext| ext.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
-        Some(ext) if RAW_EXTENSIONS.contains(&ext) => TextureDecoder::Raw,
+        Some(ext) if crate::media_kinds::is_raw_ext(ext) => TextureDecoder::Raw,
         Some("heic" | "heif" | "hif" | "avif") => TextureDecoder::Heif,
         Some("jxl") => TextureDecoder::JpegXl,
         Some("svg" | "svgz") => TextureDecoder::Svg,
-        Some("jpe" | "jpeg" | "jpg" | "insp" | "mpo") => TextureDecoder::Jpeg,
+        Some("jpe" | "jpeg" | "jpg" | "insp") => TextureDecoder::Jpeg,
         Some("webp") => TextureDecoder::Webp,
         Some("jp2") => TextureDecoder::Jpeg2k,
+        Some("psd") => TextureDecoder::Psd,
         Some("bmp" | "gif" | "png" | "tif" | "tiff") => TextureDecoder::Pixbuf,
         _ => TextureDecoder::ImageFallback,
     }
@@ -162,6 +168,12 @@ fn memory_texture(
 const RAW_MAX_DIMENSION: usize = 4096;
 
 fn decode_raw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    // libraw handles all major RAWs with proper camera color matrices.
+    // imagepipe is a pure-Rust fallback — wrapped in catch_unwind because
+    // rawloader panics on OOB slice access for some malformed inputs.
+    if let Some(texture) = decode_libraw_texture(path) {
+        return Some(texture);
+    }
     let path_for_panic = path.to_path_buf();
     let imagepipe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         imagepipe::simple_decode_8bit(path, RAW_MAX_DIMENSION, RAW_MAX_DIMENSION)
@@ -176,47 +188,200 @@ fn decode_raw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
         ),
         Ok(Err(err)) => {
             log::debug!(
-                "imagepipe RAW decode failed for {}: {} — trying libraw",
+                "imagepipe RAW fallback also failed for {}: {}",
                 path.display(),
                 err
             );
-            decode_libraw_texture(path)
+            None
         }
         Err(_) => {
             log::warn!(
-                "imagepipe RAW decode panicked for {} — trying libraw",
+                "imagepipe RAW fallback panicked for {}",
                 path_for_panic.display()
             );
-            decode_libraw_texture(path)
+            None
         }
     }
 }
 
-/// libraw fallback for RAW formats imagepipe cannot demosaic (notably Foveon
-/// X3F). Vendored libraw C++ source compiles in-tree, so no system dep.
+/// Return the directory used for the on-disk RAW decode cache.
+fn raw_decode_cache_dir() -> std::path::PathBuf {
+    crate::profile::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp").join(crate::profile::dir_segment()))
+        .join("raw_decode")
+}
+
+/// Build a stable cache filename for a RAW file based on its canonical path,
+/// last-modified timestamp (seconds), and byte length.  Any change to the file
+/// on disk produces a different key so stale pixels are never served.
+fn raw_decode_cache_key(path: &std::path::Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let size = meta.len();
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    mtime.hash(&mut hasher);
+    size.hash(&mut hasher);
+    Some(format!("{:016x}.png", hasher.finish()))
+}
+
+/// Attempt to load a previously cached demosaiced texture from disk.
+/// Returns `None` if the cache entry is absent, stale, or unreadable.
+fn read_raw_decode_cache(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let key = raw_decode_cache_key(path)?;
+    let cache_file = raw_decode_cache_dir().join(&key);
+    if !cache_file.exists() {
+        return None;
+    }
+    match gdk4::Texture::from_filename(&cache_file) {
+        Ok(texture) => {
+            log::debug!("RAW decode cache hit for {}", path.display());
+            Some(texture)
+        }
+        Err(err) => {
+            log::debug!(
+                "RAW decode cache read failed for {}: {}",
+                path.display(),
+                err
+            );
+            // Remove the corrupt entry so the next decode replaces it cleanly.
+            let _ = std::fs::remove_file(&cache_file);
+            None
+        }
+    }
+}
+
+/// Persist a successfully demosaiced RAW texture to the disk cache so future
+/// opens can skip the expensive libraw pipeline entirely.
+fn write_raw_decode_cache(path: &std::path::Path, texture: &gdk4::Texture) {
+    let Some(key) = raw_decode_cache_key(path) else {
+        return;
+    };
+    let cache_dir = raw_decode_cache_dir();
+    if let Err(err) = std::fs::create_dir_all(&cache_dir) {
+        log::debug!("RAW decode cache dir create failed: {}", err);
+        return;
+    }
+    let cache_file = cache_dir.join(&key);
+    // Save as PNG via GDK so we roundtrip losslessly through the same loader.
+    if let Err(err) = texture.save_to_png(&cache_file) {
+        log::debug!(
+            "RAW decode cache write failed for {}: {}",
+            path.display(),
+            err
+        );
+    } else {
+        log::debug!("RAW decode cache written for {}", path.display());
+    }
+}
+
+/// Decode a RAW via vendored libraw with camera white balance + AHD demosaic
+/// at full resolution. Output goes through a disk cache keyed by (path, mtime,
+/// size) so a re-open hits the cache instead of re-demosaicing.
 fn decode_libraw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            log::warn!("libraw read failed for {}: {}", path.display(), err);
+    let cache_enabled = RAW_CACHE_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+    if cache_enabled && let Some(texture) = read_raw_decode_cache(path) {
+        return Some(texture);
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    unsafe {
+        let lr = libraw_sys::libraw_init(0);
+        if lr.is_null() {
+            log::debug!("libraw_init returned null for {}", path.display());
             return None;
         }
-    };
-    let processor = libraw::Processor::new();
-    let processed = match processor.process_8bit(&bytes) {
-        Ok(image) => image,
-        Err(err) => {
-            log::warn!("libraw decode failed for {}: {}", path.display(), err);
+        struct LibrawHandle(*mut libraw_sys::libraw_data_t);
+        impl Drop for LibrawHandle {
+            fn drop(&mut self) {
+                unsafe { libraw_sys::libraw_close(self.0) };
+            }
+        }
+        let _guard = LibrawHandle(lr);
+        (*lr).params.use_camera_wb = 1;
+        (*lr).params.output_bps = 8;
+        (*lr).params.output_color = 1; // sRGB
+        (*lr).params.user_qual = 3; // AHD demosaic (highest quality)
+        let rc = libraw_sys::libraw_open_file(lr, c_path.as_ptr());
+        if rc != 0 {
+            log::debug!("libraw_open_file failed ({}) for {}", rc, path.display());
             return None;
         }
-    };
-    memory_texture(
-        processed.width(),
-        processed.height(),
-        gdk4::MemoryFormat::R8g8b8,
-        processed.to_vec(),
-        usize::try_from(processed.width()).ok()?.checked_mul(3)?,
-    )
+        let rc = libraw_sys::libraw_unpack(lr);
+        if rc != 0 {
+            log::debug!("libraw_unpack failed ({}) for {}", rc, path.display());
+            return None;
+        }
+        let rc = libraw_sys::libraw_dcraw_process(lr);
+        if rc != 0 {
+            log::debug!(
+                "libraw_dcraw_process failed ({}) for {}",
+                rc,
+                path.display()
+            );
+            return None;
+        }
+        let mut errcode = 0i32;
+        let img = libraw_sys::libraw_dcraw_make_mem_image(lr, &mut errcode);
+        if img.is_null() || errcode != 0 {
+            log::debug!(
+                "libraw_dcraw_make_mem_image failed ({}) for {}",
+                errcode,
+                path.display()
+            );
+            return None;
+        }
+        struct MemImage(*mut libraw_sys::libraw_processed_image_t);
+        impl Drop for MemImage {
+            fn drop(&mut self) {
+                unsafe { libraw_sys::libraw_dcraw_clear_mem(self.0) };
+            }
+        }
+        let _img_guard = MemImage(img);
+        let width = (*img).width as u32;
+        let height = (*img).height as u32;
+        let colors = (*img).colors;
+        let data_size = (*img).data_size as usize;
+        if colors != 3 {
+            log::debug!(
+                "libraw produced {}-channel output for {} — skipping",
+                colors,
+                path.display()
+            );
+            return None;
+        }
+        let pixels = std::slice::from_raw_parts((*img).data.as_ptr(), data_size).to_vec();
+        let texture = memory_texture(
+            width,
+            height,
+            gdk4::MemoryFormat::R8g8b8,
+            pixels,
+            usize::try_from(width).ok()?.checked_mul(3)?,
+        );
+        if let Some(ref tex) = texture
+            && cache_enabled
+        {
+            let path_clone = path.to_path_buf();
+            let tex_clone = tex.clone();
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::spawn_blocking(move || {
+                    write_raw_decode_cache(&path_clone, &tex_clone);
+                });
+            } else {
+                std::thread::spawn(move || {
+                    write_raw_decode_cache(&path_clone, &tex_clone);
+                });
+            }
+        }
+        texture
+    }
 }
 
 fn decode_heif_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
@@ -270,9 +435,25 @@ fn decode_jpegxl_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
         .checked_mul(usize::try_from(height).ok()?)?;
     let mut buf = vec![0u8; pixel_count.checked_mul(channels as usize)?];
     stream.write_to_buffer::<u8>(&mut buf);
-    let (format, bpp) = match channels {
-        3 => (gdk4::MemoryFormat::R8g8b8, 3usize),
-        4 => (gdk4::MemoryFormat::R8g8b8a8, 4usize),
+    // 1 = grayscale, 2 = grayscale + alpha — expand to RGB/RGBA so GDK can
+    // upload the texture (GDK doesn't have a 1-channel grayscale format).
+    let (format, bpp, buf) = match channels {
+        1 => {
+            let mut rgb = Vec::with_capacity(pixel_count.checked_mul(3)?);
+            for v in buf {
+                rgb.extend_from_slice(&[v, v, v]);
+            }
+            (gdk4::MemoryFormat::R8g8b8, 3usize, rgb)
+        }
+        2 => {
+            let mut rgba = Vec::with_capacity(pixel_count.checked_mul(4)?);
+            for chunk in buf.chunks_exact(2) {
+                rgba.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
+            }
+            (gdk4::MemoryFormat::R8g8b8a8, 4usize, rgba)
+        }
+        3 => (gdk4::MemoryFormat::R8g8b8, 3usize, buf),
+        4 => (gdk4::MemoryFormat::R8g8b8a8, 4usize, buf),
         _ => {
             log::warn!(
                 "JXL unsupported channel count {} for {}",
@@ -507,10 +688,27 @@ fn decode_jpeg2k_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
     )
 }
 
-/// Inject `xmlns:foo="urn:mimick:placeholder:foo"` for any prefix used in the
-/// document but not declared. Real-world SVGs (e.g. C2PA-signed exports) carry
-/// elements like `<c2pa:manifest>` without ever declaring the namespace, which
-/// `roxmltree` (used by `usvg`) rejects in strict XML mode.
+fn decode_psd_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let bytes = std::fs::read(path)
+        .map_err(|err| log::warn!("PSD read failed for {}: {}", path.display(), err))
+        .ok()?;
+    let psd = psd::Psd::from_bytes(&bytes)
+        .map_err(|err| log::warn!("PSD parse failed for {}: {:?}", path.display(), err))
+        .ok()?;
+    let width = psd.width();
+    let height = psd.height();
+    memory_texture(
+        width,
+        height,
+        gdk4::MemoryFormat::R8g8b8a8,
+        psd.rgba(),
+        usize::try_from(width).ok()?.checked_mul(4)?,
+    )
+}
+
+/// Inject placeholder `xmlns:` declarations for any prefix used but not
+/// declared (e.g. `c2pa:` in C2PA-signed SVGs) so usvg's strict XML
+/// parser accepts the document.
 fn inject_missing_xmlns(bytes: &[u8]) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return bytes.to_vec();
@@ -1990,7 +2188,7 @@ mod texture_decoder_tests {
 
     #[test]
     fn routes_special_lightbox_formats_before_loader_fallbacks() {
-        for ext in RAW_EXTENSIONS {
+        for ext in crate::media_kinds::RAW_EXTENSIONS.iter() {
             assert_eq!(
                 texture_decoder_for_path(std::path::Path::new(&format!("camera.{ext}"))),
                 TextureDecoder::Raw,
@@ -2029,6 +2227,7 @@ mod texture_decoder_tests {
                             | TextureDecoder::Jpeg
                             | TextureDecoder::Webp
                             | TextureDecoder::Jpeg2k
+                            | TextureDecoder::Psd
                             | TextureDecoder::Pixbuf
                             | TextureDecoder::ImageFallback
                     ),

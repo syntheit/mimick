@@ -272,12 +272,9 @@ async fn find_album_asset_by_checksum(
     }
 }
 
-/// Install a panic hook that swallows known-noisy panics from third-party
-/// decoders (e.g. `rawloader`'s out-of-bounds slice access in CRW / packed
-/// decoders) while still printing everything else. We catch these via
-/// `catch_unwind` in the call site, but the default hook prints to stderr
-/// *before* the unwind reaches the catch, so without this filter the user
-/// sees alarming panic messages even though the app recovers cleanly.
+/// Suppress stderr noise from `rawloader`/`imagepipe` panics — they're
+/// caught via `catch_unwind` at the call site, but the default hook still
+/// prints before unwinding reaches it.
 fn install_filtering_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -444,6 +441,9 @@ async fn main() {
 
         // Apply the user's notification preference before any notification can fire.
         crate::notifications::set_enabled(config.data.notifications_enabled);
+
+        // Sync the RAW decode cache flag with the user's persisted preference.
+        crate::library::set_raw_cache_enabled(config.data.raw_decode_cache_enabled);
 
         // Keep the watcher service alive, but optionally disable active folder watches.
         let (tx, mut rx) = mpsc::channel(32);
