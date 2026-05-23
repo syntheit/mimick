@@ -74,6 +74,14 @@ pub fn set_raw_cache_enabled(enabled: bool) {
     RAW_CACHE_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Runtime flag: true = full demosaic, false = extract embedded JPEG preview.
+static RAW_FULL_DECODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Update the runtime RAW full-decode flag (called from settings and startup).
+pub fn set_raw_full_decode(enabled: bool) {
+    RAW_FULL_DECODE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Register application custom icons with the Gtk icon theme system.
 fn register_app_icons() {
     if let Some(display) = gtk::gdk::Display::default() {
@@ -168,39 +176,53 @@ fn memory_texture(
 const RAW_MAX_DIMENSION: usize = 4096;
 
 fn decode_raw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
-    // libraw handles all major RAWs with proper camera color matrices.
-    // imagepipe is a pure-Rust fallback — wrapped in catch_unwind because
-    // rawloader panics on OOB slice access for some malformed inputs.
-    if let Some(texture) = decode_libraw_texture(path) {
-        return Some(texture);
-    }
-    let path_for_panic = path.to_path_buf();
-    let imagepipe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        imagepipe::simple_decode_8bit(path, RAW_MAX_DIMENSION, RAW_MAX_DIMENSION)
-    }));
-    match imagepipe_result {
-        Ok(Ok(image)) => memory_texture(
-            image.width.try_into().ok()?,
-            image.height.try_into().ok()?,
-            gdk4::MemoryFormat::R8g8b8,
-            image.data,
-            image.width.checked_mul(3)?,
-        ),
-        Ok(Err(err)) => {
-            log::debug!(
-                "imagepipe RAW fallback also failed for {}: {}",
-                path.display(),
-                err
-            );
-            None
+    let full_decode = RAW_FULL_DECODE.load(std::sync::atomic::Ordering::Relaxed);
+    if full_decode {
+        // Full demosaic via libraw (slow, highest quality) with optional cache.
+        if let Some(texture) = decode_libraw_texture(path) {
+            return Some(texture);
         }
-        Err(_) => {
-            log::warn!(
-                "imagepipe RAW fallback panicked for {}",
-                path_for_panic.display()
-            );
-            None
+        // imagepipe pure-Rust fallback — wrapped in catch_unwind because
+        // rawloader panics on OOB slice access for some malformed inputs.
+        let path_for_panic = path.to_path_buf();
+        let imagepipe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            imagepipe::simple_decode_8bit(path, RAW_MAX_DIMENSION, RAW_MAX_DIMENSION)
+        }));
+        match imagepipe_result {
+            Ok(Ok(image)) => memory_texture(
+                image.width.try_into().ok()?,
+                image.height.try_into().ok()?,
+                gdk4::MemoryFormat::R8g8b8,
+                image.data,
+                image.width.checked_mul(3)?,
+            ),
+            Ok(Err(err)) => {
+                log::debug!(
+                    "imagepipe RAW fallback also failed for {}: {}",
+                    path.display(),
+                    err
+                );
+                None
+            }
+            Err(_) => {
+                log::warn!(
+                    "imagepipe RAW fallback panicked for {}",
+                    path_for_panic.display()
+                );
+                None
+            }
         }
+    } else {
+        // Fast path: extract the embedded camera JPEG preview.
+        if let Some(texture) = extract_libraw_thumb(path) {
+            return Some(texture);
+        }
+        // Fallback to full decode if no embedded thumbnail is available.
+        log::debug!(
+            "No embedded preview in {}; falling back to full decode",
+            path.display()
+        );
+        decode_libraw_texture(path)
     }
 }
 
@@ -279,6 +301,174 @@ fn write_raw_decode_cache(path: &std::path::Path, texture: &gdk4::Texture) {
         );
     } else {
         log::debug!("RAW decode cache written for {}", path.display());
+    }
+}
+/// Extract the embedded camera JPEG preview from a RAW file via libraw.
+/// This is the fast path: no demosaic, no color processing — just byte
+/// extraction of the preview JPEG the camera stored inside the container.
+/// Falls back to `None` if the file has no usable embedded thumbnail.
+///
+/// Orientation is applied using the container's `flip` field for bitmap
+/// thumbnails, and via `Pixbuf::apply_embedded_orientation` for JPEG
+/// thumbnails (which carry their own EXIF).
+fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    unsafe {
+        let lr = libraw_sys::libraw_init(0);
+        if lr.is_null() {
+            return None;
+        }
+        struct LibrawHandle(*mut libraw_sys::libraw_data_t);
+        impl Drop for LibrawHandle {
+            fn drop(&mut self) {
+                unsafe { libraw_sys::libraw_close(self.0) };
+            }
+        }
+        let _guard = LibrawHandle(lr);
+        if libraw_sys::libraw_open_file(lr, c_path.as_ptr()) != 0 {
+            return None;
+        }
+
+        // Read container orientation before unpacking thumbnail.
+        let flip = (*lr).sizes.flip;
+
+        if libraw_sys::libraw_unpack_thumb(lr) != 0 {
+            log::debug!("No embedded thumbnail in {}", path.display());
+            return None;
+        }
+        let mut errcode = 0i32;
+        let img = libraw_sys::libraw_dcraw_make_mem_thumb(lr, &mut errcode);
+        if img.is_null() || errcode != 0 {
+            log::debug!(
+                "libraw_dcraw_make_mem_thumb failed ({}) for {}",
+                errcode,
+                path.display()
+            );
+            return None;
+        }
+        struct MemImage(*mut libraw_sys::libraw_processed_image_t);
+        impl Drop for MemImage {
+            fn drop(&mut self) {
+                unsafe { libraw_sys::libraw_dcraw_clear_mem(self.0) };
+            }
+        }
+        let _img_guard = MemImage(img);
+        let data_size = (*img).data_size as usize;
+        let bytes = std::slice::from_raw_parts((*img).data.as_ptr(), data_size);
+
+        if (*img).type_ == libraw_sys::LibRaw_image_formats_LIBRAW_IMAGE_JPEG {
+            // Load JPEG through Pixbuf so EXIF orientation is applied.
+            let stream = gtk::gio::MemoryInputStream::from_bytes(&glib::Bytes::from(bytes));
+            let raw_pixbuf =
+                match gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gtk::gio::Cancellable::NONE) {
+                    Ok(pb) => pb,
+                    Err(err) => {
+                        log::debug!(
+                            "Embedded JPEG pixbuf load failed for {}: {}",
+                            path.display(),
+                            err
+                        );
+                        return None;
+                    }
+                };
+            // apply_embedded_orientation uses EXIF inside the JPEG itself.
+            // If that does nothing (orientation tag missing), fall back to
+            // the container flip value.
+            let oriented = raw_pixbuf
+                .apply_embedded_orientation()
+                .unwrap_or_else(|| apply_libraw_flip(&raw_pixbuf, flip));
+            let texture = pixbuf_to_texture(&oriented);
+            if texture.is_some() {
+                log::debug!(
+                    "Extracted embedded JPEG preview ({} bytes, flip={}) from {}",
+                    data_size,
+                    flip,
+                    path.display()
+                );
+            }
+            texture
+        } else {
+            // Bitmap thumbnail — build a Pixbuf, apply container orientation,
+            // then convert to texture.
+            let width = (*img).width as i32;
+            let height = (*img).height as i32;
+            let colors = (*img).colors as i32;
+            if colors != 3 {
+                log::debug!(
+                    "Embedded thumbnail has {} channels for {} — skipping",
+                    colors,
+                    path.display()
+                );
+                return None;
+            }
+            let row_stride = width.checked_mul(colors)?;
+            let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_mut_slice(
+                bytes.to_vec(),
+                gtk::gdk_pixbuf::Colorspace::Rgb,
+                false,
+                8,
+                width,
+                height,
+                row_stride,
+            );
+            let oriented = apply_libraw_flip(&pixbuf, flip);
+            let texture = pixbuf_to_texture(&oriented);
+            if texture.is_some() {
+                log::debug!(
+                    "Extracted embedded bitmap preview (flip={}) from {}",
+                    flip,
+                    path.display()
+                );
+            }
+            texture
+        }
+    }
+}
+
+/// Convert a `Pixbuf` to a `gdk4::Texture` (same logic as `decode_pixbuf_texture`).
+fn pixbuf_to_texture(pixbuf: &gtk::gdk_pixbuf::Pixbuf) -> Option<gdk4::Texture> {
+    let format = if pixbuf.has_alpha() {
+        gdk4::MemoryFormat::R8g8b8a8
+    } else {
+        gdk4::MemoryFormat::R8g8b8
+    };
+    let bytes = pixbuf.read_pixel_bytes();
+    let texture = gdk4::MemoryTexture::new(
+        pixbuf.width(),
+        pixbuf.height(),
+        format,
+        &bytes,
+        pixbuf.rowstride() as usize,
+    );
+    Some(texture.upcast::<gdk4::Texture>())
+}
+
+/// Apply libraw `flip` orientation to a `Pixbuf`.
+///
+/// libraw flip values:
+///   0 — no rotation (identity)
+///   3 — 180 degrees
+///   5 — 90 CCW (270 CW)
+///   6 — 90 CW
+///
+/// Other values (rare) are left unrotated.
+fn apply_libraw_flip(
+    pixbuf: &gtk::gdk_pixbuf::Pixbuf,
+    flip: std::ffi::c_int,
+) -> gtk::gdk_pixbuf::Pixbuf {
+    use gtk::gdk_pixbuf::PixbufRotation;
+    match flip {
+        3 => pixbuf
+            .rotate_simple(PixbufRotation::Upsidedown)
+            .unwrap_or_else(|| pixbuf.clone()),
+        5 => pixbuf
+            .rotate_simple(PixbufRotation::Counterclockwise)
+            .unwrap_or_else(|| pixbuf.clone()),
+        6 => pixbuf
+            .rotate_simple(PixbufRotation::Clockwise)
+            .unwrap_or_else(|| pixbuf.clone()),
+        _ => pixbuf.clone(),
     }
 }
 
@@ -2262,6 +2452,9 @@ mod texture_decoder_tests {
 
     #[test]
     fn fixture_dng_decodes_to_texture() {
+        // The synthetic 16x12 fixture has no embedded preview; force full decode.
+        RAW_FULL_DECODE.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_fixture_texture("sample.dng", (16, 12));
+        RAW_FULL_DECODE.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }

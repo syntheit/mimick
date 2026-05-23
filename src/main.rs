@@ -444,6 +444,7 @@ async fn main() {
 
         // Sync the RAW decode cache flag with the user's persisted preference.
         crate::library::set_raw_cache_enabled(config.data.raw_decode_cache_enabled);
+        crate::library::set_raw_full_decode(config.data.raw_full_decode);
 
         // Keep the watcher service alive, but optionally disable active folder watches.
         let (tx, mut rx) = mpsc::channel(32);

@@ -571,6 +571,15 @@ pub fn build_settings_window_with_parent(
         }
     });
 
+    let raw_full_decode_row = adw::SwitchRow::builder()
+        .title("Full RAW Decoding")
+        .subtitle(
+            "Decode high-resolution sensor data instead of using \
+             embedded previews (slower).",
+        )
+        .build();
+    library_group.add(&raw_full_decode_row);
+
     let raw_cache_row = adw::SwitchRow::builder()
         .title("Cache Decoded RAW Files")
         .subtitle(
@@ -579,6 +588,22 @@ pub fn build_settings_window_with_parent(
         )
         .build();
     library_group.add(&raw_cache_row);
+
+    // Cache setting only applies when full decode is enabled.
+    raw_cache_row.set_sensitive(raw_full_decode_row.is_active());
+
+    let cache_row_ref = raw_cache_row.clone();
+    let ctx_for_raw_decode = ctx.clone();
+    raw_full_decode_row.connect_active_notify(move |row| {
+        let active = row.is_active();
+        cache_row_ref.set_sensitive(active);
+        crate::library::set_raw_full_decode(active);
+        let mut cfg = ctx_for_raw_decode.config.write();
+        if cfg.data.raw_full_decode != active {
+            cfg.data.raw_full_decode = active;
+            cfg.save();
+        }
+    });
 
     let ctx_for_raw_cache = ctx.clone();
     raw_cache_row.connect_active_notify(move |row| {
@@ -661,6 +686,8 @@ pub fn build_settings_window_with_parent(
         library_view_row,
         #[weak]
         preview_full_row,
+        #[weak]
+        raw_full_decode_row,
         #[weak]
         raw_cache_row,
         #[weak]
@@ -755,6 +782,7 @@ pub fn build_settings_window_with_parent(
             let library_view_enabled = library_view_row.is_active();
             let library_preview_full_resolution = preview_full_row.is_active();
             let raw_decode_cache_enabled = raw_cache_row.is_active();
+            let raw_full_decode = raw_full_decode_row.is_active();
             let library_thumbnail_cache_mb = cache_size_row.value() as u32;
             let upload_concurrency = concurrency_row.value() as u8;
             let quiet_hours_enabled = quiet_hours_row.is_active();
@@ -883,6 +911,8 @@ pub fn build_settings_window_with_parent(
                             library_preview_full_resolution;
                         new_config.data.raw_decode_cache_enabled = raw_decode_cache_enabled;
                         crate::library::set_raw_cache_enabled(raw_decode_cache_enabled);
+                        new_config.data.raw_full_decode = raw_full_decode;
+                        crate::library::set_raw_full_decode(raw_full_decode);
                         new_config.data.library_thumbnail_cache_mb = library_thumbnail_cache_mb;
                         new_config.data.startup_catchup_mode = catchup_mode;
                         new_config.data.upload_concurrency = upload_concurrency;
@@ -1312,6 +1342,8 @@ pub fn build_settings_window_with_parent(
     library_view_row.set_active(config.data.library_view_enabled);
     preview_full_row.set_active(config.data.library_preview_full_resolution);
     raw_cache_row.set_active(config.data.raw_decode_cache_enabled);
+    raw_full_decode_row.set_active(config.data.raw_full_decode);
+    raw_cache_row.set_sensitive(config.data.raw_full_decode);
     if config.data.library_thumbnail_cache_mb > 0 {
         cache_size_row.set_value(config.data.library_thumbnail_cache_mb as f64);
     }

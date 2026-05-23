@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Face visibility filters in the Explore view allowing users to show/hide face-tagged assets with server-side filtering via new `personVisibility` parameter.
 - Server Statistics Dialog displaying key library metrics (total assets, photos, videos, archive count, person count, etc.) in a responsive FlowBox layout that adapts to window size.
 - Cargo audit configuration to ignore unmaintained EXIF dependencies, streamlining the security audit workflow.
+- Subtle press animations across all interactive UI elements (header buttons, sidebar rows, grid tiles, explore/album tiles, settings rows, dialog buttons). Uses a brief scale-down (0.97x, 80ms) on press; animations are automatically disabled when the GTK `gtk-enable-animations` system setting is off.
+- RAW rendering mode toggle in Settings > Library: "Full RAW Decoding" switch allows users to choose between fast embedded JPEG preview extraction (~10ms, default) and full sensor demosaic via libraw (~1-3s). The decode cache setting is gated to only appear when full decode is enabled.
+- Embedded JPEG preview extraction from RAW files via `libraw_unpack_thumb` + `libraw_dcraw_make_mem_thumb`. Supported across all major RAW formats (CR2, CR3, NEF, ARW, DNG, ORF, RW2, PEF, FFF, RAF, SR2, MRW, etc.) with automatic fallback to full demosaic when no embedded preview exists.
+- Toggleable RAW decode cache setting in Settings > Library. Stores demosaiced textures as PNGs on disk to skip re-processing on re-opens. Defaults to off to conserve storage.
 
 ### Changed
 
@@ -25,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Embedded JPEG previews extracted from RAW files (.fff, .pef, .dng, .3fr, .RAW, etc.) now display with correct orientation. The extractor routes through `Pixbuf::apply_embedded_orientation` for JPEG thumbnails and applies the RAW container's `flip` field via `Pixbuf::rotate_simple` for bitmap thumbnails. Previously `Texture::from_bytes` ignored EXIF orientation tags.
 - Lightbox trackpad pinch-to-zoom now works reliably and is smooth. Zoom is now jitter-free: scroll adjustment ranges are pre-set synchronously to match the new content size so the scroll position applies in the same frame as the resize, eliminating the one-frame flicker from the previous deferred update.
 - Album/explore tile thumbnails now maintain uniform sizes within a viewport and display correctly at 360px window width, with no collapse on window-height changes.
 - FlowBox children per line constraints adjusted (min 2, max 6 for albums) to ensure 2-column layout on mobile while limiting tile width growth on desktop.

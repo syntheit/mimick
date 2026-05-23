@@ -255,6 +255,11 @@ pub struct ConfigData {
     /// Disable to save storage; each cached file is a full-resolution PNG.
     #[serde(default)]
     pub raw_decode_cache_enabled: bool,
+    /// When true, RAW files are fully demosaiced from sensor data (slow but
+    /// highest quality). When false the embedded camera JPEG preview is
+    /// extracted instead (near-instant).
+    #[serde(default)]
+    pub raw_full_decode: bool,
     /// Show people with no assigned name in the Explore view.
     #[serde(default = "default_true")]
     pub show_unnamed_faces: bool,
@@ -285,6 +290,7 @@ impl Default for ConfigData {
             library_preview_full_resolution: false,
             library_thumbnail_cache_mb: 0,
             raw_decode_cache_enabled: false,
+            raw_full_decode: false,
             show_unnamed_faces: true,
             show_hidden_faces: false,
         }
