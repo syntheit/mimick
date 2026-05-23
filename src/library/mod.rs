@@ -78,6 +78,10 @@ enum TextureDecoder {
     Raw,
     Heif,
     JpegXl,
+    Svg,
+    Jpeg,
+    Webp,
+    Jpeg2k,
     Pixbuf,
     ImageFallback,
 }
@@ -104,6 +108,10 @@ fn load_texture_blocking(path: &std::path::Path) -> Option<gdk4::Texture> {
         TextureDecoder::Raw => decode_raw_texture(path),
         TextureDecoder::Heif => decode_heif_texture(path),
         TextureDecoder::JpegXl => decode_jpegxl_texture(path),
+        TextureDecoder::Svg => decode_svg_texture(path),
+        TextureDecoder::Jpeg => decode_jpeg_texture(path),
+        TextureDecoder::Webp => decode_webp_texture(path),
+        TextureDecoder::Jpeg2k => decode_jpeg2k_texture(path),
         TextureDecoder::Pixbuf => decode_pixbuf_texture(path),
         TextureDecoder::ImageFallback => None,
     };
@@ -127,10 +135,11 @@ fn texture_decoder_for_path(path: &std::path::Path) -> TextureDecoder {
         Some(ext) if RAW_EXTENSIONS.contains(&ext) => TextureDecoder::Raw,
         Some("heic" | "heif" | "hif" | "avif") => TextureDecoder::Heif,
         Some("jxl") => TextureDecoder::JpegXl,
-        Some(
-            "bmp" | "gif" | "insp" | "jpe" | "jpeg" | "jpg" | "jp2" | "mpo" | "png" | "svg" | "tif"
-            | "tiff" | "webp",
-        ) => TextureDecoder::Pixbuf,
+        Some("svg" | "svgz") => TextureDecoder::Svg,
+        Some("jpe" | "jpeg" | "jpg" | "insp" | "mpo") => TextureDecoder::Jpeg,
+        Some("webp") => TextureDecoder::Webp,
+        Some("jp2") => TextureDecoder::Jpeg2k,
+        Some("bmp" | "gif" | "png" | "tif" | "tiff") => TextureDecoder::Pixbuf,
         _ => TextureDecoder::ImageFallback,
     }
 }
@@ -153,19 +162,60 @@ fn memory_texture(
 const RAW_MAX_DIMENSION: usize = 4096;
 
 fn decode_raw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
-    let image = match imagepipe::simple_decode_8bit(path, RAW_MAX_DIMENSION, RAW_MAX_DIMENSION) {
+    let path_for_panic = path.to_path_buf();
+    let imagepipe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        imagepipe::simple_decode_8bit(path, RAW_MAX_DIMENSION, RAW_MAX_DIMENSION)
+    }));
+    match imagepipe_result {
+        Ok(Ok(image)) => memory_texture(
+            image.width.try_into().ok()?,
+            image.height.try_into().ok()?,
+            gdk4::MemoryFormat::R8g8b8,
+            image.data,
+            image.width.checked_mul(3)?,
+        ),
+        Ok(Err(err)) => {
+            log::debug!(
+                "imagepipe RAW decode failed for {}: {} — trying libraw",
+                path.display(),
+                err
+            );
+            decode_libraw_texture(path)
+        }
+        Err(_) => {
+            log::warn!(
+                "imagepipe RAW decode panicked for {} — trying libraw",
+                path_for_panic.display()
+            );
+            decode_libraw_texture(path)
+        }
+    }
+}
+
+/// libraw fallback for RAW formats imagepipe cannot demosaic (notably Foveon
+/// X3F). Vendored libraw C++ source compiles in-tree, so no system dep.
+fn decode_libraw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("libraw read failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let processor = libraw::Processor::new();
+    let processed = match processor.process_8bit(&bytes) {
         Ok(image) => image,
         Err(err) => {
-            log::warn!("RAW lightbox decode failed for {}: {}", path.display(), err);
+            log::warn!("libraw decode failed for {}: {}", path.display(), err);
             return None;
         }
     };
     memory_texture(
-        image.width.try_into().ok()?,
-        image.height.try_into().ok()?,
+        processed.width(),
+        processed.height(),
         gdk4::MemoryFormat::R8g8b8,
-        image.data,
-        image.width.checked_mul(3)?,
+        processed.to_vec(),
+        usize::try_from(processed.width()).ok()?.checked_mul(3)?,
     )
 }
 
@@ -190,42 +240,83 @@ fn decode_heif_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
 }
 
 fn decode_jpegxl_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
-    use jpegxl_rs::image::ToDynamic;
-
-    let encoded = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(err) => {
             log::warn!("JXL read failed for {}: {}", path.display(), err);
             return None;
         }
     };
-    let decoder = match jpegxl_rs::decoder_builder().build() {
-        Ok(decoder) => decoder,
+    let image = match jxl_oxide::JxlImage::builder().read(file) {
+        Ok(image) => image,
         Err(err) => {
-            log::warn!("JXL decoder init failed for {}: {}", path.display(), err);
+            log::warn!("JXL parse failed for {}: {}", path.display(), err);
             return None;
         }
     };
-    // Force u8; auto-detect picks Float32 for HDR which silently maps to None.
-    let dynamic = match decoder.decode_to_image_with::<u8>(&encoded) {
-        Ok(Some(image)) => image,
-        Ok(None) => {
+    let render = match image.render_frame(0) {
+        Ok(render) => render,
+        Err(err) => {
+            log::warn!("JXL render failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let mut stream = render.stream();
+    let width = stream.width();
+    let height = stream.height();
+    let channels = stream.channels();
+    let pixel_count = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    let mut buf = vec![0u8; pixel_count.checked_mul(channels as usize)?];
+    stream.write_to_buffer::<u8>(&mut buf);
+    let (format, bpp) = match channels {
+        3 => (gdk4::MemoryFormat::R8g8b8, 3usize),
+        4 => (gdk4::MemoryFormat::R8g8b8a8, 4usize),
+        _ => {
             log::warn!(
-                "JXL decoder returned no image for {}: unsupported pixel layout",
+                "JXL unsupported channel count {} for {}",
+                channels,
                 path.display()
             );
             return None;
         }
-        Err(err) => {
-            log::warn!("JXL decode failed for {}: {}", path.display(), err);
-            return None;
-        }
     };
-    dynamic_image_texture(dynamic)
+    memory_texture(
+        width,
+        height,
+        format,
+        buf,
+        usize::try_from(width).ok()?.checked_mul(bpp)?,
+    )
 }
 
 fn decode_image_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
-    dynamic_image_texture(image::ImageReader::open(path).ok()?.decode().ok()?)
+    let reader = match image::ImageReader::open(path) {
+        Ok(reader) => reader,
+        Err(err) => {
+            log::debug!("image-rs open failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let reader = match reader.with_guessed_format() {
+        Ok(reader) => reader,
+        Err(err) => {
+            log::debug!(
+                "image-rs format probe failed for {}: {}",
+                path.display(),
+                err
+            );
+            return None;
+        }
+    };
+    match reader.decode() {
+        Ok(image) => dynamic_image_texture(image),
+        Err(err) => {
+            log::debug!("image-rs decode failed for {}: {}", path.display(), err);
+            None
+        }
+    }
 }
 
 fn dynamic_image_texture(image: image::DynamicImage) -> Option<gdk4::Texture> {
@@ -241,7 +332,13 @@ fn dynamic_image_texture(image: image::DynamicImage) -> Option<gdk4::Texture> {
 }
 
 fn decode_pixbuf_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
-    let raw = gtk::gdk_pixbuf::Pixbuf::from_file(path).ok()?;
+    let raw = match gtk::gdk_pixbuf::Pixbuf::from_file(path) {
+        Ok(pixbuf) => pixbuf,
+        Err(err) => {
+            log::debug!("pixbuf decode failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
     let pixbuf = raw.apply_embedded_orientation().unwrap_or(raw);
     let format = if pixbuf.has_alpha() {
         gdk4::MemoryFormat::R8g8b8a8
@@ -257,6 +354,236 @@ fn decode_pixbuf_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
         pixbuf.rowstride() as usize,
     );
     Some(texture.upcast::<gdk4::Texture>())
+}
+
+/// Maximum SVG raster dimension; SVGs are vector and could otherwise render at
+/// any size. 4096 matches the RAW cap and keeps memory bounded.
+const SVG_MAX_DIMENSION: u32 = 4096;
+
+fn decode_svg_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("SVG read failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let opt = resvg::usvg::Options::default();
+    let prepared = inject_missing_xmlns(&bytes);
+    let tree = match resvg::usvg::Tree::from_data(&prepared, &opt) {
+        Ok(tree) => tree,
+        Err(err) => {
+            log::warn!("SVG parse failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let svg_size = tree.size();
+    let svg_w = svg_size.width().max(1.0);
+    let svg_h = svg_size.height().max(1.0);
+    let scale = (SVG_MAX_DIMENSION as f32 / svg_w)
+        .min(SVG_MAX_DIMENSION as f32 / svg_h)
+        .min(1.0);
+    let width = (svg_w * scale).ceil() as u32;
+    let height = (svg_h * scale).ceil() as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    memory_texture(
+        width,
+        height,
+        gdk4::MemoryFormat::R8g8b8a8,
+        pixmap.take(),
+        usize::try_from(width).ok()?.checked_mul(4)?,
+    )
+}
+
+fn decode_jpeg_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("JPEG read failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    match turbojpeg::decompress(&bytes, turbojpeg::PixelFormat::RGB) {
+        Ok(image) => memory_texture(
+            image.width.try_into().ok()?,
+            image.height.try_into().ok()?,
+            gdk4::MemoryFormat::R8g8b8,
+            image.pixels,
+            image.pitch,
+        ),
+        Err(err) => {
+            log::debug!("turbojpeg decode failed for {}: {}", path.display(), err);
+            None
+        }
+    }
+}
+
+fn decode_webp_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("WebP read failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let decoder = webp::Decoder::new(&bytes);
+    let image = match decoder.decode() {
+        Some(image) => image,
+        None => {
+            log::debug!("libwebp decode failed for {}", path.display());
+            return None;
+        }
+    };
+    let format = if image.is_alpha() {
+        gdk4::MemoryFormat::R8g8b8a8
+    } else {
+        gdk4::MemoryFormat::R8g8b8
+    };
+    let bpp = if image.is_alpha() { 4 } else { 3 };
+    let width = image.width();
+    let height = image.height();
+    memory_texture(
+        width,
+        height,
+        format,
+        image.to_vec(),
+        usize::try_from(width).ok()?.checked_mul(bpp)?,
+    )
+}
+
+fn decode_jpeg2k_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("JP2 read failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let image = match jpeg2k::Image::from_bytes(&bytes) {
+        Ok(image) => image,
+        Err(err) => {
+            log::warn!("JP2 parse failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let pixels = match image.get_pixels(Some(255)) {
+        Ok(pixels) => pixels,
+        Err(err) => {
+            log::warn!("JP2 pixel extract failed for {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    use jpeg2k::ImagePixelData;
+    let (format, bytes, bpp) = match pixels.data {
+        ImagePixelData::Rgb8(data) => (gdk4::MemoryFormat::R8g8b8, data, 3),
+        ImagePixelData::Rgba8(data) => (gdk4::MemoryFormat::R8g8b8a8, data, 4),
+        ImagePixelData::L8(data) => {
+            let mut rgb = Vec::with_capacity(data.len() * 3);
+            for v in data {
+                rgb.extend_from_slice(&[v, v, v]);
+            }
+            (gdk4::MemoryFormat::R8g8b8, rgb, 3)
+        }
+        ImagePixelData::La8(data) => {
+            let mut rgba = Vec::with_capacity(data.len() * 2);
+            for chunk in data.chunks_exact(2) {
+                rgba.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
+            }
+            (gdk4::MemoryFormat::R8g8b8a8, rgba, 4)
+        }
+        _ => {
+            log::warn!("JP2 unsupported 16-bit pixel layout for {}", path.display());
+            return None;
+        }
+    };
+    memory_texture(
+        pixels.width,
+        pixels.height,
+        format,
+        bytes,
+        usize::try_from(pixels.width).ok()?.checked_mul(bpp)?,
+    )
+}
+
+/// Inject `xmlns:foo="urn:mimick:placeholder:foo"` for any prefix used in the
+/// document but not declared. Real-world SVGs (e.g. C2PA-signed exports) carry
+/// elements like `<c2pa:manifest>` without ever declaring the namespace, which
+/// `roxmltree` (used by `usvg`) rejects in strict XML mode.
+fn inject_missing_xmlns(bytes: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return bytes.to_vec();
+    };
+    let mut declared: std::collections::HashSet<String> = ["xml", "xmlns", "xlink"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let bytes_str = text.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = text[i..].find("xmlns:") {
+        let start = i + rel + 6;
+        let mut end = start;
+        while end < bytes_str.len() {
+            let b = bytes_str[end];
+            if b == b'=' || b == b' ' || b == b'\t' || b == b'\n' || b == b'/' || b == b'>' {
+                break;
+            }
+            end += 1;
+        }
+        if end > start {
+            declared.insert(text[start..end].to_string());
+        }
+        i = end;
+    }
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut j = 0;
+    while j < bytes_str.len() {
+        let b = bytes_str[j];
+        let starts_token = b == b'<' || b == b' ' || b == b'\t' || b == b'\n';
+        if starts_token {
+            let mut k = j + 1;
+            if k < bytes_str.len() && bytes_str[k] == b'/' {
+                k += 1;
+            }
+            let ident_start = k;
+            while k < bytes_str.len() {
+                let c = bytes_str[k];
+                if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
+                    k += 1;
+                } else {
+                    break;
+                }
+            }
+            if k > ident_start && k < bytes_str.len() && bytes_str[k] == b':' {
+                let prefix = &text[ident_start..k];
+                if !declared.contains(prefix) {
+                    used.insert(prefix.to_string());
+                }
+            }
+            j = k.max(j + 1);
+        } else {
+            j += 1;
+        }
+    }
+    if used.is_empty() {
+        return bytes.to_vec();
+    }
+    let Some(svg_tag) = text.find("<svg") else {
+        return bytes.to_vec();
+    };
+    let insert_at = svg_tag + 4;
+    let mut decls = String::new();
+    for prefix in &used {
+        decls.push_str(&format!(
+            " xmlns:{prefix}=\"urn:mimick:placeholder:{prefix}\""
+        ));
+    }
+    let mut out = Vec::with_capacity(bytes.len() + decls.len());
+    out.extend_from_slice(&bytes[..insert_at]);
+    out.extend_from_slice(decls.as_bytes());
+    out.extend_from_slice(&bytes[insert_at..]);
+    out
 }
 
 /// The complete UI widgets state wrapper for the library window interface.
@@ -1698,6 +2025,10 @@ mod texture_decoder_tests {
                         TextureDecoder::Raw
                             | TextureDecoder::Heif
                             | TextureDecoder::JpegXl
+                            | TextureDecoder::Svg
+                            | TextureDecoder::Jpeg
+                            | TextureDecoder::Webp
+                            | TextureDecoder::Jpeg2k
                             | TextureDecoder::Pixbuf
                             | TextureDecoder::ImageFallback
                     ),
@@ -1715,10 +2046,8 @@ mod texture_decoder_tests {
     }
 
     #[test]
-    fn fixture_svg_decodes_when_the_pixbuf_svg_loader_is_installed() {
-        if decode_pixbuf_texture(&fixture("sample.svg")).is_some() {
-            assert_fixture_texture("sample.svg", (16, 12));
-        }
+    fn fixture_svg_decodes_to_texture() {
+        assert_fixture_texture("sample.svg", (16, 12));
     }
 
     #[test]

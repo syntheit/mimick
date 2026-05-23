@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Album/explore tile thumbnails now maintain uniform sizes within a viewport and display correctly at 360px window width, with no collapse on window-height changes.
 - FlowBox children per line constraints adjusted (min 2, max 6 for albums) to ensure 2-column layout on mobile while limiting tile width growth on desktop.
 - Raw asset handling and EXIF metadata extraction now properly exports `gexiv2_metadata_free` for modern gexiv2 linking compatibility.
+- Lightbox JPEG XL decoding switched from `jpegxl-rs` (system `libjxl` bindings, frequently mismatched at runtime) to `jxl-oxide` (pure-Rust). Removes the "Generic Error. Please build `libjxl` from source" failure mode on valid JXL files and drops the libjxl system dependency.
+- Lightbox now decodes Sigma Foveon `.x3f` RAW files via `libraw` (vendored at build time, no system dep). `imagepipe` cannot demosaic Foveon sensors; libraw is invoked as a fallback when imagepipe fails, also picking up other RAW variants imagepipe doesn't support.
+- Lightbox SVG rendering now uses `resvg` (pure-Rust) instead of relying on the gdk-pixbuf SVG loader, which is not always present in Flatpak runtimes. Restores SVG previews regardless of which pixbuf loaders the host bundles.
+- Lightbox SVG parser now tolerates real-world SVGs that use undeclared XML namespace prefixes (e.g. `c2pa:` C2PA provenance metadata from Adobe exports). Missing namespaces are injected with placeholder URIs before parsing.
+- Lightbox JPEG decoding now uses `libjpeg-turbo` (`turbojpeg` crate, vendored) as the primary decoder. Supports arithmetic-coded JPEGs (DAC marker) that `image-rs` and `gdk-pixbuf`'s Glycin backend reject with "header DAC is not supported".
+- Lightbox WebP decoding now uses `libwebp` (`webp` crate, vendored) as the primary decoder. Handles complex WebP bitstreams that `image-rs`'s pure-Rust WebP decoder rejects as "corrupt".
+- Lightbox JPEG 2000 (`.jp2`) decoding added via `openjpeg` (`jpeg2k` crate, vendored). Previously these were silently unsupported by both pixbuf and image-rs and only showed "Preview unavailable".
+- Lightbox RAW decoder now catches panics from `imagepipe`/`rawloader` (out-of-bounds in `crw.rs` decoder on certain Canon RAW files) and falls through to libraw rather than crashing the worker thread.
+- Pixbuf and image-rs decode failures in the lightbox now log at debug level instead of silently returning, making future format-support issues diagnosable from `mimick.log`.
 
 ## [9.5.4] - 2026-05-17
 
