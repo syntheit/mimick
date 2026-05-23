@@ -176,13 +176,50 @@ progressbar.mimick-transfer-progress progress {
     background: mix(@accent_bg_color, #d16c96, 0.45);
 }
 
-.mimick-pressable {
-    transition: background-color 90ms ease-out, opacity 90ms ease-out;
+/* ── Press feedback ───────────────────────────────────────────────
+   Subtle scale-down on press for all interactive elements.
+   GTK4 natively skips CSS transitions when gtk-enable-animations
+   is off, so accessibility is respected automatically.
+
+   Covers: header-bar buttons, dialog buttons, sidebar rows,
+   settings switch/action/spin rows, lightbox actions, grid tiles,
+   explore/album tiles, and any widget with .mimick-pressable.  */
+
+button,
+.mimick-pressable,
+menubutton > button,
+row.activatable {
+    transition: transform 80ms ease-out, opacity 80ms ease-out;
 }
 
-.mimick-pressable:active {
-    background-color: alpha(@accent_bg_color, 0.18);
-    opacity: 0.85;
+button:active,
+.mimick-pressable:active,
+menubutton > button:active,
+row.activatable:active {
+    transform: scale(0.97);
+    opacity: 0.88;
+}
+
+overlay.mimick-cell {
+    transition: transform 80ms ease-out, opacity 80ms ease-out;
+}
+
+overlay.mimick-cell:active {
+    transform: scale(0.96);
+    opacity: 0.90;
+}
+
+picture.mimick-explore-tile,
+overlay.mimick-explore-tile,
+picture.mimick-person-avatar {
+    transition: transform 80ms ease-out, opacity 80ms ease-out;
+}
+
+picture.mimick-explore-tile:active,
+overlay.mimick-explore-tile:active,
+picture.mimick-person-avatar:active {
+    transform: scale(0.95);
+    opacity: 0.88;
 }
 
 /* Details-pane group accents. The icon classes paint just the prefix icon,
