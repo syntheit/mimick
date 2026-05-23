@@ -359,9 +359,38 @@ impl ThumbnailCache {
         let path = path.to_path_buf();
         let cache_dir = self.cache_dir.clone();
         let texture = tokio::task::spawn_blocking(move || -> Result<Texture, String> {
-            let raw = gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 256, 256, true)
-                .map_err(|err| err.to_string())?;
-            let pixbuf = raw.apply_embedded_orientation().unwrap_or(raw);
+            let pixbuf = match gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 256, 256, true) {
+                Ok(raw) => raw.apply_embedded_orientation().unwrap_or(raw),
+                Err(err) => {
+                    log::debug!(
+                        "gdk_pixbuf direct load failed for {}: {}; attempting custom decoder",
+                        path.display(),
+                        err
+                    );
+                    let full_texture = super::load_texture_blocking(&path)
+                        .ok_or_else(|| format!("No decoder succeeded for {}", path.display()))?;
+                    let mut downloader = gdk4::TextureDownloader::new(&full_texture);
+                    downloader.set_format(gdk4::MemoryFormat::R8g8b8a8);
+                    let (bytes, stride) = downloader.download_bytes();
+                    let full_pixbuf = gtk::gdk_pixbuf::Pixbuf::from_mut_slice(
+                        bytes.to_vec(),
+                        gtk::gdk_pixbuf::Colorspace::Rgb,
+                        true,
+                        8,
+                        full_texture.width(),
+                        full_texture.height(),
+                        stride as i32,
+                    );
+                    let w = full_pixbuf.width();
+                    let h = full_pixbuf.height();
+                    let scale = (256.0 / w as f64).min(256.0 / h as f64).min(1.0);
+                    let target_w = ((w as f64 * scale).round() as i32).max(1);
+                    let target_h = ((h as f64 * scale).round() as i32).max(1);
+                    full_pixbuf
+                        .scale_simple(target_w, target_h, gtk::gdk_pixbuf::InterpType::Bilinear)
+                        .ok_or_else(|| "Failed to scale pixbuf".to_string())?
+                }
+            };
             let _ = std::fs::create_dir_all(&cache_dir);
             let _ = pixbuf.savev(&cache_file, "png", &[]);
             let format = if pixbuf.has_alpha() {
@@ -594,5 +623,28 @@ mod tests {
 
         assert!(cache.memory.lock().inner.is_empty());
         assert!(!cache.cache_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_load_local_raw_thumbnail() {
+        let cache = cache(1024 * 1024 * 10);
+        let fixture_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.dng");
+
+        let result = cache
+            .load_local_thumbnail_cancellable("local_dng_test", &fixture_path, || false)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Failed to load RAW thumbnail: {:?}",
+            result.err()
+        );
+        let texture = result.unwrap();
+        assert!(texture.width() > 0);
+        assert!(texture.height() > 0);
+
+        let cache_file = cache.cache_file_local("local_dng_test");
+        assert!(cache_file.exists(), "Cache file was not written to disk");
     }
 }

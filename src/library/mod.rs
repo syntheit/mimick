@@ -114,7 +114,7 @@ async fn load_texture_oriented(path: &std::path::Path) -> Option<gdk4::Texture> 
         .flatten()
 }
 
-fn load_texture_blocking(path: &std::path::Path) -> Option<gdk4::Texture> {
+pub(super) fn load_texture_blocking(path: &std::path::Path) -> Option<gdk4::Texture> {
     let decoder = texture_decoder_for_path(path);
     let texture = match decoder {
         TextureDecoder::Raw => decode_raw_texture(path),
