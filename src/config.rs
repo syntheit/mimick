@@ -87,6 +87,14 @@ impl FolderRules {
 
         true
     }
+
+    /// Resolve whether XMP sidecar upload is enabled for this folder.
+    ///
+    /// Returns the per-folder override when set, otherwise falls back to the
+    /// caller-supplied global default.
+    pub fn xmp_sidecar_enabled(&self, global_default: bool) -> bool {
+        self.include_xmp_sidecar.unwrap_or(global_default)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]

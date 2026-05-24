@@ -516,24 +516,34 @@ async fn main() {
                             continue;
                         }
 
-                        let (album_id, album_name, watch_path) = {
+                        let (album_id, album_name, watch_path, folder_rules) = {
                             let path_configs = live_watch_paths_for_queue.lock();
                             best_matching_watch_entry(std::path::Path::new(&path), &path_configs)
                                 .map(|entry| match entry {
                                     config::WatchPathEntry::WithConfig {
                                         album_id,
                                         album_name,
+                                        rules,
                                         ..
                                     } => (
                                         album_id.clone(),
                                         album_name.clone(),
                                         entry.path().to_string(),
+                                        rules.clone(),
                                     ),
                                     config::WatchPathEntry::Simple(_) => {
-                                        (None, None, entry.path().to_string())
+                                        (None, None, entry.path().to_string(), Default::default())
                                     }
                                 })
-                                .unwrap_or((None, None, String::new()))
+                                .unwrap_or((None, None, String::new(), Default::default()))
+                        };
+
+                        // Resolve XMP: per-folder override -> global default.
+                        let global_xmp = deletion_ctx.config.read().data.upload_xmp_sidecars;
+                        let sidecar_path = if folder_rules.xmp_sidecar_enabled(global_xmp) {
+                            sidecar_path
+                        } else {
+                            None
                         };
 
                         let target = SyncTarget {
