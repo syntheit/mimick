@@ -17,8 +17,8 @@ use crate::library::local_exif::{self, LocalExif};
 
 use super::context_menu::show_asset_context_menu;
 use super::download::{
-    begin_download_session, finish_download_item, open_local_with_default_app, start_download,
-    track_download_item,
+    begin_download_session, finish_download_item, open_local_with_default_app, spawn_video_handoff,
+    start_download, track_download_item,
 };
 use super::{LOCAL_ID_PREFIX, LibraryWindowUi, load_source_page, load_texture_oriented};
 
@@ -512,6 +512,40 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .can_target(false)
         .build();
     picture_overlay.add_overlay(&unavailable_overlay);
+
+    // Video poster badge: clickable play icon shown over the still thumbnail
+    // when the current asset is a video; hands off to the grid's player flow.
+    let video_badge_target: Rc<RefCell<Option<(String, String, String)>>> =
+        Rc::new(RefCell::new(None));
+    let video_badge_icon = gtk::Image::builder()
+        .icon_name("mimick-video-symbolic")
+        .pixel_size(72)
+        .css_classes(vec!["mimick-video-badge".to_string()])
+        .build();
+    let video_badge_button = gtk::Button::builder()
+        .child(&video_badge_icon)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .tooltip_text("Play video in external player")
+        .css_classes(vec!["circular".to_string(), "flat".to_string()])
+        .visible(false)
+        .build();
+    video_badge_button.connect_clicked({
+        let video_badge_target = video_badge_target.clone();
+        let ui_for_video = ui.clone();
+        move |_| {
+            let Some((local_path, asset_id, filename)) = video_badge_target.borrow().clone() else {
+                return;
+            };
+            if !local_path.is_empty() {
+                open_local_with_default_app(&local_path);
+            } else {
+                spawn_video_handoff(ui_for_video.clone(), asset_id, filename);
+            }
+        }
+    });
+    picture_overlay.add_overlay(&video_badge_button);
+
     let active_a = Rc::new(Cell::new(true));
     let zoom_level = Rc::new(Cell::new(1.0_f64));
     let initial_full = ui.ctx.config.read().data.library_preview_full_resolution;
@@ -653,6 +687,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let load_gen = load_gen.clone();
         let pic_stack = pic_stack.clone();
         let active_a = active_a.clone();
+        let video_badge_button = video_badge_button.clone();
+        let video_badge_target = video_badge_target.clone();
         move |target: gtk::Picture,
               target_is_a: bool,
               asset_id: String,
@@ -670,11 +706,25 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let load_gen = load_gen.clone();
             let pic_stack = pic_stack.clone();
             let active_a = active_a.clone();
+            let video_badge_button = video_badge_button.clone();
+            let video_badge_target = video_badge_target.clone();
             let our_gen = load_gen.get().wrapping_add(1);
             load_gen.set(our_gen);
             unavailable_overlay.set_reveal_child(false);
             unavailable_overlay.set_can_target(false);
             *unavailable_path.borrow_mut() = None;
+            // Videos use the still thumbnail as a poster + play badge; image
+            // decoders would all fail and fall through to "unavailable".
+            let is_video =
+                crate::media_kinds::asset_kind(&mime) == crate::media_kinds::AssetKind::Video;
+            if is_video {
+                *video_badge_target.borrow_mut() =
+                    Some((local_path.clone(), asset_id.clone(), filename.clone()));
+                video_badge_button.set_visible(true);
+            } else {
+                *video_badge_target.borrow_mut() = None;
+                video_badge_button.set_visible(false);
+            }
             if let Some(texture) = ui
                 .ctx
                 .thumbnail_cache
@@ -721,6 +771,24 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     unavailable_overlay.set_can_target(true);
                     unavailable_overlay.set_reveal_child(true);
                 };
+                if is_video {
+                    // Use the grid's preview thumbnail as the poster.
+                    let thumb_result = ui
+                        .ctx
+                        .thumbnail_cache
+                        .load_thumbnail(&asset_id, ThumbnailSize::Preview)
+                        .await;
+                    if !is_current() {
+                        return;
+                    }
+                    if let Ok(texture) = thumb_result {
+                        target.set_paintable(Some(&texture));
+                    }
+                    commit_visible();
+                    cancel_loader.set(true);
+                    loader.set_reveal_child(false);
+                    return;
+                }
                 if !local_path.is_empty() {
                     if let Some(texture) =
                         load_texture_oriented(std::path::Path::new(&local_path)).await
@@ -821,6 +889,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let load_into_picture = load_into_picture.clone();
         let resolution_toggle = resolution_toggle.clone();
         let download = download.clone();
+        let zoom_group = zoom_group.clone();
         let prev_btn = prev_btn.clone();
         let next_btn = next_btn.clone();
         let details_filename = details_filename.clone();
@@ -872,8 +941,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             next_btn.set_sensitive(pos + 1 < n);
 
             let is_local = !local_path.is_empty() && asset_id.starts_with(LOCAL_ID_PREFIX);
-            resolution_toggle.set_visible(!is_local);
-            download.set_visible(!is_local);
+            let is_video =
+                crate::media_kinds::asset_kind(&mime) == crate::media_kinds::AssetKind::Video;
+            resolution_toggle.set_visible(!is_local && !is_video);
+            download.set_visible(!is_local && !is_video);
+            zoom_group.set_visible(!is_video);
 
             // Load into the *inactive* picture; commit the slide transition
             // after the texture is set so the user sees the current image

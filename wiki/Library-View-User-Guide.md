@@ -210,7 +210,8 @@ Click any asset in the grid to open it in the lightbox.
 | ![Lightbox details on](https://raw.githubusercontent.com/nicx17/mimick/main/docs/screenshots/lightbox_view_details_pane_on.png) | ![Lightbox details off](https://raw.githubusercontent.com/nicx17/mimick/main/docs/screenshots/lightbox_view_details_pane_off.png) |
 
 - The lightbox shows a preview image. If **Full Resolution Preview** is enabled in Settings → Behavior, it loads the original file instead of a server-generated proxy.
-- **RAW Previews**: By default, RAW files display using their fast embedded JPEG previews. You can toggle **Full RAW Decoding** in settings to perform a full sensor demosaic instead.
+- **RAW Previews**: By default, RAW files display using their fast embedded previews. The extractor first scans the file for the largest embedded JPEG (catching the full-resolution preview on cameras that store both a tiny thumb and a full-res one — e.g. Sony ARW); if the file contains no JPEG at all (Samsung DNG, OnePlus DNG, and other phone DNGs that store their preview as uncompressed TIFF strips), it falls back to libraw's bitmap thumbnail with container orientation applied. You can toggle **Full RAW Decoding** in settings to perform a full sensor demosaic instead.
+- **Videos**: Navigating to a video asset in the lightbox shows the video's still thumbnail as a poster with a centered play badge. Clicking the badge launches the same external player flow used by the grid (system default app for local files; downloaded to cache then opened for remote files). Zoom, resolution toggle, and download controls are hidden for the video case.
 - EXIF metadata is fetched (including for local files) and displayed alongside the asset.
 - **Download** saves the original file to the configured download folder.
 

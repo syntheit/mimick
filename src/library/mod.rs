@@ -303,14 +303,152 @@ fn write_raw_decode_cache(path: &std::path::Path, texture: &gdk4::Texture) {
         log::debug!("RAW decode cache written for {}", path.display());
     }
 }
-/// Extract the embedded camera JPEG preview from a RAW file via libraw.
-/// This is the fast path: no demosaic, no color processing — just byte
-/// extraction of the preview JPEG the camera stored inside the container.
-/// Falls back to `None` if the file has no usable embedded thumbnail.
-///
-/// Orientation is applied using the container's `flip` field for bitmap
-/// thumbnails, and via `Pixbuf::apply_embedded_orientation` for JPEG
-/// thumbnails (which carry their own EXIF).
+/// Return the largest SOI/EOI-bounded JPEG payload in the file, or None.
+/// Cameras that store both a thumbnail and a full-res preview need the
+/// largest one to avoid the postage-stamp problem.
+fn extract_largest_embedded_jpeg(path: &std::path::Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut best: Option<(usize, usize)> = None;
+    let len_total = bytes.len();
+    let mut i = 0;
+    while i + 3 < len_total {
+        // SOI is FF D8 FF xx where xx != 00 (FF 00 is a byte-stuffed escape).
+        if bytes[i] == 0xFF && bytes[i + 1] == 0xD8 && bytes[i + 2] == 0xFF && bytes[i + 3] != 0x00
+        {
+            let start = i;
+            let mut j = i + 2;
+            while j + 1 < len_total {
+                if bytes[j] == 0xFF && bytes[j + 1] == 0xD9 {
+                    break;
+                }
+                j += 1;
+            }
+            if j + 1 < len_total {
+                let payload_len = j + 2 - start;
+                if best.is_none_or(|(_, l)| payload_len > l) {
+                    best = Some((start, payload_len));
+                }
+                i = j + 2;
+                continue;
+            }
+            break;
+        }
+        i += 1;
+    }
+    best.map(|(start, l)| bytes[start..start + l].to_vec())
+}
+
+/// Read EXIF orientation (tag 0x0112) from JPEG bytes. Returns 1..=8 or None.
+/// Hand-rolled because `Pixbuf::apply_embedded_orientation` silently drops
+/// EXIF on some RAW-embedded JPEGs (truncated/oversize APP1 segments).
+fn read_jpeg_exif_orientation(bytes: &[u8]) -> Option<u8> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        let marker = bytes[i + 1];
+        if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        let seg_len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        if seg_len < 2 || i + 2 + seg_len > bytes.len() {
+            return None;
+        }
+        let seg = &bytes[i + 4..i + 2 + seg_len];
+        if marker == 0xE1 && seg.len() >= 6 && &seg[..6] == b"Exif\0\0" {
+            return parse_tiff_orientation(&seg[6..]);
+        }
+        i += 2 + seg_len;
+    }
+    None
+}
+
+/// Parse TIFF IFD0 starting at the TIFF header, return orientation if present.
+fn parse_tiff_orientation(tiff: &[u8]) -> Option<u8> {
+    if tiff.len() < 8 {
+        return None;
+    }
+    let little = match &tiff[..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let read_u16 = |p: &[u8]| -> u16 {
+        if little {
+            u16::from_le_bytes([p[0], p[1]])
+        } else {
+            u16::from_be_bytes([p[0], p[1]])
+        }
+    };
+    let read_u32 = |p: &[u8]| -> u32 {
+        if little {
+            u32::from_le_bytes([p[0], p[1], p[2], p[3]])
+        } else {
+            u32::from_be_bytes([p[0], p[1], p[2], p[3]])
+        }
+    };
+    if read_u16(&tiff[2..4]) != 0x002A {
+        return None;
+    }
+    let ifd0 = read_u32(&tiff[4..8]) as usize;
+    if ifd0 + 2 > tiff.len() {
+        return None;
+    }
+    let count = read_u16(&tiff[ifd0..ifd0 + 2]) as usize;
+    for n in 0..count {
+        let off = ifd0 + 2 + n * 12;
+        if off + 12 > tiff.len() {
+            return None;
+        }
+        if read_u16(&tiff[off..off + 2]) == 0x0112 {
+            let v = read_u16(&tiff[off + 8..off + 10]) as u8;
+            return (1..=8).contains(&v).then_some(v);
+        }
+    }
+    None
+}
+
+/// Apply EXIF orientation (1..=8) to a Pixbuf via rotate + optional flip.
+fn apply_exif_orientation(pixbuf: &gtk::gdk_pixbuf::Pixbuf, orient: u8) -> gtk::gdk_pixbuf::Pixbuf {
+    use gtk::gdk_pixbuf::PixbufRotation;
+    let rotated = match orient {
+        3 | 4 => pixbuf.rotate_simple(PixbufRotation::Upsidedown),
+        5 | 8 => pixbuf.rotate_simple(PixbufRotation::Counterclockwise),
+        6 | 7 => pixbuf.rotate_simple(PixbufRotation::Clockwise),
+        _ => Some(pixbuf.clone()),
+    }
+    .unwrap_or_else(|| pixbuf.clone());
+    match orient {
+        2 | 4 | 5 | 7 => rotated.flip(true).unwrap_or(rotated),
+        _ => rotated,
+    }
+}
+
+/// Decode JPEG bytes to a texture, applying EXIF orientation or libraw flip.
+fn jpeg_bytes_to_oriented_texture(bytes: &[u8], flip: i32) -> Option<gdk4::Texture> {
+    let stream = gtk::gio::MemoryInputStream::from_bytes(&glib::Bytes::from(bytes));
+    let raw_pixbuf =
+        gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gtk::gio::Cancellable::NONE).ok()?;
+    // Prefer our own EXIF read because pixbuf's loader drops EXIF on some
+    // RAW-embedded JPEGs; only when we can't find one do we fall through.
+    let oriented = if let Some(orient) = read_jpeg_exif_orientation(bytes) {
+        apply_exif_orientation(&raw_pixbuf, orient)
+    } else {
+        raw_pixbuf
+            .apply_embedded_orientation()
+            .unwrap_or_else(|| apply_libraw_flip(&raw_pixbuf, flip))
+    };
+    pixbuf_to_texture(&oriented)
+}
+
+/// Embedded RAW preview: SOI-scan for the largest JPEG (primary), fall back
+/// to libraw's bitmap/JPEG thumbnail for files that store the preview as
+/// TIFF strips (Samsung DNG, OnePlus DNG, etc.). Full demosaic path untouched.
 fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -335,9 +473,31 @@ fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
             return None;
         }
 
-        // Read container orientation before unpacking thumbnail.
+        // Container orientation — required as a fallback when an embedded JPEG
+        // lacks its own EXIF orientation tag, and for raw bitmap thumbs.
         let flip = (*lr).sizes.flip;
 
+        // PRIMARY: scan the file for the largest embedded JPEG and decode it.
+        if let Some(scan) = extract_largest_embedded_jpeg(path) {
+            let scan_len = scan.len();
+            if let Some(texture) = jpeg_bytes_to_oriented_texture(&scan, flip) {
+                log::debug!(
+                    "Extracted embedded JPEG preview ({} bytes via SOI-scan, flip={}) from {}",
+                    scan_len,
+                    flip,
+                    path.display()
+                );
+                return Some(texture);
+            }
+            log::debug!(
+                "SOI-scanned JPEG ({} bytes) failed to decode for {}; falling back to libraw",
+                scan_len,
+                path.display()
+            );
+        }
+
+        // FALLBACK: libraw thumb — handles bitmap previews (Samsung/OnePlus
+        // DNG store uncompressed TIFF strips) and non-contiguous JPEG-in-strip.
         if libraw_sys::libraw_unpack_thumb(lr) != 0 {
             log::debug!("No embedded thumbnail in {}", path.display());
             return None;
@@ -367,39 +527,23 @@ fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
         let bytes = std::slice::from_raw_parts((*img).data.as_ptr(), data_size);
 
         if (*img).type_ == libraw_sys::LibRaw_image_formats_LIBRAW_IMAGE_JPEG {
-            // Load JPEG through Pixbuf so EXIF orientation is applied.
-            let stream = gtk::gio::MemoryInputStream::from_bytes(&glib::Bytes::from(bytes));
-            let raw_pixbuf =
-                match gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gtk::gio::Cancellable::NONE) {
-                    Ok(pb) => pb,
-                    Err(err) => {
-                        log::debug!(
-                            "Embedded JPEG pixbuf load failed for {}: {}",
-                            path.display(),
-                            err
-                        );
-                        return None;
-                    }
-                };
-            // apply_embedded_orientation uses EXIF inside the JPEG itself.
-            // If that does nothing (orientation tag missing), fall back to
-            // the container flip value.
-            let oriented = raw_pixbuf
-                .apply_embedded_orientation()
-                .unwrap_or_else(|| apply_libraw_flip(&raw_pixbuf, flip));
-            let texture = pixbuf_to_texture(&oriented);
+            let texture = jpeg_bytes_to_oriented_texture(bytes, flip);
             if texture.is_some() {
                 log::debug!(
-                    "Extracted embedded JPEG preview ({} bytes, flip={}) from {}",
+                    "Extracted embedded JPEG preview ({} bytes via libraw, flip={}) from {}",
                     data_size,
                     flip,
+                    path.display()
+                );
+            } else {
+                log::debug!(
+                    "libraw JPEG thumb failed to decode via pixbuf for {}",
                     path.display()
                 );
             }
             texture
         } else {
-            // Bitmap thumbnail — build a Pixbuf, apply container orientation,
-            // then convert to texture.
+            // Bitmap thumb (Samsung/OnePlus DNG): build Pixbuf, apply flip.
             let width = (*img).width as i32;
             let height = (*img).height as i32;
             let colors = (*img).colors as i32;
@@ -2474,5 +2618,88 @@ mod texture_decoder_tests {
         RAW_FULL_DECODE.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_fixture_texture("sample.dng", (16, 12));
         RAW_FULL_DECODE.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    fn largest_embedded_jpeg_picks_biggest_soi_payload() {
+        // Build a synthetic buffer with two JPEG SOI/EOI blocks: a small one
+        // and a much larger one. The scanner should return the larger payload.
+        let small = {
+            let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+            v.extend_from_slice(&[0x00; 32]);
+            v.extend_from_slice(&[0xFF, 0xD9]);
+            v
+        };
+        let large = {
+            let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE1];
+            v.extend_from_slice(&[0x42; 4096]);
+            v.extend_from_slice(&[0xFF, 0xD9]);
+            v
+        };
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0x00; 16]);
+        buf.extend_from_slice(&small);
+        buf.extend_from_slice(&[0x00; 64]);
+        buf.extend_from_slice(&large);
+        buf.extend_from_slice(&[0x00; 16]);
+
+        let tmp = std::env::temp_dir().join("mimick_soi_scan_fixture.bin");
+        std::fs::write(&tmp, &buf).unwrap();
+        let got = extract_largest_embedded_jpeg(&tmp).expect("scanner should find a JPEG");
+        let _ = std::fs::remove_file(&tmp);
+
+        assert_eq!(got.len(), large.len(), "should return the larger payload");
+        assert_eq!(&got[..4], &[0xFF, 0xD8, 0xFF, 0xE1]);
+        assert_eq!(&got[got.len() - 2..], &[0xFF, 0xD9]);
+    }
+
+    #[test]
+    fn jpeg_exif_orientation_parses_tag_0112() {
+        // Hand-built minimal JPEG: SOI + APP1(Exif/TIFF little-endian, IFD0
+        // with a single Orientation=6 entry) + EOI. Verifies our parser walks
+        // segments, finds tag 0x0112, and returns the 16-bit SHORT value.
+        let mut tiff: Vec<u8> = Vec::new();
+        tiff.extend_from_slice(b"II"); // little-endian
+        tiff.extend_from_slice(&0x002A_u16.to_le_bytes());
+        tiff.extend_from_slice(&8_u32.to_le_bytes()); // IFD0 offset
+        tiff.extend_from_slice(&1_u16.to_le_bytes()); // one entry
+        tiff.extend_from_slice(&0x0112_u16.to_le_bytes()); // tag = Orientation
+        tiff.extend_from_slice(&3_u16.to_le_bytes()); // type = SHORT
+        tiff.extend_from_slice(&1_u32.to_le_bytes()); // count
+        tiff.extend_from_slice(&6_u16.to_le_bytes()); // value (low half)
+        tiff.extend_from_slice(&0_u16.to_le_bytes()); // value (high half)
+
+        let mut app1: Vec<u8> = Vec::new();
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(&tiff);
+        let app1_len = (app1.len() + 2) as u16;
+
+        let mut jpeg: Vec<u8> = vec![0xFF, 0xD8]; // SOI
+        jpeg.push(0xFF);
+        jpeg.push(0xE1); // APP1
+        jpeg.extend_from_slice(&app1_len.to_be_bytes());
+        jpeg.extend_from_slice(&app1);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]); // EOI
+
+        assert_eq!(read_jpeg_exif_orientation(&jpeg), Some(6));
+    }
+
+    #[test]
+    fn jpeg_exif_orientation_none_when_missing() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xD9];
+        assert_eq!(read_jpeg_exif_orientation(&jpeg), None);
+    }
+
+    #[test]
+    fn largest_embedded_jpeg_skips_byte_stuffed_ff00() {
+        // FF 00 inside entropy data must NOT be mistaken for an SOI (which is
+        // FF D8 FF xx with xx != 00). A file with only an FF 00 sequence and
+        // no real SOI should return None.
+        let buf: Vec<u8> = vec![0x00, 0xFF, 0x00, 0xFF, 0xD8, 0xFF, 0x00, 0x42];
+        let tmp = std::env::temp_dir().join("mimick_soi_scan_ff00.bin");
+        std::fs::write(&tmp, &buf).unwrap();
+        let got = extract_largest_embedded_jpeg(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(got.is_none(), "byte-stuffed FF 00 must not match as SOI");
     }
 }
