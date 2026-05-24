@@ -721,6 +721,9 @@ async fn hash_to_task(
         }
     };
 
+    let sidecar_path = crate::sidecar::find_sidecar(std::path::Path::new(&path))
+        .map(|p| p.to_string_lossy().into_owned());
+
     Ok(FileTask {
         path,
         watch_path,
@@ -729,6 +732,7 @@ async fn hash_to_task(
         album_name,
         reassociate_only,
         skip_album: false,
+        sidecar_path,
     })
 }
 

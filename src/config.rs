@@ -34,6 +34,10 @@ pub struct FolderRules {
     /// Delete remote asset when its corresponding local file is removed.
     #[serde(default)]
     pub delete_album_to_folder: bool,
+    /// Per-folder override for XMP sidecar upload. `None` inherits the global
+    /// `upload_xmp_sidecars` setting; `Some(true/false)` overrides it.
+    #[serde(default)]
+    pub include_xmp_sidecar: Option<bool>,
 }
 
 impl FolderRules {
@@ -271,6 +275,10 @@ pub struct ConfigData {
     /// Include hidden people in the Explore view.
     #[serde(default)]
     pub show_hidden_faces: bool,
+    /// Attach XMP sidecar files alongside media during upload. Per-folder
+    /// rules can override this global default.
+    #[serde(default = "default_true")]
+    pub upload_xmp_sidecars: bool,
 }
 
 impl Default for ConfigData {
@@ -299,6 +307,7 @@ impl Default for ConfigData {
             raw_full_decode: false,
             show_unnamed_faces: true,
             show_hidden_faces: false,
+            upload_xmp_sidecars: true,
         }
     }
 }

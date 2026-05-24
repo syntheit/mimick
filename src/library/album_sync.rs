@@ -326,6 +326,8 @@ pub async fn execute_uploads(
 ) -> usize {
     let mut queued = 0;
     for entry in entries {
+        let sidecar_path = crate::sidecar::find_sidecar(&entry.local.path)
+            .map(|p| p.to_string_lossy().into_owned());
         let task = FileTask {
             path: entry.local.path.to_string_lossy().to_string(),
             watch_path: watch_path.to_string_lossy().to_string(),
@@ -334,6 +336,7 @@ pub async fn execute_uploads(
             album_name: Some(album_name.clone()),
             reassociate_only: false,
             skip_album: false,
+            sidecar_path,
         };
         if ctx.queue_manager.add_to_queue(task).await {
             queued += 1;

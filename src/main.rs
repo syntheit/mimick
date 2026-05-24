@@ -30,6 +30,7 @@ mod remote_sync;
 mod runtime_env;
 mod sanitize;
 mod settings_window;
+mod sidecar;
 mod startup_scan;
 mod state_manager;
 mod sync_index;
@@ -510,7 +511,7 @@ async fn main() {
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    MonitorEvent::Ready { path, checksum } => {
+                    MonitorEvent::Ready { path, checksum, sidecar_path } => {
                         if deletion_ctx.expected_self_downloads.consume(&path) {
                             continue;
                         }
@@ -576,6 +577,7 @@ async fn main() {
                                 album_name,
                                 reassociate_only,
                                 skip_album: false,
+                                sidecar_path,
                             })
                             .await;
                     }

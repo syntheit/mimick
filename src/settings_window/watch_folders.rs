@@ -301,11 +301,20 @@ fn show_folder_rules_dialog(
         .sensitive(false)
         .build();
 
+    let include_xmp = adw::SwitchRow::builder()
+        .title("Include XMP Sidecars")
+        .subtitle("Attach companion .xmp files alongside media during upload.")
+        .title_lines(1)
+        .subtitle_lines(2)
+        .active(current.include_xmp_sidecar.unwrap_or(true))
+        .build();
+
     list_box.append(&sync_method);
     list_box.append(&startup_scan);
     list_box.append(&delete_folder_to_album);
     list_box.append(&delete_album_to_folder);
     list_box.append(&ignore_hidden);
+    list_box.append(&include_xmp);
     content.append(&list_box);
 
     let max_size_entry = Entry::builder()
@@ -382,6 +391,7 @@ fn show_folder_rules_dialog(
                 }),
                 delete_folder_to_album: delete_folder_to_album.is_active(),
                 delete_album_to_folder: stored_delete_album_to_folder,
+                include_xmp_sidecar: Some(include_xmp.is_active()),
             };
             (on_settings_changed)();
             dialog.close();

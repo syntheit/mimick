@@ -39,6 +39,8 @@ pub enum MonitorEvent {
         path: String,
         /// File SHA-1 checksum.
         checksum: String,
+        /// Companion XMP sidecar path, if one was found on disk.
+        sidecar_path: Option<String>,
     },
     /// Emitted when a watched file is deleted.
     Deleted {
@@ -115,11 +117,15 @@ impl Monitor {
                             .await
                         {
                             Ok(Ok(checksum)) => {
+                                let sidecar_path =
+                                    crate::sidecar::find_sidecar(std::path::Path::new(&path_str))
+                                        .map(|p| p.to_string_lossy().into_owned());
                                 log::info!("File ready: {} (sha1={})", path_str, checksum);
                                 let _ = tx_out
                                     .send(MonitorEvent::Ready {
                                         path: path_str.clone(),
                                         checksum,
+                                        sidecar_path,
                                     })
                                     .await;
                             }

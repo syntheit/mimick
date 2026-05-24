@@ -515,6 +515,12 @@ pub fn build_settings_window_with_parent(
         .build();
     behavior_group.add(&concurrency_row);
 
+    let xmp_sidecar_row = adw::SwitchRow::builder()
+        .title("Upload XMP Sidecars")
+        .subtitle("Attach companion .xmp sidecar files alongside media during upload.")
+        .build();
+    behavior_group.add(&xmp_sidecar_row);
+
     // Quiet hours — enable switch + two hour spinners
     let quiet_hours_row = adw::SwitchRow::builder()
         .title("Quiet Hours")
@@ -749,6 +755,8 @@ pub fn build_settings_window_with_parent(
         catchup_row,
         #[weak]
         background_sync_row,
+        #[weak]
+        xmp_sidecar_row,
         #[strong]
         tracked_rows,
         #[strong]
@@ -835,6 +843,7 @@ pub fn build_settings_window_with_parent(
             let quiet_hours_start = quiet_hours_enabled.then(|| quiet_start_row.value() as u8);
             let quiet_hours_end = quiet_hours_enabled.then(|| quiet_end_row.value() as u8);
             let background_sync_enabled = background_sync_row.is_active();
+            let upload_xmp_sidecars = xmp_sidecar_row.is_active();
             let catchup_mode = match catchup_row.selected() {
                 1 => StartupCatchupMode::RecentOnly,
                 2 => StartupCatchupMode::NewFilesOnly,
@@ -965,6 +974,7 @@ pub fn build_settings_window_with_parent(
                         new_config.data.upload_concurrency = upload_concurrency;
                         new_config.data.quiet_hours_start = quiet_hours_start;
                         new_config.data.quiet_hours_end = quiet_hours_end;
+                        new_config.data.upload_xmp_sidecars = upload_xmp_sidecars;
 
                         if include_connectivity
                             && !api_key.is_empty()
@@ -1413,6 +1423,7 @@ pub fn build_settings_window_with_parent(
         disk_cache_row.set_value(config.data.cache_disk_cap_mb as f64);
     }
     concurrency_row.set_value(config.data.upload_concurrency as f64);
+    xmp_sidecar_row.set_active(config.data.upload_xmp_sidecars);
     let qh_enabled = config.data.quiet_hours_start.is_some();
     quiet_hours_row.set_active(qh_enabled);
     quiet_start_row.set_value(config.data.quiet_hours_start.unwrap_or(22) as f64);

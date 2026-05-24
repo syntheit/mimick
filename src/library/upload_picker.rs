@@ -83,6 +83,8 @@ fn spawn_enqueue(ctx: Arc<AppContext>, album: Option<(String, String)>, paths: V
                         continue;
                     }
                 };
+            let sidecar_path =
+                crate::sidecar::find_sidecar(&path).map(|p| p.to_string_lossy().into_owned());
             let task = FileTask {
                 path: path_str,
                 watch_path,
@@ -95,6 +97,7 @@ fn spawn_enqueue(ctx: Arc<AppContext>, album: Option<(String, String)>, paths: V
                 // queue's parent-dir-as-album fallback would otherwise create
                 // a junk album named after the user's file system layout.
                 skip_album: album.is_none(),
+                sidecar_path,
             };
             if ctx.queue_manager.add_to_queue(task).await {
                 queued += 1;

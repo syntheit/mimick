@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embedded JPEG preview extraction from RAW files via `libraw_unpack_thumb` + `libraw_dcraw_make_mem_thumb`. Supported across all major RAW formats (CR2, CR3, NEF, ARW, DNG, ORF, RW2, PEF, FFF, RAF, SR2, MRW, etc.) with automatic fallback to full demosaic when no embedded preview exists.
 - Toggleable RAW decode cache setting in Settings > Library. Stores demosaiced textures as PNGs on disk to skip re-processing on re-opens. Defaults to off to conserve storage.
 - Lightbox swipe gesture navigation: swipe left for next asset, swipe right for previous. Works with both touch and trackpad input. Automatically disabled when zoomed in to avoid conflicting with pan gestures. Essential on mobile viewports (360px) where the prev/next header buttons are hidden.
+- XMP sidecar upload support: companion `.xmp` files alongside media are automatically detected and attached via the Immich `sidecarData` multipart field during upload. Searches `photo.ext.xmp` (preferred) then `photo.xmp` (fallback), case-insensitive. Global toggle in Settings > Behavior with per-folder override in Folder Rules.
 
 ### Changed
 
