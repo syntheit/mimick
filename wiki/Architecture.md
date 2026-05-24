@@ -42,6 +42,8 @@ graph TD
         RetryFile["retries.json (~/.cache/mimick/) - written on shutdown only"]
         StateFile["status.json (~/.cache/mimick/) - written on shutdown only"]
         ThumbStore["thumbnails/ (~/.cache/mimick/thumbnails/)"]
+        RawCache["raw_decode/ (~/.cache/mimick/raw_decode/)"]
+        ExifCache["exif/ (~/.cache/mimick/exif/)"]
         SyncIndex["synced_index.json (~/.local/share/mimick/)"]
     end
 
@@ -51,6 +53,8 @@ graph TD
     QueueManager -->|Write on exit| RetryFile
     Main -->|Read/Write| SyncIndex
     ThumbCache -->|LRU / Write| ThumbStore
+    Window -->|Write| RawCache
+    Window -->|Write| ExifCache
     Diagnostics -->|Copy selected files| Storage
 ```
 
@@ -105,6 +109,7 @@ Thread-safe upload orchestrator using a single `Arc<Mutex<AppState>>` for all co
 - The main user interface is a unified `adw::PreferencesWindow` that doubles as the Library View and the Settings panel.
 - Built on demand from `AppContext`; close destroys the window (unless background sync is disabled, in which case the app quits)
 - Includes distinct library pages: **Photos**, **Explore**, **Albums**, and **Search**.
+- Supports manual uploads via the `upload_picker` module, directly enqueueing multi-file selections.
 - `Arc<Mutex<AppState>>` accessed from `AppContext`; the 500ms `glib::timeout_add_local` timer reads it without any disk I/O to drive the footer Sync Status indicator.
 - Test Connection button uses the shared client -- no new reqwest pool per click
 - Saving applies updated API settings, queue policy, worker limit, and watched folders to the running process without a restart
@@ -198,5 +203,7 @@ Utility module for displaying user-friendly labels for watch paths, especially p
 - **Retry queue**: in-memory during session; disk path `~/.cache/mimick/retries.json` written only on exit
 - **Sync index**: persisted at `~/.local/share/mimick/synced_index.json` to skip unchanged files across restarts and to detect album-target changes
 - **Thumbnail cache**: `~/.cache/mimick/thumbnails/` for fast preview rendering
+- **RAW Decode cache**: `~/.cache/mimick/raw_decode/` for persisting full sensor demosaics
+- **Local EXIF cache**: `~/.cache/mimick/exif/` for persisting local metadata reads
 - **Notifications**: natively handled via `gio::Notification` and the XDG notification portal; ensures safe delivery without `notify-send` sub-processes when sandboxed
 - **Keyring**: API keys are securely persisted through the `oo7` crate -- natively talking D-Bus Secret Service, or reading an encrypted sandbox file when running across the Flatpak boundary

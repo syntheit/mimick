@@ -12,6 +12,10 @@ use libadwaita::prelude::*;
 
 use crate::app_context::AppContext;
 
+/// Present the server statistics dialog to the user.
+///
+/// Fetches both server-wide and user-specific usage statistics, along with
+/// the server version, and displays them in a modal dialog.
 pub fn present(ctx: Arc<AppContext>, parent: &libadwaita::ApplicationWindow) {
     let dialog = libadwaita::AlertDialog::builder()
         .heading("Server statistics")

@@ -9,19 +9,19 @@
 ### Ubuntu / Debian
 
 ```bash
-sudo apt install libgtk-4-dev libadwaita-1-dev libglib2.0-dev pkg-config build-essential
+sudo apt install libgtk-4-dev libadwaita-1-dev libglib2.0-dev pkg-config build-essential cmake libheif-dev
 ```
 
 ### Fedora
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel pkg-config
+sudo dnf install gtk4-devel libadwaita-devel pkg-config cmake libheif-devel
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S gtk4 libadwaita pkgconf base-devel
+sudo pacman -S gtk4 libadwaita pkgconf base-devel cmake libheif
 ```
 
 ### Flatpak Packaging Prerequisites
