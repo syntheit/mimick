@@ -53,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dropped MPO from the supported-extensions registry; Immich's server rejects the format, so mimick no longer queues `.mpo` files for upload or tries to render them in the lightbox.
 - Centralized the RAW-extension list in `media_kinds` (next to MIME mappings) and removed the duplicate hardcoded list from `library/mod.rs`. New `media_kinds::is_raw_ext()` helper for callers.
 - Local folder thumbnails now generate correctly for RAW images (CR3, NEF, ARW, DNG, ORF, etc.) and other formats without built-in gdk-pixbuf loaders (HEIF, JXL, JP2, PSD). When `Pixbuf::from_file_at_scale` fails, the thumbnail cache falls back to `load_texture_blocking` (the same decoder pipeline used by the lightbox) and converts the result via `TextureDownloader` (GDK 4.10+) for scaling and disk caching. Previously these assets showed as broken/missing thumbnails in the linked folder local view.
+- Explore view no longer filters the people row down to a single person after navigating away and back. The shared `search_entry` widget previously carried a person's name set by the person-click handler into the next Explore-view activation, where it was reapplied as the people filter. Clearing the entry on `content_stack` view switches restores the full people list. The same fix applies to the Albums view.
+- Lightbox slide animation between assets is smoother. The stack child switch is now deferred by one idle tick so the target `GtkPicture` re-measures with the newly-painted texture before the slide starts; the first frame no longer captures the previous texture's aspect ratio.
+- Added debug-level logging when the "Show hidden" people filter is toggled, printing the new state and the number of hidden people in the cached list so wiring issues vs empty server-side data are distinguishable from the log.
 
 ## [9.5.4] - 2026-05-17
 

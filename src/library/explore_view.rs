@@ -259,9 +259,21 @@ where
     let parts_b = clone_parts_handles(parts);
     let on_change_b = on_change.clone();
     hidden_check.connect_toggled(move |btn| {
+        let active = btn.is_active();
+        let hidden_count = parts_b
+            .cached_people
+            .borrow()
+            .iter()
+            .filter(|p| p.is_hidden)
+            .count();
+        log::debug!(
+            "show_hidden_faces toggled to {} ({} hidden people in cache)",
+            active,
+            hidden_count
+        );
         {
             let mut cfg = ctx_b.config.write();
-            cfg.data.show_hidden_faces = btn.is_active();
+            cfg.data.show_hidden_faces = active;
             if !cfg.save() {
                 log::error!("Failed to save config after toggling show_hidden_faces");
             }

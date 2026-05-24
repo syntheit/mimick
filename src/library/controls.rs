@@ -137,19 +137,19 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
                     let model = gtk::StringList::new(&["Newest", "Name", "Most assets"]);
                     ui.sort_mode.set_model(Some(&model));
                     ui.sort_mode.set_selected(0);
-                    // Re-purpose the search entry's placeholder to make the
-                    // context-shift obvious to the user.
+                    // search_entry is shared across views; clear stale text from
+                    // the previous context before applying it as the album filter.
                     ui.search_entry.set_placeholder_text(Some("Filter albums"));
-                    let query = ui.search_entry.text().to_string();
-                    super::albums_view::set_search_filter(&ui.albums, &query);
+                    ui.search_entry.set_text("");
+                    super::albums_view::set_search_filter(&ui.albums, "");
                 }
                 Some("explore") => {
                     let model = gtk::StringList::new(&["Default"]);
                     ui.sort_mode.set_model(Some(&model));
                     ui.sort_mode.set_selected(0);
                     ui.search_entry.set_placeholder_text(Some("Filter people"));
-                    let query = ui.search_entry.text().to_string();
-                    super::explore_view::set_people_search(&ui.explore, &query);
+                    ui.search_entry.set_text("");
+                    super::explore_view::set_people_search(&ui.explore, "");
                 }
                 _ => {
                     let model = gtk::StringList::new(&["Newest", "Filename", "File Type"]);

@@ -703,9 +703,15 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             }
             glib::MainContext::default().spawn_local(async move {
                 let is_current = || load_gen.get() == our_gen;
+                // Defer the child switch by one idle so the target picture
+                // re-measures with the new texture before the slide starts.
                 let commit_visible = || {
-                    pic_stack.set_visible_child_name(if target_is_a { "a" } else { "b" });
-                    active_a.set(target_is_a);
+                    let pic_stack = pic_stack.clone();
+                    let active_a = active_a.clone();
+                    glib::idle_add_local_once(move || {
+                        pic_stack.set_visible_child_name(if target_is_a { "a" } else { "b" });
+                        active_a.set(target_is_a);
+                    });
                 };
                 let show_unavailable = |path: Option<String>| {
                     unavailable_filename.set_label(&filename);
