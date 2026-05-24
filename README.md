@@ -11,26 +11,35 @@
 [![GTK4](https://img.shields.io/badge/GTK4-7DF12B?style=for-the-badge&logo=gtk&logoColor=white)](https://gitlab.gnome.org/GNOME/gtk)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-green.svg?style=for-the-badge)](LICENSE)
 
-</div>
-
-<div align="center">
-
 [![Flathub Version](https://img.shields.io/flathub/v/dev.nicx.mimick?style=for-the-badge&logoSize=auto&color=%23e9b24c)](https://flathub.org/en/apps/dev.nicx.mimick)
 [![Flathub Downloads](https://img.shields.io/flathub/downloads/dev.nicx.mimick?style=for-the-badge&color=%23e9b24c)](https://flathub.org/en/apps/dev.nicx.mimick)
-
 ![Sonar Quality Gate](https://img.shields.io/sonar/quality_gate/nicx17_mimick?server=https%3A%2F%2Fsonarcloud.io&style=for-the-badge)
-
 [![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=nicx17_mimick&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=nicx17_mimick)
 [![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=nicx17_mimick&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=nicx17_mimick)
 [![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=nicx17_mimick&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=nicx17_mimick)
-
 [![SonarQube Cloud](https://sonarcloud.io/images/project_badges/sonarcloud-light.svg)](https://sonarcloud.io/summary/new_code?id=nicx17_mimick)
 
+</div>
+
+<div align="center">
+  <img src="assets/mimick-project-card-3x.png" alt="Mimick Project Card" width="100%">
 </div>
 
 Mimick is an unofficial Immich desktop client for Linux. It provides a GTK4/libadwaita interface for automatic background sync of local photo and video folders to a self-hosted Immich server, and an optional library browser for viewing, searching, and managing assets directly from the desktop.
 
 > This is a community-developed project and is not affiliated with or endorsed by the Immich project.
+
+## Table of Contents
+
+- [![Screenshots](https://img.shields.io/badge/Screenshots-FF90C3?style=flat-square)](#screenshots)
+- [![Core Architecture & Features](https://img.shields.io/badge/Core_Architecture_&_Features-1F6FEB?style=flat-square)](#core-architecture--features)
+- [![Installation](https://img.shields.io/badge/Installation-2E8B57?style=flat-square)](#installation-recommended)
+- [![Usage & Configuration](https://img.shields.io/badge/Usage_&_Configuration-8A2BE2?style=flat-square)](#usage--configuration)
+- [![Building from Source](https://img.shields.io/badge/Building_from_Source-B8860B?style=flat-square)](#building-from-source-for-developers)
+- [![Logging & Notifications](https://img.shields.io/badge/Logging_&_Notifications-CB4B16?style=flat-square)](#logging--notifications)
+- [![Documentation](https://img.shields.io/badge/Documentation-444444?style=flat-square)](#documentation)
+- [![Trust & Verification](https://img.shields.io/badge/Trust_&_Verification-0E7490?style=flat-square)](#trust-and-verification)
+- [![License](https://img.shields.io/badge/License-green?style=flat-square)](#license)
 
 <div align="center">
 
@@ -86,17 +95,17 @@ Mimick is an unofficial Immich desktop client for Linux. It provides a GTK4/liba
 
 Each watched directory operates with isolated logical constraints:
 
-- Static or dynamically generated Immich album targets.
-- Pre-flight omission of hidden paths (dotfiles).
-- Predetermined allowance lists strictly for explicit file extensions (e.g. `.avif`, `.mp4`).
-- Upper-bound maximum file size ceilings.
+- **Target Albums:** Static or dynamically generated Immich album targets.
+- **Hidden File Omission:** Pre-flight omission of hidden paths (dotfiles).
+- **Extension Allowances:** Predetermined allowance lists strictly for explicit file extensions (e.g. `.avif`, `.mp4`).
+- **File Size Ceilings:** Upper-bound maximum file size ceilings.
 
 ### Library View (Optional)
 
-- Built-in album browser with thumbnail grid and Explore landing page.
-- Search modes: filename/metadata, Smart (CLIP), and OCR text lookup.
-- Download originals and open full-resolution previews in the lightbox.
-- Toggle via **Settings → Behavior → Enable Library View** (restart required).
+- **Album Browser:** Built-in album browser with thumbnail grid and Explore landing page.
+- **Advanced Search:** Search modes: filename/metadata, Smart (CLIP), and OCR text lookup.
+- **Media Lightbox:** Download originals and open full-resolution previews in the lightbox.
+- **Optional Toggle:** Toggle via **Settings → Behavior → Enable Library View** (restart required).
 
 ---
 
@@ -155,22 +164,22 @@ When generating the API key in Immich (Account Settings → API Keys), grant onl
 
 **Base — required for any sync to work:**
 
-| Permission | Why |
-|---|---|
-| `asset.upload` | Send media to the server |
-| `asset.update` | Apply correct timezone metadata after upload |
-| `album.read` | Look up the target album for a watch folder |
-| `album.create` | Auto-create the target album if it doesn't exist |
-| `album.addAsset` | Link uploaded media to the target album |
+| Permission       | Why                                              |
+| ---------------- | ------------------------------------------------ |
+| `asset.upload`   | Send media to the server                         |
+| `asset.update`   | Apply correct timezone metadata after upload     |
+| `album.read`     | Look up the target album for a watch folder      |
+| `album.create`   | Auto-create the target album if it doesn't exist |
+| `album.addAsset` | Link uploaded media to the target album          |
 
 **Optional — only required for the features you enable:**
 
-| Feature | Additional permissions |
-|---|---|
-| Library / Explore view (browse photos inside Mimick) | `asset.read`, `asset.view`, `asset.download`, `person.read` |
-| **Sync Method** set to **Full** or **Download Only** (folder rules) | `asset.read`, `asset.download` |
-| **Mirror Folder Deletions to Album** (folder rules toggle) | `asset.delete` *and* `album.removeAsset` (the latter is used when the same asset is referenced by another watch folder, so we just unlink instead of trashing) |
-| **Mirror Album Deletions to Folder** (folder rules toggle) | No additional remote permissions — the album listing is already covered by `album.read`, the trash happens locally |
+| Feature                                                             | Additional permissions                                                                                                                                         |
+| ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Library / Explore view (browse photos inside Mimick)                | `asset.read`, `asset.view`, `asset.download`, `person.read`                                                                                                    |
+| **Sync Method** set to **Full** or **Download Only** (folder rules) | `asset.read`, `asset.download`                                                                                                                                 |
+| **Mirror Folder Deletions to Album** (folder rules toggle)          | `asset.delete` _and_ `album.removeAsset` (the latter is used when the same asset is referenced by another watch folder, so we just unlink instead of trashing) |
+| **Mirror Album Deletions to Folder** (folder rules toggle)          | No additional remote permissions — the album listing is already covered by `album.read`, the trash happens locally                                             |
 
 If you grant `all`, every feature works without further configuration. The granular list above is for users who prefer least-privilege keys.
 
