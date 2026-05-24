@@ -303,39 +303,190 @@ fn write_raw_decode_cache(path: &std::path::Path, texture: &gdk4::Texture) {
         log::debug!("RAW decode cache written for {}", path.display());
     }
 }
-/// Return the largest SOI/EOI-bounded JPEG payload in the file, or None.
-/// Cameras that store both a thumbnail and a full-res preview need the
-/// largest one to avoid the postage-stamp problem.
+/// Minimum size for an embedded preview to be considered -- tiny thumbnails
+/// (EXIF 160x120 stubs) are almost always useless and should be skipped in
+/// favour of the full-resolution preview or the libraw fallback.
+const MIN_EMBEDDED_JPEG_SIZE: usize = 4096;
+
+/// True if the JPEG at `bytes[start..end]` uses SOF3 (lossless JPEG).
+/// RAW files wrap compressed Bayer data in SOF3 containers -- these are
+/// never renderable and should be skipped by the preview scanner.
+fn is_lossless_jpeg(bytes: &[u8], start: usize, end: usize) -> bool {
+    // Walk the marker structure from just after SOI (FF D8) looking for
+    // a SOF marker. SOF markers are C0-CF excluding C4 (DHT), C8
+    // (reserved), and CC (DAC).
+    let mut pos = start + 2;
+    while pos + 3 < end {
+        if bytes[pos] != 0xFF {
+            return false;
+        }
+        let marker = bytes[pos + 1];
+        // Skip fill bytes and parameterless markers.
+        if marker == 0xFF {
+            pos += 1;
+            continue;
+        }
+        if marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            pos += 2;
+            continue;
+        }
+        // SOF marker range: C0-CF except C4, C8, CC.
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
+            return marker == 0xC3;
+        }
+        // SOS -- no SOF found before entropy data; not lossless.
+        if marker == 0xDA {
+            return false;
+        }
+        // Variable-length segment: skip by declared length.
+        if pos + 3 >= end {
+            return false;
+        }
+        let seg_len = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+        if seg_len < 2 || pos + 2 + seg_len > end {
+            return false;
+        }
+        pos = pos + 2 + seg_len;
+    }
+    false
+}
+
+/// Return the largest renderable JPEG embedded in the file, or None.
+/// Uses structure-aware marker walking; skips lossless SOF3 payloads
+/// (compressed Bayer data) and payloads below `MIN_EMBEDDED_JPEG_SIZE`.
 fn extract_largest_embedded_jpeg(path: &std::path::Path) -> Option<Vec<u8>> {
     let bytes = std::fs::read(path).ok()?;
     let mut best: Option<(usize, usize)> = None;
-    let len_total = bytes.len();
+    let len = bytes.len();
     let mut i = 0;
-    while i + 3 < len_total {
-        // SOI is FF D8 FF xx where xx != 00 (FF 00 is a byte-stuffed escape).
+
+    while i + 3 < len {
+        // Look for SOI: FF D8 FF xx (xx != 00).
         if bytes[i] == 0xFF && bytes[i + 1] == 0xD8 && bytes[i + 2] == 0xFF && bytes[i + 3] != 0x00
         {
-            let start = i;
-            let mut j = i + 2;
-            while j + 1 < len_total {
-                if bytes[j] == 0xFF && bytes[j + 1] == 0xD9 {
-                    break;
+            if let Some(end) = find_jpeg_end(&bytes, i) {
+                let payload_len = end - i;
+                if payload_len >= MIN_EMBEDDED_JPEG_SIZE
+                    && !is_lossless_jpeg(&bytes, i, end)
+                    && best.is_none_or(|(_, l)| payload_len > l)
+                {
+                    best = Some((i, payload_len));
                 }
-                j += 1;
-            }
-            if j + 1 < len_total {
-                let payload_len = j + 2 - start;
-                if best.is_none_or(|(_, l)| payload_len > l) {
-                    best = Some((start, payload_len));
-                }
-                i = j + 2;
+                i = end;
                 continue;
             }
-            break;
+            // No end found at all -- skip past this SOI.
+            i += 2;
+            continue;
         }
         i += 1;
     }
+
     best.map(|(start, l)| bytes[start..start + l].to_vec())
+}
+
+/// Walk the JPEG marker structure starting at the SOI at `bytes[start]` and
+/// return the byte offset just past the EOI (or the end of the buffer if the
+/// file omits the trailing EOI).
+///
+/// The scanner reads marker segments by their declared lengths, then
+/// byte-scans only through the entropy-coded section after SOS where
+/// FF 00 (byte-stuffing) and FF D0-D7 (restart markers) are skipped.
+fn find_jpeg_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let len = bytes.len();
+    // Skip past SOI (FF D8).
+    let mut pos = start + 2;
+
+    loop {
+        // Find the next 0xFF marker prefix.
+        while pos < len && bytes[pos] != 0xFF {
+            pos += 1;
+        }
+        if pos + 1 >= len {
+            // Reached EOF without an explicit EOI. Accept the whole tail
+            // as the JPEG payload — some RAW formats omit the trailing D9.
+            return Some(len);
+        }
+
+        // Skip any padding FFs (JPEG spec allows fill bytes before markers).
+        while pos + 1 < len && bytes[pos + 1] == 0xFF {
+            pos += 1;
+        }
+        if pos + 1 >= len {
+            return Some(len);
+        }
+
+        let marker = bytes[pos + 1];
+        match marker {
+            // FF 00: byte-stuffed escape inside entropy data — not a marker.
+            0x00 => {
+                pos += 2;
+            }
+            // EOI: end of this JPEG stream.
+            0xD9 => {
+                return Some(pos + 2);
+            }
+            // SOI: nested JPEG start — abort this stream (the outer loop
+            // will pick it up as a new candidate).
+            0xD8 => {
+                return Some(pos);
+            }
+            // RST0-RST7: restart markers (no payload).
+            0xD0..=0xD7 => {
+                pos += 2;
+            }
+            // SOS (Start of Scan): read the segment header, then enter
+            // the entropy-coded section where only byte-stuffing and
+            // restart markers are valid FF-sequences.
+            0xDA => {
+                if pos + 3 >= len {
+                    return Some(len);
+                }
+                let seg_len = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+                if seg_len < 2 {
+                    return Some(len);
+                }
+                pos = pos + 2 + seg_len;
+                // Now inside entropy data: scan for the next real marker.
+                // FF 00 and FF D0-D7 are part of the stream; anything
+                // else is a marker that ends the entropy section.
+                while pos + 1 < len {
+                    if bytes[pos] == 0xFF {
+                        let next = bytes[pos + 1];
+                        if next == 0x00 || (0xD0..=0xD7).contains(&next) {
+                            // Byte-stuffed escape or restart marker.
+                            pos += 2;
+                            continue;
+                        }
+                        // Real marker found — break out to the outer loop
+                        // which will classify it (EOI, another SOS, etc.).
+                        break;
+                    }
+                    pos += 1;
+                }
+                if pos + 1 >= len {
+                    return Some(len);
+                }
+            }
+            // All other markers: fixed-length header markers (TEM=0x01)
+            // and variable-length segments (APP0-APPn, DQT, DHT, SOF, COM,
+            // etc.) — skip by declared segment length.
+            0x01 => {
+                pos += 2;
+            }
+            _ => {
+                if pos + 3 >= len {
+                    return Some(len);
+                }
+                let seg_len = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+                if seg_len < 2 || pos + 2 + seg_len > len {
+                    // Malformed segment length — accept what we have.
+                    return Some(len);
+                }
+                pos = pos + 2 + seg_len;
+            }
+        }
+    }
 }
 
 /// Read EXIF orientation (tag 0x0112) from JPEG bytes. Returns 1..=8 or None.
@@ -429,23 +580,64 @@ fn apply_exif_orientation(pixbuf: &gtk::gdk_pixbuf::Pixbuf, orient: u8) -> gtk::
     }
 }
 
+/// Check whether a thumbnail has already been rotated to display orientation
+/// by the camera firmware. Compares the thumbnail's aspect ratio to the raw
+/// sensor's: if a 90-degree flip is needed (flip=5 or flip=6) but the
+/// thumbnail is already in the rotated aspect (portrait when sensor is
+/// landscape, or vice versa), the thumbnail is pre-rotated.
+fn is_thumbnail_prerotated(
+    thumb_w: i32,
+    thumb_h: i32,
+    sensor_w: u32,
+    sensor_h: u32,
+    flip: std::ffi::c_int,
+) -> bool {
+    // Only relevant for 90-degree rotations.
+    if flip != 5 && flip != 6 {
+        return false;
+    }
+    let sensor_landscape = sensor_w >= sensor_h;
+    let thumb_landscape = thumb_w >= thumb_h;
+    // After a 90-degree rotation the aspect flips. If the thumbnail already
+    // has the flipped aspect (portrait when sensor is landscape), the camera
+    // stored it pre-rotated.
+    sensor_landscape != thumb_landscape
+}
+
 /// Decode JPEG bytes to a texture, applying EXIF orientation or libraw flip.
 ///
-/// For RAW-embedded previews, the camera often stores orientation only in the
-/// container metadata (`flip`) and leaves the embedded JPEG's own EXIF at
-/// orientation=1. We therefore trust the embedded EXIF only when it carries a
-/// meaningful rotation (>1); otherwise we fall back to the container's `flip`.
-fn jpeg_bytes_to_oriented_texture(bytes: &[u8], flip: i32) -> Option<gdk4::Texture> {
+/// The `flip` and `sensor_dims` parameters come from the RAW container (libraw).
+/// When the decoded JPEG's aspect ratio already matches the rotated sensor
+/// orientation, the container flip is skipped (the camera pre-rotated the
+/// preview). When the JPEG carries its own EXIF orientation > 1, that value
+/// is trusted unconditionally.
+fn jpeg_bytes_to_oriented_texture(
+    bytes: &[u8],
+    flip: i32,
+    sensor_dims: (u32, u32),
+) -> Option<gdk4::Texture> {
     let stream = gtk::gio::MemoryInputStream::from_bytes(&glib::Bytes::from(bytes));
     let raw_pixbuf =
         gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gtk::gio::Cancellable::NONE).ok()?;
     let exif_orient = read_jpeg_exif_orientation(bytes);
     let oriented = match exif_orient {
-        // Embedded JPEG carries a meaningful rotation — trust it.
+        // Embedded JPEG carries a meaningful rotation -- trust it.
         Some(o) if o > 1 => apply_exif_orientation(&raw_pixbuf, o),
         // EXIF says identity (1) or no EXIF tag at all:
-        // fall back to the RAW container's flip value from libraw.
-        _ => apply_libraw_flip(&raw_pixbuf, flip),
+        // apply the container flip only if the thumbnail is NOT pre-rotated.
+        _ => {
+            if is_thumbnail_prerotated(
+                raw_pixbuf.width(),
+                raw_pixbuf.height(),
+                sensor_dims.0,
+                sensor_dims.1,
+                flip,
+            ) {
+                raw_pixbuf
+            } else {
+                apply_libraw_flip(&raw_pixbuf, flip)
+            }
+        }
     };
     pixbuf_to_texture(&oriented)
 }
@@ -477,14 +669,15 @@ fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
             return None;
         }
 
-        // Container orientation — required as a fallback when an embedded JPEG
-        // lacks its own EXIF orientation tag, and for raw bitmap thumbs.
+        // Container orientation and sensor dimensions — used to decide
+        // whether a thumbnail is pre-rotated by comparing aspect ratios.
         let flip = (*lr).sizes.flip;
+        let sensor_dims = ((*lr).sizes.width as u32, (*lr).sizes.height as u32);
 
         // PRIMARY: scan the file for the largest embedded JPEG and decode it.
         if let Some(scan) = extract_largest_embedded_jpeg(path) {
             let scan_len = scan.len();
-            if let Some(texture) = jpeg_bytes_to_oriented_texture(&scan, flip) {
+            if let Some(texture) = jpeg_bytes_to_oriented_texture(&scan, flip, sensor_dims) {
                 log::debug!(
                     "Extracted embedded JPEG preview ({} bytes via SOI-scan, flip={}) from {}",
                     scan_len,
@@ -531,7 +724,7 @@ fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
         let bytes = std::slice::from_raw_parts((*img).data.as_ptr(), data_size);
 
         if (*img).type_ == libraw_sys::LibRaw_image_formats_LIBRAW_IMAGE_JPEG {
-            let texture = jpeg_bytes_to_oriented_texture(bytes, flip);
+            let texture = jpeg_bytes_to_oriented_texture(bytes, flip, sensor_dims);
             if texture.is_some() {
                 log::debug!(
                     "Extracted embedded JPEG preview ({} bytes via libraw, flip={}) from {}",
@@ -547,13 +740,14 @@ fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
             }
             texture
         } else {
-            // Bitmap thumb (Samsung/OnePlus DNG): build Pixbuf, apply flip.
+            // Bitmap thumb (Samsung/OnePlus DNG): build Pixbuf, apply flip
+            // only if the thumbnail is NOT already pre-rotated.
             let width = (*img).width as i32;
             let height = (*img).height as i32;
             let colors = (*img).colors as i32;
             if colors != 3 {
                 log::debug!(
-                    "Embedded thumbnail has {} channels for {} — skipping",
+                    "Embedded thumbnail has {} channels for {} -- skipping",
                     colors,
                     path.display()
                 );
@@ -569,12 +763,19 @@ fn extract_libraw_thumb(path: &std::path::Path) -> Option<gdk4::Texture> {
                 height,
                 row_stride,
             );
-            let oriented = apply_libraw_flip(&pixbuf, flip);
+            let prerotated =
+                is_thumbnail_prerotated(width, height, sensor_dims.0, sensor_dims.1, flip);
+            let oriented = if prerotated {
+                pixbuf
+            } else {
+                apply_libraw_flip(&pixbuf, flip)
+            };
             let texture = pixbuf_to_texture(&oriented);
             if texture.is_some() {
                 log::debug!(
-                    "Extracted embedded bitmap preview (flip={}) from {}",
+                    "Extracted embedded bitmap preview (flip={}, prerotated={}) from {}",
                     flip,
+                    prerotated,
                     path.display()
                 );
             }
@@ -2639,19 +2840,24 @@ mod texture_decoder_tests {
     #[test]
     fn largest_embedded_jpeg_picks_biggest_soi_payload() {
         // Build a synthetic buffer with two JPEG SOI/EOI blocks: a small one
-        // and a much larger one. The scanner should return the larger payload.
-        let small = {
-            let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
-            v.extend_from_slice(&[0x00; 32]);
-            v.extend_from_slice(&[0xFF, 0xD9]);
+        // (below the 4KB minimum — should be skipped) and a large one.
+        // Both use valid JPEG marker structure with declared segment lengths.
+
+        /// Build a minimal valid JPEG with an APP marker segment of the given
+        /// filler size, terminated by EOI.
+        fn build_jpeg(app_marker: u8, filler_size: usize) -> Vec<u8> {
+            // APP segment: FF <marker> <len_hi> <len_lo> <filler...>
+            let seg_len = (filler_size + 2) as u16; // +2 for the length field itself
+            let mut v = vec![0xFFu8, 0xD8, 0xFF, app_marker];
+            v.extend_from_slice(&seg_len.to_be_bytes());
+            v.extend_from_slice(&vec![0x42u8; filler_size]);
+            v.extend_from_slice(&[0xFF, 0xD9]); // EOI
             v
-        };
-        let large = {
-            let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE1];
-            v.extend_from_slice(&[0x42; 4096]);
-            v.extend_from_slice(&[0xFF, 0xD9]);
-            v
-        };
+        }
+
+        let small = build_jpeg(0xE0, 30); // ~36 bytes — well below MIN_EMBEDDED_JPEG_SIZE
+        let large = build_jpeg(0xE1, 8192); // ~8200 bytes — above threshold
+
         let mut buf = Vec::new();
         buf.extend_from_slice(&[0x00; 16]);
         buf.extend_from_slice(&small);
@@ -2667,6 +2873,44 @@ mod texture_decoder_tests {
         assert_eq!(got.len(), large.len(), "should return the larger payload");
         assert_eq!(&got[..4], &[0xFF, 0xD8, 0xFF, 0xE1]);
         assert_eq!(&got[got.len() - 2..], &[0xFF, 0xD9]);
+    }
+
+    #[test]
+    fn largest_embedded_jpeg_skips_byte_stuffed_ff00() {
+        // FF 00 inside entropy data must NOT be mistaken for an SOI (which is
+        // FF D8 FF xx with xx != 00). A file with only an FF 00 sequence and
+        // no real SOI should return None.
+        let buf: Vec<u8> = vec![0x00, 0xFF, 0x00, 0xFF, 0xD8, 0xFF, 0x00, 0x42];
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(&buf).unwrap();
+        let got = extract_largest_embedded_jpeg(tmp.path());
+        assert!(got.is_none(), "byte-stuffed FF 00 must not match as SOI");
+    }
+
+    #[test]
+    fn largest_embedded_jpeg_accepts_implicit_eoi_at_eof() {
+        // Some DNG/CR3/RW2 files omit the trailing FF D9 — the scanner should
+        // accept the payload up to EOF when no explicit EOI is found.
+        let seg_len = (8192 + 2) as u16;
+        let mut jpeg = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+        jpeg.extend_from_slice(&seg_len.to_be_bytes());
+        jpeg.extend_from_slice(&vec![0x42u8; 8192]);
+        // NO trailing FF D9 — implicit end at EOF.
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0x00; 16]);
+        buf.extend_from_slice(&jpeg);
+
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(&buf).unwrap();
+        let got =
+            extract_largest_embedded_jpeg(tmp.path()).expect("scanner should accept implicit EOI");
+
+        // The payload should span from the SOI to the end of the file.
+        assert_eq!(got.len(), buf.len() - 16, "should capture SOI to EOF");
+        assert_eq!(&got[..4], &[0xFF, 0xD8, 0xFF, 0xE0]);
     }
 
     #[test]
@@ -2704,18 +2948,5 @@ mod texture_decoder_tests {
     fn jpeg_exif_orientation_none_when_missing() {
         let jpeg = vec![0xFF, 0xD8, 0xFF, 0xD9];
         assert_eq!(read_jpeg_exif_orientation(&jpeg), None);
-    }
-
-    #[test]
-    fn largest_embedded_jpeg_skips_byte_stuffed_ff00() {
-        // FF 00 inside entropy data must NOT be mistaken for an SOI (which is
-        // FF D8 FF xx with xx != 00). A file with only an FF 00 sequence and
-        // no real SOI should return None.
-        let buf: Vec<u8> = vec![0x00, 0xFF, 0x00, 0xFF, 0xD8, 0xFF, 0x00, 0x42];
-        use std::io::Write;
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.write_all(&buf).unwrap();
-        let got = extract_largest_embedded_jpeg(tmp.path());
-        assert!(got.is_none(), "byte-stuffed FF 00 must not match as SOI");
     }
 }

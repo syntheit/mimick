@@ -127,6 +127,13 @@ pub fn is_raw_ext(ext: &str) -> bool {
     RAW_EXTENSIONS.contains(ext)
 }
 
+/// Whether the path's extension is a camera RAW format.
+pub fn is_raw_path(path: &Path) -> bool {
+    extension_lower(path)
+        .map(|ext| RAW_EXTENSIONS.contains(ext.as_str()))
+        .unwrap_or(false)
+}
+
 /// MIME type for a known extension (already lowercased).
 pub fn mime_for(ext: &str) -> Option<&'static str> {
     MIME_BY_EXT.get(ext).copied()
