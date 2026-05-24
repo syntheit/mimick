@@ -353,7 +353,19 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
 pub(super) fn refresh_library_surfaces(ui: Rc<LibraryWindowUi>, include_current_source: bool) {
     load_albums(ui.clone());
     load_status(ui.clone());
+
+    // Clearing `populated` marks the cached explore/albums grids as stale
+    // but, by itself, won't repaint a visible tab. Re-trigger the loader
+    // for whichever grid is currently on-screen so the user sees fresh
+    // content (with spinners) instead of silently-stale tiles.
+    let visible = ui.content_stack.visible_child_name();
     ui.explore.populated.set(false);
+    match visible.as_deref() {
+        Some("explore") => super::load_explore_landing(ui.clone()),
+        Some("albums") => super::refresh_albums_view(ui.clone()),
+        _ => {}
+    }
+
     if include_current_source {
         let request = {
             let source = ui.ctx.library_state.lock().source.clone();
@@ -386,12 +398,17 @@ pub(super) fn connect_sidebar_handlers(ui: Rc<LibraryWindowUi>) {
                     if let Some(parent) = ui.album_link_row.parent() {
                         parent.set_visible(false);
                     }
-                    if !ui.albums.populated.get() {
-                        ui.content_stack.set_visible_child_name("loading");
-                    } else {
+                    // Skip the refetch when the grid is already populated:
+                    // revisits should be instant. The sidebar/grid are kept
+                    // fresh by `load_albums` (mutations, F5) on their own
+                    // schedule. Force refresh still works through the
+                    // window-level refresh action.
+                    if ui.albums.populated.get() {
                         ui.content_stack.set_visible_child_name("albums");
+                    } else {
+                        ui.content_stack.set_visible_child_name("loading");
+                        refresh_albums_view(ui.clone());
                     }
-                    refresh_albums_view(ui.clone());
                 }
                 _ => {}
             }

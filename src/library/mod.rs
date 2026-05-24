@@ -1949,17 +1949,29 @@ fn prompt_create_album(ui: Rc<LibraryWindowUi>) {
 }
 
 /// Asynchronously fetch the latest albums from the server and redraw the album views.
+///
+/// Late-arriving fetches must not hijack the stack: if the user navigated to
+/// another tab while we were waiting on the network, we still bind the data
+/// (so the grid is current when they come back) but we do *not* force the
+/// stack child to "albums" or "error".
 fn refresh_albums_view(ui: Rc<LibraryWindowUi>) {
     glib::MainContext::default().spawn_local(async move {
         match ui.ctx.api_client.fetch_library_albums().await {
             Ok(albums) => {
                 let on_click = album_click_handler(ui.clone());
                 populate_albums(&ui.albums, ui.ctx.clone(), albums, on_click);
-                ui.content_stack.set_visible_child_name("albums");
+                if matches!(
+                    ui.content_stack.visible_child_name().as_deref(),
+                    Some("albums") | Some("loading")
+                ) {
+                    ui.content_stack.set_visible_child_name("albums");
+                }
             }
             Err(err) => {
                 log::warn!("Albums fetch failed: {}", err);
-                if !ui.albums.populated.get() {
+                if !ui.albums.populated.get()
+                    && ui.content_stack.visible_child_name().as_deref() == Some("loading")
+                {
                     ui.error_label
                         .set_label(&format!("Could not load albums: {}", err));
                     ui.content_stack.set_visible_child_name("error");
@@ -2110,9 +2122,16 @@ fn load_albums(ui: Rc<LibraryWindowUi>) {
                     reload_sidebar(&ui);
                 }
                 Err(err) => {
-                    ui.error_label
-                        .set_label(&format!("Could not load albums: {}", err));
-                    ui.content_stack.set_visible_child_name("error");
+                    // Sidebar-list refresh: never hijack the user's current
+                    // tab with an error page just because the albums list
+                    // couldn't reload. Only surface the error view when the
+                    // user is actively waiting on something.
+                    log::warn!("Albums sidebar refresh failed: {}", err);
+                    if ui.content_stack.visible_child_name().as_deref() == Some("loading") {
+                        ui.error_label
+                            .set_label(&format!("Could not load albums: {}", err));
+                        ui.content_stack.set_visible_child_name("error");
+                    }
                 }
             }
         }
