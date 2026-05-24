@@ -2643,10 +2643,10 @@ mod texture_decoder_tests {
         buf.extend_from_slice(&large);
         buf.extend_from_slice(&[0x00; 16]);
 
-        let tmp = std::env::temp_dir().join("mimick_soi_scan_fixture.bin");
-        std::fs::write(&tmp, &buf).unwrap();
-        let got = extract_largest_embedded_jpeg(&tmp).expect("scanner should find a JPEG");
-        let _ = std::fs::remove_file(&tmp);
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(&buf).unwrap();
+        let got = extract_largest_embedded_jpeg(tmp.path()).expect("scanner should find a JPEG");
 
         assert_eq!(got.len(), large.len(), "should return the larger payload");
         assert_eq!(&got[..4], &[0xFF, 0xD8, 0xFF, 0xE1]);
@@ -2696,10 +2696,10 @@ mod texture_decoder_tests {
         // FF D8 FF xx with xx != 00). A file with only an FF 00 sequence and
         // no real SOI should return None.
         let buf: Vec<u8> = vec![0x00, 0xFF, 0x00, 0xFF, 0xD8, 0xFF, 0x00, 0x42];
-        let tmp = std::env::temp_dir().join("mimick_soi_scan_ff00.bin");
-        std::fs::write(&tmp, &buf).unwrap();
-        let got = extract_largest_embedded_jpeg(&tmp);
-        let _ = std::fs::remove_file(&tmp);
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(&buf).unwrap();
+        let got = extract_largest_embedded_jpeg(tmp.path());
         assert!(got.is_none(), "byte-stuffed FF 00 must not match as SOI");
     }
 }
