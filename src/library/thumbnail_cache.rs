@@ -338,7 +338,15 @@ impl ThumbnailCache {
             // For RAW files, gdk_pixbuf never recognises the format, so skip
             // straight to the custom decoder to avoid a wasted attempt + log noise.
             let pixbuf = if is_raw {
-                custom_decode_to_thumbnail(&path)?
+                // Try custom RAW decoder first (skips the pixbuf attempt that
+                // always fails for most camera RAW formats).
+                custom_decode_to_thumbnail(&path).or_else(|_| {
+                    // Some simple TIFF-based RAW files (DNG) can still be
+                    // decoded by glycin/pixbuf, so fall back to it.
+                    gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 256, 256, true)
+                        .map(|raw| raw.apply_embedded_orientation().unwrap_or(raw))
+                        .map_err(|e| e.to_string())
+                })?
             } else {
                 match gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 256, 256, true) {
                     Ok(raw) => raw.apply_embedded_orientation().unwrap_or(raw),
@@ -440,9 +448,17 @@ fn estimate_texture_bytes(texture: &Texture) -> usize {
 
 /// Decode a file through the custom pipeline (RAW / non-pixbuf formats) and
 /// scale the result down to a 256x256 thumbnail pixbuf.
+///
+/// RAW paths use the thumbnail-specific decoder (embedded JPEG first, full
+/// demosaic only as last resort) so the global "Full RAW Decoding" toggle
+/// — which is meant for lightbox quality — never penalises grid loading.
 fn custom_decode_to_thumbnail(path: &std::path::Path) -> Result<gtk::gdk_pixbuf::Pixbuf, String> {
-    let full_texture = super::load_texture_blocking(path)
-        .ok_or_else(|| format!("No decoder succeeded for {}", path.display()))?;
+    let full_texture = if crate::media_kinds::is_raw_path(path) {
+        super::decode_raw_thumbnail_texture(path)
+    } else {
+        super::load_texture_blocking(path)
+    }
+    .ok_or_else(|| format!("No decoder succeeded for {}", path.display()))?;
     let mut downloader = gdk4::TextureDownloader::new(&full_texture);
     downloader.set_format(gdk4::MemoryFormat::R8g8b8a8);
     let (bytes, stride) = downloader.download_bytes();

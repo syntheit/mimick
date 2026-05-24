@@ -175,6 +175,52 @@ fn memory_texture(
 /// Max RAW dimension; full-sensor demosaic OOMs on 24+ MP files.
 const RAW_MAX_DIMENSION: usize = 4096;
 
+/// Thumbnail-targeted RAW decode: embedded JPEG first, full demosaic only as
+/// last resort. Ignores `RAW_FULL_DECODE` (which is for lightbox quality, not
+/// 256-px grid tiles -- full sensor data would just be scaled away).
+pub(super) fn decode_raw_thumbnail_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
+    if let Some(tex) = extract_libraw_thumb(path) {
+        return Some(tex);
+    }
+    log::debug!(
+        "No embedded preview in {}; thumbnail falling back to full decode",
+        path.display()
+    );
+    if let Some(tex) = decode_libraw_texture(path) {
+        return Some(tex);
+    }
+    // imagepipe pure-Rust fallback -- wrapped in catch_unwind because
+    // rawloader panics on OOB slice access for some malformed inputs.
+    let path_for_panic = path.to_path_buf();
+    let imagepipe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        imagepipe::simple_decode_8bit(path, RAW_MAX_DIMENSION, RAW_MAX_DIMENSION)
+    }));
+    match imagepipe_result {
+        Ok(Ok(image)) => memory_texture(
+            image.width.try_into().ok()?,
+            image.height.try_into().ok()?,
+            gdk4::MemoryFormat::R8g8b8,
+            image.data,
+            image.width.checked_mul(3)?,
+        ),
+        Ok(Err(err)) => {
+            log::debug!(
+                "imagepipe thumbnail fallback also failed for {}: {}",
+                path.display(),
+                err
+            );
+            None
+        }
+        Err(_) => {
+            log::warn!(
+                "imagepipe thumbnail fallback panicked for {}",
+                path_for_panic.display()
+            );
+            None
+        }
+    }
+}
+
 fn decode_raw_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
     let full_decode = RAW_FULL_DECODE.load(std::sync::atomic::Ordering::Relaxed);
     if full_decode {
