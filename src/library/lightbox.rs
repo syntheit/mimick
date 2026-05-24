@@ -652,18 +652,17 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .sync_create()
         .build();
 
-    // On narrow widths, hide the prev/next header buttons — Left/Right
+    // On narrow widths, hide the prev/next header buttons -- Left/Right
     // keyboard shortcuts still work, and the saved space lets the title fit.
+    // The details toggle stays visible so users can still access the EXIF pane.
     let sync_nav_visibility = {
         let prev_btn = prev_btn.clone();
         let next_btn = next_btn.clone();
-        let details_btn = details_btn.clone();
         let split = ui.split.clone();
         move || {
             let show = !split.is_collapsed();
             prev_btn.set_visible(show);
             next_btn.set_visible(show);
-            details_btn.set_visible(show);
         }
     };
     sync_nav_visibility();
@@ -1081,14 +1080,14 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
 
     (*render)();
 
-    prev_btn.connect_clicked(clone!(
+    let goto_prev = Rc::new(clone!(
         #[strong]
         pos_cell,
         #[strong]
         render,
         #[strong]
         nav_dir,
-        move |_| {
+        move || {
             let pos = pos_cell.get();
             if pos > 0 {
                 pos_cell.set(pos - 1);
@@ -1096,6 +1095,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 (*render)();
             }
         }
+    ));
+    prev_btn.connect_clicked(clone!(
+        #[strong]
+        goto_prev,
+        move |_| (*goto_prev)()
     ));
     let goto_next = Rc::new(clone!(
         #[strong]
@@ -1389,20 +1393,45 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
     scrolled_picture.add_controller(right_click);
 
+    // Horizontal swipe gesture for prev/next navigation. Only fires when not
+    // zoomed in so it doesn't conflict with pan. Essential on mobile (360px)
+    // where the prev/next header buttons are hidden.
+    let swipe = gtk::GestureSwipe::new();
+    swipe.set_touch_only(false);
+    swipe.connect_swipe(clone!(
+        #[strong]
+        goto_prev,
+        #[strong]
+        goto_next,
+        #[strong]
+        zoom_level,
+        move |_, vx, _vy| {
+            // Ignore swipes when zoomed in — those should pan instead.
+            if (zoom_level.get() - 1.0).abs() > 0.01 {
+                return;
+            }
+            // vx < 0 means finger moved left → go to next asset.
+            // vx > 0 means finger moved right → go to previous asset.
+            const MIN_VELOCITY: f64 = 50.0;
+            if vx < -MIN_VELOCITY {
+                (*goto_next)();
+            } else if vx > MIN_VELOCITY {
+                (*goto_prev)();
+            }
+        }
+    ));
+    pic_stack.add_controller(swipe);
+
     let key_controller = gtk::EventControllerKey::new();
     key_controller.connect_key_pressed(clone!(
         #[strong]
         ui,
         #[strong]
-        pos_cell,
-        #[strong]
-        render,
-        #[strong]
         details_btn,
         #[strong]
-        goto_next,
+        goto_prev,
         #[strong]
-        nav_dir,
+        goto_next,
         #[strong]
         zoom_by,
         #[strong]
@@ -1425,12 +1454,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     glib::Propagation::Stop
                 }
                 (false, gtk::gdk::Key::Left) => {
-                    let pos = pos_cell.get();
-                    if pos > 0 {
-                        pos_cell.set(pos - 1);
-                        nav_dir.set(-1);
-                        (*render)();
-                    }
+                    (*goto_prev)();
                     glib::Propagation::Stop
                 }
                 (false, gtk::gdk::Key::Right) => {
