@@ -2949,4 +2949,108 @@ mod texture_decoder_tests {
         let jpeg = vec![0xFF, 0xD8, 0xFF, 0xD9];
         assert_eq!(read_jpeg_exif_orientation(&jpeg), None);
     }
+
+    #[test]
+    fn is_lossless_jpeg_detects_sof3() {
+        // SOI + SOF3 marker (FF C3) with a 10-byte segment + EOI.
+        let mut lossless = vec![0xFFu8, 0xD8, 0xFF, 0xC3];
+        lossless.extend_from_slice(&12_u16.to_be_bytes()); // segment length
+        lossless.extend_from_slice(&[0x00; 10]); // segment body
+        lossless.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        assert!(
+            is_lossless_jpeg(&lossless, 0, lossless.len()),
+            "SOF3 should be detected as lossless"
+        );
+    }
+
+    #[test]
+    fn is_lossless_jpeg_allows_baseline() {
+        // SOI + SOF0 (baseline, FF C0) -- not lossless.
+        let mut baseline = vec![0xFFu8, 0xD8, 0xFF, 0xC0];
+        baseline.extend_from_slice(&12_u16.to_be_bytes());
+        baseline.extend_from_slice(&[0x00; 10]);
+        baseline.extend_from_slice(&[0xFF, 0xD9]);
+        assert!(
+            !is_lossless_jpeg(&baseline, 0, baseline.len()),
+            "SOF0 should NOT be detected as lossless"
+        );
+    }
+
+    #[test]
+    fn is_lossless_jpeg_with_app_segments_before_sof() {
+        // SOI + APP1 (FF E1) + SOF3 (FF C3) -- lossless despite APP prefix.
+        let mut data = vec![0xFFu8, 0xD8];
+        // APP1 segment with 20 bytes of filler
+        data.extend_from_slice(&[0xFF, 0xE1]);
+        data.extend_from_slice(&22_u16.to_be_bytes());
+        data.extend_from_slice(&[0x42; 20]);
+        // SOF3
+        data.extend_from_slice(&[0xFF, 0xC3]);
+        data.extend_from_slice(&12_u16.to_be_bytes());
+        data.extend_from_slice(&[0x00; 10]);
+        data.extend_from_slice(&[0xFF, 0xD9]);
+        assert!(is_lossless_jpeg(&data, 0, data.len()));
+    }
+
+    #[test]
+    fn soi_scanner_skips_lossless_jpeg() {
+        // Build a file with TWO JPEGs: a large SOF3 (lossless, should be skipped)
+        // and a smaller SOF0 (baseline, should be selected).
+
+        fn build_jpeg_with_sof(sof_marker: u8, filler: usize) -> Vec<u8> {
+            let mut v = vec![0xFFu8, 0xD8]; // SOI
+            // SOF segment
+            v.extend_from_slice(&[0xFF, sof_marker]);
+            let seg_len = (filler + 2) as u16;
+            v.extend_from_slice(&seg_len.to_be_bytes());
+            v.extend_from_slice(&vec![0x42u8; filler]);
+            v.extend_from_slice(&[0xFF, 0xD9]); // EOI
+            v
+        }
+
+        let lossless = build_jpeg_with_sof(0xC3, 16000); // 16KB lossless -- larger
+        let baseline = build_jpeg_with_sof(0xC0, 8000); // 8KB baseline -- smaller
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0x00; 16]);
+        buf.extend_from_slice(&lossless);
+        buf.extend_from_slice(&[0x00; 32]);
+        buf.extend_from_slice(&baseline);
+        buf.extend_from_slice(&[0x00; 16]);
+
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(&buf).unwrap();
+        let got = extract_largest_embedded_jpeg(tmp.path())
+            .expect("scanner should find the baseline JPEG");
+
+        // Should get the baseline (SOF0), not the larger lossless (SOF3).
+        assert_eq!(got.len(), baseline.len());
+        assert_eq!(&got[..2], &[0xFF, 0xD8]);
+        assert_eq!(got[3], 0xC0, "should select the SOF0 JPEG, not SOF3");
+    }
+
+    #[test]
+    fn thumbnail_prerotated_detects_portrait_on_landscape_sensor() {
+        // Landscape sensor (6000x4000), flip=5 (90-degree), portrait thumb (480x640).
+        assert!(is_thumbnail_prerotated(480, 640, 6000, 4000, 5));
+    }
+
+    #[test]
+    fn thumbnail_prerotated_false_for_matching_aspect() {
+        // Landscape sensor, flip=5, landscape thumb -- not pre-rotated.
+        assert!(!is_thumbnail_prerotated(640, 480, 6000, 4000, 5));
+    }
+
+    #[test]
+    fn thumbnail_prerotated_false_for_no_rotation() {
+        // flip=0 (no rotation) -- never considered pre-rotated.
+        assert!(!is_thumbnail_prerotated(480, 640, 6000, 4000, 0));
+    }
+
+    #[test]
+    fn thumbnail_prerotated_false_for_180_rotation() {
+        // flip=3 (180-degree) -- aspect doesn't change, never pre-rotated.
+        assert!(!is_thumbnail_prerotated(480, 640, 6000, 4000, 3));
+    }
 }

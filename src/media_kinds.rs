@@ -195,4 +195,15 @@ mod tests {
         assert_eq!(asset_kind("video/mp4"), AssetKind::Video);
         assert_eq!(asset_kind("image/jpeg"), AssetKind::Image);
     }
+
+    #[test]
+    fn is_raw_path_detects_raw_extensions() {
+        assert!(is_raw_path(Path::new("photo.NEF")));
+        assert!(is_raw_path(Path::new("photo.cr3")));
+        assert!(is_raw_path(Path::new("photo.DNG")));
+        assert!(is_raw_path(Path::new("/some/path/IMG.ARW")));
+        assert!(!is_raw_path(Path::new("photo.jpg")));
+        assert!(!is_raw_path(Path::new("video.mp4")));
+        assert!(!is_raw_path(Path::new("noext")));
+    }
 }
