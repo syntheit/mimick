@@ -1,16 +1,9 @@
-//! Unified disk-cache maintenance.
-//!
-//! Every on-disk cache directory the app writes to lives as a subdirectory
-//! of `profile::cache_dir()`. This module enumerates them all so that a
-//! "clear cache" action and a startup prune apply uniformly across
-//! thumbnails, decoded RAW previews, EXIF entries, video downloads,
-//! original previews, and open-in handoffs.
+//! Unified prune + clear over every on-disk cache subdirectory.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-/// All cache subdirectories managed by the app, relative to the profile
-/// cache root. Adding a new on-disk cache means appending one entry here.
+/// Cache subdirectories under `profile::cache_dir()`. Append to extend.
 pub const CACHE_SUBDIRS: &[&str] = &[
     "thumbnails",
     "raw_decode",
@@ -20,16 +13,14 @@ pub const CACHE_SUBDIRS: &[&str] = &[
     "open-in",
 ];
 
-/// Yield to the OS scheduler every N file operations during a prune sweep
-/// so the eviction work does not monopolise a core on slow disks.
+/// Yield to the scheduler every N file ops during a prune sweep.
 const YIELD_EVERY: usize = 64;
 
 fn cache_root() -> Option<PathBuf> {
     crate::profile::cache_dir()
 }
 
-/// Synchronously delete every managed cache subdirectory. Intended to be
-/// called from `tokio::task::spawn_blocking` so the UI thread is not blocked.
+/// Remove every managed cache subdir. Call from `spawn_blocking`.
 pub fn clear_all_blocking() -> Result<(), String> {
     let Some(root) = cache_root() else {
         return Ok(());
@@ -52,9 +43,7 @@ pub fn clear_all_blocking() -> Result<(), String> {
     }
 }
 
-/// Walk every managed cache subdirectory and evict the oldest files until
-/// the total on-disk usage falls under `cap_bytes`. Intended to run once at
-/// startup from a blocking task.
+/// LRU-evict files across all subdirs until total size ≤ `cap_bytes`.
 pub fn prune_all_blocking(cap_bytes: u64) {
     let Some(root) = cache_root() else {
         return;

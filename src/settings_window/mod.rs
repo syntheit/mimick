@@ -478,6 +478,8 @@ pub fn build_settings_window_with_parent(
     // Surface a clear "restart required" hint the moment the user flips the
     // toggle, since the running window is still the old one until next launch.
     // Also auto-save: this is a pure preference with no validation needed.
+    // The library-specific settings group is shown only when this toggle is
+    // on (wired further down once `library_group` exists).
     let initial_library_view = config.data.library_view_enabled;
     let ctx_for_lib_view = ctx.clone();
     library_view_row.connect_active_notify(move |row| {
@@ -547,11 +549,21 @@ pub fn build_settings_window_with_parent(
     ));
 
     // --- LIBRARY GROUP ---
+    // Only meaningful when the in-app library browser is on, so the whole
+    // group reveals/hides in step with the `library_view_row` toggle.
     let library_group = adw::PreferencesGroup::builder()
         .title("Library")
         .description("Settings that affect the in-app library browser.")
+        .visible(config.data.library_view_enabled)
         .build();
     settings_page.add(&library_group);
+    library_view_row.connect_active_notify(clone!(
+        #[weak]
+        library_group,
+        move |row| {
+            library_group.set_visible(row.is_active());
+        }
+    ));
 
     let preview_full_row = adw::SwitchRow::builder()
         .title("Open Originals in Lightbox")
