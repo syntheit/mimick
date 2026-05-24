@@ -164,7 +164,7 @@ fn copy_asset_to_clipboard(
                     return;
                 }
             };
-        let Some(texture) = load_texture_oriented(&path) else {
+        let Some(texture) = load_texture_oriented(&path).await else {
             show_alert_dialog(&ui, "Copy Failed", "Could not decode the original image.");
             return;
         };

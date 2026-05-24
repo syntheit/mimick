@@ -17,14 +17,23 @@ pub enum AssetKind {
 }
 
 /// Static set of all supported file extensions for quick membership lookups.
+/// Mirrors Immich's server-accepted formats; MPO is intentionally excluded.
 pub static SUPPORTED: phf::Set<&'static str> = phf_set! {
     "3fr", "3gp", "3gpp", "ari", "arw", "avi", "avif", "bmp", "cap", "cin",
     "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "flv", "gif", "heic",
     "heif", "hif", "iiq", "insp", "insv", "jp2", "jpe", "jpeg", "jpg", "jxl",
     "k25", "kdc", "m2t", "m2ts", "m4v", "mkv", "mov", "mp4", "mpe", "mpeg",
-    "mpg", "mpo", "mrw", "mts", "mxf", "nef", "nrw", "orf", "ori", "pef",
+    "mpg", "mrw", "mts", "mxf", "nef", "nrw", "orf", "ori", "pef",
     "png", "psd", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "svg",
     "tif", "tiff", "ts", "vob", "webm", "webp", "wmv", "x3f",
+};
+
+/// Camera RAW extensions — subset of SUPPORTED that needs RAW-specific
+/// decoding (libraw / imagepipe) instead of pixbuf or image-rs.
+pub static RAW_EXTENSIONS: phf::Set<&'static str> = phf_set! {
+    "3fr", "ari", "arw", "cap", "cin", "cr2", "cr3", "crw", "dcr", "dng",
+    "erf", "fff", "iiq", "k25", "kdc", "mrw", "nef", "nrw", "orf", "ori",
+    "pef", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "x3f",
 };
 
 /// Compile-time mapping from lowercased file extensions to standard MIME types.
@@ -41,7 +50,6 @@ static MIME_BY_EXT: phf::Map<&'static str, &'static str> = phf_map! {
     "jpg" => "image/jpeg",
     "jp2" => "image/jp2",
     "jxl" => "image/jxl",
-    "mpo" => "image/jpeg",
     "png" => "image/png",
     "psd" => "image/vnd.adobe.photoshop",
     "svg" => "image/svg+xml",
@@ -114,6 +122,18 @@ pub fn is_supported_ext(ext: &str) -> bool {
     SUPPORTED.contains(ext)
 }
 
+/// Whether the extension is a camera RAW format.
+pub fn is_raw_ext(ext: &str) -> bool {
+    RAW_EXTENSIONS.contains(ext)
+}
+
+/// Whether the path's extension is a camera RAW format.
+pub fn is_raw_path(path: &Path) -> bool {
+    extension_lower(path)
+        .map(|ext| RAW_EXTENSIONS.contains(ext.as_str()))
+        .unwrap_or(false)
+}
+
 /// MIME type for a known extension (already lowercased).
 pub fn mime_for(ext: &str) -> Option<&'static str> {
     MIME_BY_EXT.get(ext).copied()
@@ -174,5 +194,16 @@ mod tests {
     fn asset_kind_buckets_video_prefix() {
         assert_eq!(asset_kind("video/mp4"), AssetKind::Video);
         assert_eq!(asset_kind("image/jpeg"), AssetKind::Image);
+    }
+
+    #[test]
+    fn is_raw_path_detects_raw_extensions() {
+        assert!(is_raw_path(Path::new("photo.NEF")));
+        assert!(is_raw_path(Path::new("photo.cr3")));
+        assert!(is_raw_path(Path::new("photo.DNG")));
+        assert!(is_raw_path(Path::new("/some/path/IMG.ARW")));
+        assert!(!is_raw_path(Path::new("photo.jpg")));
+        assert!(!is_raw_path(Path::new("video.mp4")));
+        assert!(!is_raw_path(Path::new("noext")));
     }
 }

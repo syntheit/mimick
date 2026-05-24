@@ -11,8 +11,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::sync::Arc;
 
 use gdk4::Texture;
 use gdk4::prelude::TextureExt;
@@ -124,10 +123,9 @@ pub struct ThumbnailCache {
 
 impl ThumbnailCache {
     const DEFAULT_MAX_BYTES: usize = 80 * 1024 * 1024;
-    const DISK_CAP_BYTES: u64 = 1024 * 1024 * 1024;
-    const DISK_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
 
-    /// Construct a new thumbnail cache manager.
+    /// Construct a new thumbnail cache manager. Disk pruning is handled
+    /// centrally by `cache_manager` at startup, not here.
     pub fn with_capacity_mb(api_client: std::sync::Arc<ImmichApiClient>, mb: u32) -> Self {
         let cache_dir = crate::profile::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp").join(crate::profile::dir_segment()))
@@ -139,36 +137,13 @@ impl ThumbnailCache {
             (mb as usize).saturating_mul(1024 * 1024)
         };
 
-        let cache = Self {
+        Self {
             api_client,
             memory: Mutex::new(SizedLruCache::new(max_bytes)),
             cache_dir,
             load_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_LOADS)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
-        };
-        let _ = cache.prune_disk_cache(Self::DISK_CAP_BYTES);
-        cache
-    }
-
-    /// Spawn a background task that prunes the on-disk thumbnail cache on an
-    /// interval. The task holds only a `Weak<Self>` so the cache can drop
-    /// normally; the loop exits as soon as the upgrade fails.
-    pub fn spawn_disk_prune_task(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Self::DISK_PRUNE_INTERVAL);
-            ticker.tick().await; // skip the immediate first tick (constructor already pruned)
-            loop {
-                ticker.tick().await;
-                let Some(cache) = Weak::upgrade(&weak) else {
-                    break;
-                };
-                let _ = tokio::task::spawn_blocking(move || {
-                    let _ = cache.prune_disk_cache(Self::DISK_CAP_BYTES);
-                })
-                .await;
-            }
-        });
+        }
     }
 
     #[cfg(test)]
@@ -359,13 +334,49 @@ impl ThumbnailCache {
         let path = path.to_path_buf();
         let cache_dir = self.cache_dir.clone();
         let texture = tokio::task::spawn_blocking(move || -> Result<Texture, String> {
-            let raw = gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 256, 256, true)
-                .map_err(|err| err.to_string())?;
-            let pixbuf = raw.apply_embedded_orientation().unwrap_or(raw);
+            let is_raw = crate::media_kinds::is_raw_path(&path);
+            // For RAW files, gdk_pixbuf never recognises the format, so skip
+            // straight to the custom decoder to avoid a wasted attempt + log noise.
+            let pixbuf = if is_raw {
+                // Try custom RAW decoder first (skips the pixbuf attempt that
+                // always fails for most camera RAW formats).
+                custom_decode_to_thumbnail(&path).or_else(|_| {
+                    // Some simple TIFF-based RAW files (DNG) can still be
+                    // decoded by glycin/pixbuf, so fall back to it.
+                    gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 256, 256, true)
+                        .map(|raw| raw.apply_embedded_orientation().unwrap_or(raw))
+                        .map_err(|e| e.to_string())
+                })?
+            } else {
+                match gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 256, 256, true) {
+                    Ok(raw) => raw.apply_embedded_orientation().unwrap_or(raw),
+                    Err(err) => {
+                        log::debug!(
+                            "gdk_pixbuf direct load failed for {}: {}; attempting custom decoder",
+                            path.display(),
+                            err
+                        );
+                        custom_decode_to_thumbnail(&path)?
+                    }
+                }
+            };
             let _ = std::fs::create_dir_all(&cache_dir);
             let _ = pixbuf.savev(&cache_file, "png", &[]);
-            #[allow(deprecated)]
-            Ok(Texture::for_pixbuf(&pixbuf))
+            let format = if pixbuf.has_alpha() {
+                gdk4::MemoryFormat::R8g8b8a8
+            } else {
+                gdk4::MemoryFormat::R8g8b8
+            };
+            let bytes = pixbuf.read_pixel_bytes();
+            let mem_tex = gdk4::MemoryTexture::new(
+                pixbuf.width(),
+                pixbuf.height(),
+                format,
+                &bytes,
+                pixbuf.rowstride() as usize,
+            );
+            use gtk::prelude::Cast;
+            Ok(mem_tex.upcast::<Texture>())
         })
         .await
         .map_err(|err| err.to_string())??;
@@ -382,45 +393,11 @@ impl ThumbnailCache {
         Ok(())
     }
 
-    /// Prune disk cache entries until the total size falls under the byte limit.
-    fn prune_disk_cache(&self, max_bytes: u64) -> Result<(), String> {
-        if !self.cache_dir.exists() {
-            return Ok(());
-        }
-
-        let mut entries = Vec::new();
-        let mut total_size = 0u64;
-
-        if let Ok(dir) = std::fs::read_dir(&self.cache_dir) {
-            for entry in dir.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    let size = metadata.len();
-                    let modified = metadata
-                        .modified()
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    total_size += size;
-                    entries.push((entry.path(), size, modified));
-                }
-            }
-        }
-
-        if total_size <= max_bytes {
-            return Ok(());
-        }
-
-        // Sort by oldest first
-        entries.sort_by_key(|a| a.2);
-
-        for (path, size, _) in entries {
-            if total_size <= max_bytes {
-                break;
-            }
-            if std::fs::remove_file(path).is_ok() {
-                total_size = total_size.saturating_sub(size);
-            }
-        }
-
-        Ok(())
+    /// Drop every cached texture from RAM without touching the disk cache.
+    /// Invoked when the library window closes so the texture memory is
+    /// released until the user reopens it.
+    pub fn clear_memory(&self) {
+        self.memory.lock().clear();
     }
 
     /// Return the physical disk cache path for a remote asset thumbnail.
@@ -469,6 +446,41 @@ fn estimate_texture_bytes(texture: &Texture) -> usize {
     texture.width().max(1) as usize * texture.height().max(1) as usize * 4
 }
 
+/// Decode a file through the custom pipeline (RAW / non-pixbuf formats) and
+/// scale the result down to a 256x256 thumbnail pixbuf.
+///
+/// RAW paths use the thumbnail-specific decoder (embedded JPEG first, full
+/// demosaic only as last resort) so the global "Full RAW Decoding" toggle
+/// — which is meant for lightbox quality — never penalises grid loading.
+fn custom_decode_to_thumbnail(path: &std::path::Path) -> Result<gtk::gdk_pixbuf::Pixbuf, String> {
+    let full_texture = if crate::media_kinds::is_raw_path(path) {
+        super::decode_raw_thumbnail_texture(path)
+    } else {
+        super::load_texture_blocking(path)
+    }
+    .ok_or_else(|| format!("No decoder succeeded for {}", path.display()))?;
+    let mut downloader = gdk4::TextureDownloader::new(&full_texture);
+    downloader.set_format(gdk4::MemoryFormat::R8g8b8a8);
+    let (bytes, stride) = downloader.download_bytes();
+    let full_pixbuf = gtk::gdk_pixbuf::Pixbuf::from_mut_slice(
+        bytes.to_vec(),
+        gtk::gdk_pixbuf::Colorspace::Rgb,
+        true,
+        8,
+        full_texture.width(),
+        full_texture.height(),
+        stride as i32,
+    );
+    let w = full_pixbuf.width();
+    let h = full_pixbuf.height();
+    let scale = (256.0 / w as f64).min(256.0 / h as f64).min(1.0);
+    let tw = ((w as f64 * scale).round() as i32).max(1);
+    let th = ((h as f64 * scale).round() as i32).max(1);
+    full_pixbuf
+        .scale_simple(tw, th, gtk::gdk_pixbuf::InterpType::Bilinear)
+        .ok_or_else(|| "Failed to scale pixbuf".to_string())
+}
+
 /// Asynchronously decode image bytes into a scaled texture.
 async fn decode_to_scaled_texture(bytes: Vec<u8>) -> Result<Texture, String> {
     tokio::task::spawn_blocking(move || -> Result<Texture, String> {
@@ -481,8 +493,21 @@ async fn decode_to_scaled_texture(bytes: Vec<u8>) -> Result<Texture, String> {
             gtk::gio::Cancellable::NONE,
         )
         .map_err(|err| err.to_string())?;
-        #[allow(deprecated)]
-        Ok(Texture::for_pixbuf(&pixbuf))
+        let format = if pixbuf.has_alpha() {
+            gdk4::MemoryFormat::R8g8b8a8
+        } else {
+            gdk4::MemoryFormat::R8g8b8
+        };
+        let bytes = pixbuf.read_pixel_bytes();
+        let mem_tex = gdk4::MemoryTexture::new(
+            pixbuf.width(),
+            pixbuf.height(),
+            format,
+            &bytes,
+            pixbuf.rowstride() as usize,
+        );
+        use gtk::prelude::Cast;
+        Ok(mem_tex.upcast::<Texture>())
     })
     .await
     .map_err(|err| err.to_string())?
@@ -568,5 +593,28 @@ mod tests {
 
         assert!(cache.memory.lock().inner.is_empty());
         assert!(!cache.cache_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_load_local_raw_thumbnail() {
+        let cache = cache(1024 * 1024 * 10);
+        let fixture_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.dng");
+
+        let result = cache
+            .load_local_thumbnail_cancellable("local_dng_test", &fixture_path, || false)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Failed to load RAW thumbnail: {:?}",
+            result.err()
+        );
+        let texture = result.unwrap();
+        assert!(texture.width() > 0);
+        assert!(texture.height() > 0);
+
+        let cache_file = cache.cache_file_local("local_dng_test");
+        assert!(cache_file.exists(), "Cache file was not written to disk");
     }
 }

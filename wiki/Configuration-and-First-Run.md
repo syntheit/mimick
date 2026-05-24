@@ -314,6 +314,16 @@ The configuration is stored in a JSON file located at:
 | `library_view_enabled` | Whether the in-app library view opens instead of the settings window. | `false` |
 | `download_target_path` | Target folder for library downloads (chosen on first download). | `"/home/user/Pictures/Downloads"` |
 | `library_preview_full_resolution` | Load full-resolution originals in the lightbox instead of previews. | `false` |
+| `raw_full_decode` | Decode high-resolution sensor data for RAW files instead of using fast embedded previews. | `false` |
+| `raw_decode_cache_enabled` | Cache decoded RAW images on disk (applicable when `raw_full_decode` is true). | `false` |
+| `show_unnamed_faces` | Show people with no assigned name in the Explore view. | `true` |
+| `show_hidden_faces` | Include hidden people in the Explore view. | `false` |
+| `background_sync_enabled` | Whether automatic background monitoring/upload discovery is enabled. | `false` |
+| `notifications_enabled` | Whether desktop notifications are shown (sync summary, connectivity lost, etc.). | `true` |
+| `startup_catchup_mode` | Default catch-up scanning strategy when background scan starts (`Full`, `RecentOnly`, `NewFilesOnly`). | `"Full"` |
+| `upload_concurrency` | Number of parallel upload workers (1–10). | `3` |
+| `quiet_hours_start` | Quiet-hours window start (local clock hour, 0-23). | `22` |
+| `quiet_hours_end` | Quiet-hours window end (local clock hour, 0-23, exclusive). | `6` |
 | `library_thumbnail_cache_mb` | RAM cap for decoded thumbnails (0 = default 80 MB). | `80` |
 
 ### `watch_paths` Object Form
@@ -328,6 +338,10 @@ When a watch path is stored as an object, these fields can appear:
 | `rules.ignore_hidden` | Skip any file inside a hidden path component such as `.cache` or `.stfolder`. |
 | `rules.max_file_size_mb` | Optional maximum file size in megabytes. Files larger than this are skipped before queueing. |
 | `rules.allowed_extensions` | Optional allowlist of extensions. Values are normalized case-insensitively and leading dots are ignored. |
+| `rules.sync_method` | Selected synchronization direction (`Full`, `UploadOnly`, `DownloadOnly`). |
+| `rules.startup_catchup_mode` | Override the global startup catch-up mode for this specific folder. |
+| `rules.delete_folder_to_album` | Delete the local file when its corresponding remote asset is removed. |
+| `rules.delete_album_to_folder` | Delete the remote asset when its corresponding local file is removed. |
 
 ### API Key Security & Required Permissions
 

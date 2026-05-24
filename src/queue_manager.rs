@@ -65,6 +65,11 @@ pub struct FileTask {
     /// True if the asset is already on the server and only needs album addition.
     #[serde(default)]
     pub reassociate_only: bool,
+    /// Manual / ad-hoc uploads that must land in the library without being
+    /// pinned to any album. Watch-folder syncs leave this false so the
+    /// existing parent-dir-as-album fallback still applies.
+    #[serde(default)]
+    pub skip_album: bool,
 }
 
 pub struct QueueManager {
@@ -911,6 +916,20 @@ async fn handle_upload(
         Some(id) => id,
     };
 
+    // Manual / library uploads skip album association entirely. The asset is
+    // already on the server at this point; returning early avoids the
+    // parent-dir-as-album fallback below.
+    if task.skip_album {
+        log::debug!(
+            "Skipping album association for library upload: asset_id={}",
+            asset_id
+        );
+        return Some(SyncTarget {
+            album_name: None,
+            album_id: None,
+        });
+    }
+
     // Fall back to the parent directory name when no explicit album name is configured.
     let album_name = match (&task.album_name, &task.album_id) {
         (Some(name), _) if !name.is_empty() && name != "Default (Folder Name)" => name.clone(),
@@ -1104,6 +1123,7 @@ mod tests {
             album_id: Some("id1".to_string()),
             album_name: Some("Album".to_string()),
             reassociate_only: false,
+            skip_album: false,
         };
         let js = serde_json::to_string(&task).unwrap();
         assert!(js.contains("sha123"));
@@ -1111,6 +1131,41 @@ mod tests {
         let deserialized: FileTask = serde_json::from_str(&js).unwrap();
         assert_eq!(deserialized.path, "/a/b.jpg");
         assert_eq!(deserialized.album_id.unwrap(), "id1");
+    }
+
+    #[test]
+    fn test_filetask_skip_album_defaults_false_for_legacy_payloads() {
+        // Retry-queue entries written before `skip_album` existed must still
+        // deserialise — they keep the old watch-folder behaviour.
+        let legacy_json = r#"{
+            "path": "/a/b.jpg",
+            "watch_path": "/a",
+            "checksum": "sha123",
+            "album_id": null,
+            "album_name": null,
+            "reassociate_only": false
+        }"#;
+        let task: FileTask = serde_json::from_str(legacy_json).unwrap();
+        assert!(
+            !task.skip_album,
+            "legacy entries inherit album-creation behaviour"
+        );
+    }
+
+    #[test]
+    fn test_filetask_skip_album_round_trips() {
+        let task = FileTask {
+            path: "/x.jpg".into(),
+            watch_path: String::new(),
+            checksum: "sha".into(),
+            album_id: None,
+            album_name: None,
+            reassociate_only: false,
+            skip_album: true,
+        };
+        let js = serde_json::to_string(&task).unwrap();
+        let restored: FileTask = serde_json::from_str(&js).unwrap();
+        assert!(restored.skip_album);
     }
 
     #[test]
@@ -1125,6 +1180,7 @@ mod tests {
             album_id: None,
             album_name: None,
             reassociate_only: false,
+            skip_album: false,
         };
 
         let tasks = vec![task];
@@ -1144,6 +1200,7 @@ mod tests {
             album_id: None,
             album_name: Some("Album".into()),
             reassociate_only: false,
+            skip_album: false,
         };
 
         assert!(qm.add_to_queue(task.clone()).await);
@@ -1165,6 +1222,7 @@ mod tests {
             album_id: None,
             album_name: None,
             reassociate_only: false,
+            skip_album: false,
         };
 
         retry_list.lock().push(task.clone());
@@ -1199,6 +1257,7 @@ mod tests {
             album_id: None,
             album_name: None,
             reassociate_only: false,
+            skip_album: false,
         };
 
         retry_list.lock().push(task.clone());

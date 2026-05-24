@@ -21,18 +21,68 @@ url = "2.5.8"
 notify = "8.2.0"
 num_cpus = "1.17.0"
 phf = { version = "0.13.1", features = ["macros"] }
-oo7 = { version = "0.6.0", default-features = false, features = ["tokio", "native_crypto"] }
+oo7 = { version = "0.6.0", default-features = false, features = [
+    "tokio",
+    "native_crypto",
+] }
 rayon = "1.12.0"
-reqwest = { version = "0.13.2", default-features = false, features = ["native-tls", "charset", "http2", "json", "multipart", "stream"] }
+reqwest = { version = "0.13.2", default-features = false, features = [
+    "native-tls",
+    "charset",
+    "http2",
+    "json",
+    "multipart",
+    "stream",
+] }
 tokio-util = { version = "0.7.18", features = ["codec", "rt"] }
 futures-util = "0.3.32"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-sha1 = "0.11.0" 
-tokio = { version = "1.52.1", features = ["rt-multi-thread", "sync", "time", "fs", "macros", "io-util", "process", "signal"] }
+sha1 = "0.11.0"
+tokio = { version = "1.52.1", features = [
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "fs",
+    "macros",
+    "io-util",
+    "process",
+    "signal",
+] }
 flexi_logger = "0.31.8"
 thumbhash = "0.1"
 base64 = "0.22"
+nom-exif = "3.4.2"
+image = { version = "0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+    "gif",
+    "bmp",
+    "tiff",
+    "webp",
+] }
+libheif-rs = { version = "2.7.0", default-features = false, features = [
+    "v1_20",
+] }
+jxl-oxide = "0.12.5"
+rawloader = "0.37.1"
+imagepipe = "0.5.0"
+libraw-rs = "0.0.4"
+libraw-rs-sys = "0.0.4"
+resvg = { version = "0.47.0", default-features = false, features = [
+    "text",
+    "system-fonts",
+    "raster-images",
+] }
+jpeg2k = { version = "0.10.1", default-features = false, features = [
+    "openjpeg-sys",
+    "threads",
+] }
+turbojpeg = { version = "1.4.0", default-features = false, features = [
+    "cmake",
+] }
+webp = { version = "0.3.1", default-features = false }
+psd = "0.3.5"
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -41,8 +91,9 @@ tempfile = "3.27.0"
 glib-build-tools = "0.22"
 
 [profile.release]
-opt-level = "z"        # Optimise for binary size (less code = less mapped pages)
-codegen-units = 1      # Full whole-program optimisation
-lto = true             # Link-Time Optimisation – dead code is stripped at link time
-panic = "abort"        # Remove panic unwinding machinery (~60-100 KB of runtime)
-strip = false           # Strip debug symbols from the final binary
+opt-level = "z"   # Optimise for binary size (less code = less mapped pages)
+codegen-units = 1 # Full whole-program optimisation
+lto = true        # Link-Time Optimisation – dead code is stripped at link time
+panic = "unwind"  # Keep unwinding so catch_unwind can recover from third-party
+# decoder panics (rawloader OOB on malformed RAW files etc.)
+strip = true # Strip debug symbols from the final binary

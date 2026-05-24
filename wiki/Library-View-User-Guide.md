@@ -25,6 +25,7 @@ The window uses a sidebar + content split.
 - **Explore** — People, Places, Things
 - **Albums** — album landing page
 - album entries listed below for quick navigation
+- Bottom footer contains the server connection row (clicking it opens the **Server Statistics** dialog)
 
 **Header bar controls (right side):**
 
@@ -33,6 +34,7 @@ The window uses a sidebar + content split.
 - search entry with search mode selector
 - Timeline toggle button
 - select-mode toggle button
+- Upload button (invokes the manual multi-file picker)
 - refresh button
 - gear button (opens Settings)
 
@@ -135,9 +137,11 @@ Three sections are populated from the Immich server:
 - **Places** — city/location tiles for assets with geolocation EXIF data.
 - **Things** — tag tiles for object-recognition labels (animals, vehicles, etc.). Requires ML object tagging on the server.
 
-Clicking a tile filters the grid to assets belonging to that person, place, or tag.
+Clicking a tile filters the grid to assets belonging to that person, place, or tag. The view will persist your active filter selection even if you navigate away and return.
 
 Use the **Refresh** button in the header to reload the Explore data. Sections that return no results from the server are hidden automatically.
+
+**Face Visibility:** By default, unnamed faces are shown and hidden faces are excluded. You can toggle these independently in Library Settings.
 
 ---
 
@@ -166,6 +170,10 @@ Click an album tile to open it in the grid view. The album is also added to the 
 Click **Create album** (top right of the Albums page). Enter a name and confirm. The new album appears in the **Your albums** section immediately.
 
 To assign a new or existing album to a watch folder for automatic upload, use **Settings → Watch Folders → album dropdown** on the relevant folder row.
+
+### Manual Upload
+
+You can upload files directly to the library or to a specific album using the **Upload** button in the header bar. This opens a multi-file picker and enqueues the selections for upload without requiring a watch folder.
 
 ---
 
@@ -202,7 +210,9 @@ Click any asset in the grid to open it in the lightbox.
 | ![Lightbox details on](https://raw.githubusercontent.com/nicx17/mimick/main/docs/screenshots/lightbox_view_details_pane_on.png) | ![Lightbox details off](https://raw.githubusercontent.com/nicx17/mimick/main/docs/screenshots/lightbox_view_details_pane_off.png) |
 
 - The lightbox shows a preview image. If **Full Resolution Preview** is enabled in Settings → Behavior, it loads the original file instead of a server-generated proxy.
-- EXIF metadata is fetched and displayed alongside the asset.
+- **RAW Previews**: By default, RAW files display using their fast embedded previews. The extractor first scans the file for the largest embedded JPEG (catching the full-resolution preview on cameras that store both a tiny thumb and a full-res one — e.g. Sony ARW); if the file contains no JPEG at all (Samsung DNG, OnePlus DNG, and other phone DNGs that store their preview as uncompressed TIFF strips), it falls back to libraw's bitmap thumbnail with container orientation applied. You can toggle **Full RAW Decoding** in settings to perform a full sensor demosaic instead.
+- **Videos**: Navigating to a video asset in the lightbox shows the video's still thumbnail as a poster with a centered play badge. Clicking the badge launches the same external player flow used by the grid (system default app for local files; downloaded to cache then opened for remote files). Zoom, resolution toggle, and download controls are hidden for the video case.
+- EXIF metadata is fetched (including for local files) and displayed alongside the asset.
 - **Download** saves the original file to the configured download folder.
 
 **Download folder:**
@@ -245,6 +255,10 @@ These options are in **Settings → Behavior** and apply to the library view.
 | Setting | Default | Effect |
 | :--- | :--- | :--- |
 | **Full-Resolution Preview** | Off | When on, the lightbox loads the original file instead of the ~1440px server-generated preview. Uses more bandwidth. |
+| **Full RAW Decoding** | Off | Decode high-resolution sensor data instead of using fast embedded camera previews (slower). |
+| **Cache Decoded RAW Files** | Off | Store demosaiced RAW images on disk so re-opens are instant. Only applicable when Full RAW Decoding is enabled. |
+| **Show unnamed faces** | On | Show people with no assigned name in the Explore view. |
+| **Show hidden faces** | Off | Include hidden people in the Explore view. |
 | **Thumbnail Memory Cache (MB)** | 80 | RAM cap for decoded thumbnails. Increase to reduce re-fetches when scrolling through large grids. |
 | **Download Folder** | Not set | First download opens a folder picker; the chosen path is saved and reused for subsequent downloads. |
 

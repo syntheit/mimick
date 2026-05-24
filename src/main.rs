@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 mod api_client;
 mod app_context;
 mod autostart;
+mod cache_manager;
 mod config;
 mod diagnostics;
 mod library;
@@ -272,6 +273,20 @@ async fn find_album_asset_by_checksum(
     }
 }
 
+/// Suppress stderr noise from `rawloader`/`imagepipe` panics — they're
+/// caught via `catch_unwind` at the call site, but the default hook still
+/// prints before unwinding reaches it.
+fn install_filtering_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let file = info.location().map(|l| l.file()).unwrap_or("");
+        if file.contains("/rawloader-") || file.contains("/imagepipe-") {
+            return;
+        }
+        default(info);
+    }));
+}
+
 #[tokio::main]
 async fn main() {
     // Mirror logs to stdout and to a rotating cache file for easier support/debugging.
@@ -305,6 +320,8 @@ async fn main() {
         .write_mode(WriteMode::Direct)
         .start()
         .expect("Failed to initialize logger");
+
+    install_filtering_panic_hook();
 
     if let Some(name) = profile::name() {
         log::info!(
@@ -426,6 +443,10 @@ async fn main() {
         // Apply the user's notification preference before any notification can fire.
         crate::notifications::set_enabled(config.data.notifications_enabled);
 
+        // Sync the RAW decode cache flag with the user's persisted preference.
+        crate::library::set_raw_cache_enabled(config.data.raw_decode_cache_enabled);
+        crate::library::set_raw_full_decode(config.data.raw_full_decode);
+
         // Keep the watcher service alive, but optionally disable active folder watches.
         let (tx, mut rx) = mpsc::channel(32);
         let monitor_paths = if background_sync_enabled {
@@ -449,7 +470,18 @@ async fn main() {
             api_client.clone(),
             config.data.library_thumbnail_cache_mb,
         ));
-        thumbnail_cache.spawn_disk_prune_task();
+        // One-shot startup prune across every cache directory. Runs on a
+        // blocking thread after a short delay so it does not contend with
+        // window setup or initial sync work.
+        let cache_cap_mb = config.data.cache_disk_cap_mb;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let cap_bytes = (cache_cap_mb as u64).saturating_mul(1024 * 1024);
+            let _ = tokio::task::spawn_blocking(move || {
+                cache_manager::prune_all_blocking(cap_bytes);
+            })
+            .await;
+        });
         let library_state = Arc::new(parking_lot::Mutex::new(LibraryState::new()));
         let shared_config = Arc::new(parking_lot::RwLock::new(config));
         let ctx = Arc::new(AppContext {
@@ -543,6 +575,7 @@ async fn main() {
                                 album_id,
                                 album_name,
                                 reassociate_only,
+                                skip_album: false,
                             })
                             .await;
                     }

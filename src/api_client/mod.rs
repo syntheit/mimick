@@ -250,6 +250,36 @@ pub struct ServerAbout {
     pub version: String,
 }
 
+/// Per-user usage row from `/api/server/statistics`.
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageByUser {
+    pub user_id: String,
+    pub user_name: String,
+    #[serde(default)]
+    pub photos: u64,
+    #[serde(default)]
+    pub videos: u64,
+    #[serde(default)]
+    pub usage: u64,
+    #[serde(default)]
+    pub quota_size_in_bytes: Option<u64>,
+}
+
+/// Server-wide statistics (admin-only). Returned by `/api/server/statistics`.
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerStatistics {
+    #[serde(default)]
+    pub photos: u64,
+    #[serde(default)]
+    pub videos: u64,
+    #[serde(default)]
+    pub usage: u64,
+    #[serde(default)]
+    pub usage_by_user: Vec<UsageByUser>,
+}
+
 /// A recognized person returned by Immich's facial recognition.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Person {
@@ -258,6 +288,8 @@ pub struct Person {
     /// Name assigned to the person.
     #[serde(default)]
     pub name: String,
+    #[serde(default, rename = "isHidden")]
+    pub is_hidden: bool,
 }
 
 /// List wrapper of recognized people returned by Immich.
@@ -762,7 +794,7 @@ mod tests {
             "iiq", "k25", "kdc", "mrw", "nef", "nrw", "orf", "ori", "pef", "psd", "raf", "raw",
             "rw2", "rwl", "sr2", "srf", "srw", "x3f", // Web image
             "avif", "bmp", "gif", "jpeg", "jpg", "png", "webp", // Other image
-            "heic", "heif", "hif", "insp", "jp2", "jpe", "jxl", "mpo", "svg", "tif", "tiff",
+            "heic", "heif", "hif", "insp", "jp2", "jpe", "jxl", "svg", "tif", "tiff",
             // Video
             "3gp", "3gpp", "avi", "flv", "insv", "m2t", "m2ts", "m4v", "mkv", "mov", "mp4", "mpe",
             "mpeg", "mpg", "mts", "mxf", "ts", "vob", "webm", "wmv",
@@ -930,5 +962,70 @@ mod tests {
         *client.active_url.lock().await = Some("https://wan.example".into());
 
         assert_eq!(client.active_route_label().await.as_deref(), Some("WAN"));
+    }
+
+    #[test]
+    fn person_deserializes_with_is_hidden_field() {
+        let person: Person = serde_json::from_value(serde_json::json!({
+            "id": "p1",
+            "name": "Alice",
+            "isHidden": true
+        }))
+        .expect("person json");
+        assert_eq!(person.id, "p1");
+        assert_eq!(person.name, "Alice");
+        assert!(person.is_hidden);
+    }
+
+    #[test]
+    fn person_defaults_is_hidden_when_missing() {
+        let person: Person = serde_json::from_value(serde_json::json!({
+            "id": "p2",
+            "name": ""
+        }))
+        .expect("person json");
+        assert!(!person.is_hidden, "missing isHidden must default to false");
+    }
+
+    #[test]
+    fn server_statistics_parses_usage_by_user() {
+        let stats: ServerStatistics = serde_json::from_value(serde_json::json!({
+            "photos": 42,
+            "videos": 7,
+            "usage": 1024,
+            "usageByUser": [
+                {
+                    "userId": "u1",
+                    "userName": "alice",
+                    "photos": 10,
+                    "videos": 2,
+                    "usage": 512,
+                    "quotaSizeInBytes": 4096
+                }
+            ]
+        }))
+        .expect("server statistics json");
+        assert_eq!(stats.photos, 42);
+        assert_eq!(stats.videos, 7);
+        assert_eq!(stats.usage, 1024);
+        assert_eq!(stats.usage_by_user.len(), 1);
+        let user = &stats.usage_by_user[0];
+        assert_eq!(user.user_name, "alice");
+        assert_eq!(user.photos, 10);
+        assert_eq!(user.quota_size_in_bytes, Some(4096));
+    }
+
+    #[test]
+    fn server_statistics_tolerates_missing_quota() {
+        let stats: ServerStatistics = serde_json::from_value(serde_json::json!({
+            "photos": 0,
+            "videos": 0,
+            "usage": 0,
+            "usageByUser": [
+                { "userId": "u1", "userName": "anon", "photos": 0, "videos": 0, "usage": 0 }
+            ]
+        }))
+        .expect("server statistics json");
+        assert_eq!(stats.usage_by_user[0].quota_size_in_bytes, None);
     }
 }

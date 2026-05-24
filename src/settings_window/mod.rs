@@ -478,6 +478,8 @@ pub fn build_settings_window_with_parent(
     // Surface a clear "restart required" hint the moment the user flips the
     // toggle, since the running window is still the old one until next launch.
     // Also auto-save: this is a pure preference with no validation needed.
+    // The library-specific settings group is shown only when this toggle is
+    // on (wired further down once `library_group` exists).
     let initial_library_view = config.data.library_view_enabled;
     let ctx_for_lib_view = ctx.clone();
     library_view_row.connect_active_notify(move |row| {
@@ -547,11 +549,21 @@ pub fn build_settings_window_with_parent(
     ));
 
     // --- LIBRARY GROUP ---
+    // Only meaningful when the in-app library browser is on, so the whole
+    // group reveals/hides in step with the `library_view_row` toggle.
     let library_group = adw::PreferencesGroup::builder()
         .title("Library")
         .description("Settings that affect the in-app library browser.")
+        .visible(config.data.library_view_enabled)
         .build();
     settings_page.add(&library_group);
+    library_view_row.connect_active_notify(clone!(
+        #[weak]
+        library_group,
+        move |row| {
+            library_group.set_visible(row.is_active());
+        }
+    ));
 
     let preview_full_row = adw::SwitchRow::builder()
         .title("Open Originals in Lightbox")
@@ -571,6 +583,51 @@ pub fn build_settings_window_with_parent(
         }
     });
 
+    let raw_full_decode_row = adw::SwitchRow::builder()
+        .title("Full RAW Decoding")
+        .subtitle(
+            "Decode high-resolution sensor data instead of using \
+             embedded previews (slower).",
+        )
+        .build();
+    library_group.add(&raw_full_decode_row);
+
+    let raw_cache_row = adw::SwitchRow::builder()
+        .title("Cache Decoded RAW Files")
+        .subtitle(
+            "Store demosaiced RAW images on disk so re-opens are instant. \
+             Disable to save storage.",
+        )
+        .build();
+    library_group.add(&raw_cache_row);
+
+    // Cache setting only applies when full decode is enabled.
+    raw_cache_row.set_sensitive(raw_full_decode_row.is_active());
+
+    let cache_row_ref = raw_cache_row.clone();
+    let ctx_for_raw_decode = ctx.clone();
+    raw_full_decode_row.connect_active_notify(move |row| {
+        let active = row.is_active();
+        cache_row_ref.set_sensitive(active);
+        crate::library::set_raw_full_decode(active);
+        let mut cfg = ctx_for_raw_decode.config.write();
+        if cfg.data.raw_full_decode != active {
+            cfg.data.raw_full_decode = active;
+            cfg.save();
+        }
+    });
+
+    let ctx_for_raw_cache = ctx.clone();
+    raw_cache_row.connect_active_notify(move |row| {
+        let active = row.is_active();
+        crate::library::set_raw_cache_enabled(active);
+        let mut cfg = ctx_for_raw_cache.config.write();
+        if cfg.data.raw_decode_cache_enabled != active {
+            cfg.data.raw_decode_cache_enabled = active;
+            cfg.save();
+        }
+    });
+
     let cache_adj = gtk::Adjustment::new(80.0, 16.0, 1024.0, 16.0, 64.0, 0.0);
     let cache_size_row = adw::SpinRow::builder()
         .title("Thumbnail Memory Cache (MB)")
@@ -578,6 +635,17 @@ pub fn build_settings_window_with_parent(
         .adjustment(&cache_adj)
         .build();
     library_group.add(&cache_size_row);
+
+    let disk_cache_adj = gtk::Adjustment::new(2000.0, 200.0, 10000.0, 100.0, 500.0, 0.0);
+    let disk_cache_row = adw::SpinRow::builder()
+        .title("Disk Cache Size (MB)")
+        .subtitle(
+            "Total on-disk cap across thumbnails, decoded RAW previews, EXIF, \
+             video, and preview caches. Pruning runs once at startup.",
+        )
+        .adjustment(&disk_cache_adj)
+        .build();
+    library_group.add(&disk_cache_row);
 
     // Debounce the spinner save: a held-down arrow fires connect_value_notify
     // many times per second, and each save takes the config write lock + does
@@ -601,6 +669,26 @@ pub fn build_settings_window_with_parent(
             }
         });
         pending_cache_save.set(Some(id));
+    });
+
+    let pending_disk_cache_save: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
+    let ctx_for_disk_cache = ctx.clone();
+    disk_cache_row.connect_value_notify(move |row| {
+        let new_value = row.value() as u32;
+        if let Some(id) = pending_disk_cache_save.take() {
+            id.remove();
+        }
+        let ctx_for_save = ctx_for_disk_cache.clone();
+        let pending = pending_disk_cache_save.clone();
+        let id = glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            pending.set(None);
+            let mut cfg = ctx_for_save.config.write();
+            if cfg.data.cache_disk_cap_mb != new_value {
+                cfg.data.cache_disk_cap_mb = new_value;
+                cfg.save();
+            }
+        });
+        pending_disk_cache_save.set(Some(id));
     });
 
     // --- WATCH FOLDERS GROUP ---
@@ -642,7 +730,13 @@ pub fn build_settings_window_with_parent(
         #[weak]
         preview_full_row,
         #[weak]
+        raw_full_decode_row,
+        #[weak]
+        raw_cache_row,
+        #[weak]
         cache_size_row,
+        #[weak]
+        disk_cache_row,
         #[weak]
         concurrency_row,
         #[weak]
@@ -732,7 +826,10 @@ pub fn build_settings_window_with_parent(
             let notifications_enabled = notifications_row.is_active();
             let library_view_enabled = library_view_row.is_active();
             let library_preview_full_resolution = preview_full_row.is_active();
+            let raw_decode_cache_enabled = raw_cache_row.is_active();
+            let raw_full_decode = raw_full_decode_row.is_active();
             let library_thumbnail_cache_mb = cache_size_row.value() as u32;
+            let cache_disk_cap_mb = disk_cache_row.value() as u32;
             let upload_concurrency = concurrency_row.value() as u8;
             let quiet_hours_enabled = quiet_hours_row.is_active();
             let quiet_hours_start = quiet_hours_enabled.then(|| quiet_start_row.value() as u8);
@@ -858,7 +955,12 @@ pub fn build_settings_window_with_parent(
                         new_config.data.library_view_enabled = library_view_enabled;
                         new_config.data.library_preview_full_resolution =
                             library_preview_full_resolution;
+                        new_config.data.raw_decode_cache_enabled = raw_decode_cache_enabled;
+                        crate::library::set_raw_cache_enabled(raw_decode_cache_enabled);
+                        new_config.data.raw_full_decode = raw_full_decode;
+                        crate::library::set_raw_full_decode(raw_full_decode);
                         new_config.data.library_thumbnail_cache_mb = library_thumbnail_cache_mb;
+                        new_config.data.cache_disk_cap_mb = cache_disk_cap_mb;
                         new_config.data.startup_catchup_mode = catchup_mode;
                         new_config.data.upload_concurrency = upload_concurrency;
                         new_config.data.quiet_hours_start = quiet_hours_start;
@@ -1114,7 +1216,11 @@ pub fn build_settings_window_with_parent(
     actions_flow.insert(&export_btn, -1);
 
     let clear_cache_btn = Button::builder()
-        .label("Clear Thumbnail Cache")
+        .label("Clear Cache")
+        .tooltip_text(
+            "Removes all on-disk caches: thumbnails, decoded RAW previews, \
+             EXIF, video, and preview files.",
+        )
         .hexpand(true)
         .build();
     actions_flow.insert(&clear_cache_btn, -1);
@@ -1245,14 +1351,25 @@ pub fn build_settings_window_with_parent(
         #[weak]
         window,
         move |_| {
-            let (heading, body) = match thumbnail_cache.clear() {
-                Ok(()) => (
-                    "Thumbnail Cache Cleared",
-                    "Removed cached library thumbnails.".to_string(),
-                ),
-                Err(err) => ("Could Not Clear Cache", err),
-            };
-            show_alert(&window, heading, &body);
+            // Drop the in-memory thumbnail textures immediately, then wipe
+            // every on-disk cache subdirectory off the UI thread.
+            let _ = thumbnail_cache.clear();
+            let window_for_done = window.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let result = tokio::task::spawn_blocking(crate::cache_manager::clear_all_blocking)
+                    .await
+                    .map_err(|err| err.to_string())
+                    .and_then(|inner| inner);
+                let (heading, body) = match result {
+                    Ok(()) => (
+                        "Cache Cleared",
+                        "Removed thumbnails, decoded RAW previews, EXIF, video, and preview caches."
+                            .to_string(),
+                    ),
+                    Err(err) => ("Could Not Clear Cache", err),
+                };
+                show_alert(&window_for_done, heading, &body);
+            });
         }
     ));
 
@@ -1286,8 +1403,14 @@ pub fn build_settings_window_with_parent(
     notifications_row.set_active(config.data.notifications_enabled);
     library_view_row.set_active(config.data.library_view_enabled);
     preview_full_row.set_active(config.data.library_preview_full_resolution);
+    raw_cache_row.set_active(config.data.raw_decode_cache_enabled);
+    raw_full_decode_row.set_active(config.data.raw_full_decode);
+    raw_cache_row.set_sensitive(config.data.raw_full_decode);
     if config.data.library_thumbnail_cache_mb > 0 {
         cache_size_row.set_value(config.data.library_thumbnail_cache_mb as f64);
+    }
+    if config.data.cache_disk_cap_mb > 0 {
+        disk_cache_row.set_value(config.data.cache_disk_cap_mb as f64);
     }
     concurrency_row.set_value(config.data.upload_concurrency as f64);
     let qh_enabled = config.data.quiet_hours_start.is_some();

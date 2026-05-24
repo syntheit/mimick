@@ -69,9 +69,67 @@ picture.mimick-person-avatar {
     background-color: alpha(@view_fg_color, 0.08);
 }
 
-picture.mimick-explore-tile {
+picture.mimick-explore-tile,
+overlay.mimick-explore-tile {
     border-radius: 6px;
     background-color: alpha(@view_fg_color, 0.08);
+}
+
+box.mimick-explore-spacer {
+    min-width: 130px;
+    min-height: 100px;
+}
+
+window.mimick-wide box.mimick-explore-spacer {
+    min-width: 220px;
+    min-height: 150px;
+}
+
+box.mimick-stat-card {
+    border-radius: 12px;
+    padding: 14px;
+    background: alpha(@accent_bg_color, 0.08);
+}
+
+box.mimick-stat-card.photo-card {
+    background: alpha(#6a9fc7, 0.14);
+}
+
+box.mimick-stat-card.video-card {
+    background: alpha(#d16c96, 0.14);
+}
+
+box.mimick-stat-card.storage-card {
+    background: alpha(#7bb876, 0.14);
+}
+
+label.mimick-stat-value {
+    font-size: 1.6em;
+    font-weight: 800;
+}
+
+label.mimick-stat-label {
+    font-size: 0.85em;
+    font-weight: 600;
+    opacity: 0.60;
+}
+
+progressbar.mimick-quota-bar trough {
+    min-height: 6px;
+    border-radius: 999px;
+    background: alpha(@window_fg_color, 0.10);
+}
+
+progressbar.mimick-quota-bar progress {
+    min-height: 6px;
+    border-radius: 999px;
+    background: mix(@accent_bg_color, #d16c96, 0.45);
+}
+
+box.mimick-version-badge {
+    border-radius: 999px;
+    padding: 4px 12px;
+    background: alpha(@accent_bg_color, 0.12);
 }
 
 picture.mimick-grid-thumb {
@@ -116,6 +174,115 @@ progressbar.mimick-transfer-progress progress {
     min-height: 18px;
     border-radius: 999px;
     background: mix(@accent_bg_color, #d16c96, 0.45);
+}
+
+/* ── Press feedback ───────────────────────────────────────────────
+   Subtle scale-down on press for all interactive elements.
+   GTK4 natively skips CSS transitions when gtk-enable-animations
+   is off, so accessibility is respected automatically.
+
+   Covers: header-bar buttons, dialog buttons, sidebar rows,
+   settings switch/action/spin rows, lightbox actions, grid tiles,
+   explore/album tiles, and any widget with .mimick-pressable.  */
+
+button,
+.mimick-pressable,
+menubutton > button,
+row.activatable {
+    transition: transform 80ms ease-out, opacity 80ms ease-out;
+}
+
+button:active,
+.mimick-pressable:active,
+menubutton > button:active,
+row.activatable:active {
+    transform: scale(0.97);
+    opacity: 0.88;
+}
+
+overlay.mimick-cell {
+    transition: transform 80ms ease-out, opacity 80ms ease-out;
+}
+
+overlay.mimick-cell:active {
+    transform: scale(0.96);
+    opacity: 0.90;
+}
+
+picture.mimick-explore-tile,
+overlay.mimick-explore-tile,
+picture.mimick-person-avatar {
+    transition: transform 80ms ease-out, opacity 80ms ease-out;
+}
+
+picture.mimick-explore-tile:active,
+overlay.mimick-explore-tile:active,
+picture.mimick-person-avatar:active {
+    transform: scale(0.95);
+    opacity: 0.88;
+}
+
+/* Details-pane group accents. The icon classes paint just the prefix icon,
+   keeping the row text in the standard foreground for legibility. */
+.mimick-detail-icon {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 6px;
+    border-radius: 10px;
+    margin: 2px 0;
+    -gtk-icon-size: 16px;
+}
+
+.mimick-accent-camera {
+    color: @accent_color;
+    background-color: alpha(@accent_bg_color, 0.18);
+}
+
+.mimick-accent-image {
+    color: @success_color;
+    background-color: alpha(@success_bg_color, 0.20);
+}
+
+.mimick-accent-location {
+    color: @warning_color;
+    background-color: alpha(@warning_bg_color, 0.22);
+}
+
+scrolledwindow.mimick-details-pane {
+    background: alpha(@window_bg_color, 0.30);
+}
+
+scrolledwindow.mimick-details-pane > viewport > box {
+    padding: 4px;
+}
+
+/* Lightbox image-load spinner. The Mimick app icon eases in from slow
+   rotation, accelerates through the middle of the cycle, then eases back
+   out — giving the breathing rhythm requested for "ramp up / ramp down". */
+@keyframes mimick-icon-spin {
+    0%   { transform: rotate(0deg); }
+    20%  { transform: rotate(40deg); }
+    50%  { transform: rotate(220deg); }
+    80%  { transform: rotate(320deg); }
+    100% { transform: rotate(360deg); }
+}
+
+image.mimick-loader-icon {
+    opacity: 0.85;
+    -gtk-icon-shadow: 0 2px 12px alpha(black, 0.45);
+    animation: mimick-icon-spin 2.4s ease-in-out infinite;
+}
+
+picture.mimick-lightbox-picture {
+    background-color: alpha(@view_fg_color, 0.05);
+}
+
+box.mimick-preview-unavailable {
+    min-width: 240px;
+    padding: 20px;
+    border-radius: 8px;
+    background-color: alpha(@window_bg_color, 0.92);
+    border: 1px solid alpha(@view_fg_color, 0.16);
 }
 "#;
 
