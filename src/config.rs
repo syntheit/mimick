@@ -251,6 +251,26 @@ pub struct ConfigData {
     /// In-memory thumbnail cache cap in megabytes (0 = use built-in default of 80MB).
     #[serde(default)]
     pub library_thumbnail_cache_mb: u32,
+    /// Total on-disk cache cap in megabytes across all subcaches
+    /// (thumbnails, raw_decode, exif, video, preview, open-in).
+    /// Pruning runs once at startup. Defaults to 2000 MB.
+    #[serde(default = "default_cache_disk_cap_mb")]
+    pub cache_disk_cap_mb: u32,
+    /// When true, decoded RAW textures are cached to disk for faster re-opens.
+    /// Disable to save storage; each cached file is a full-resolution PNG.
+    #[serde(default)]
+    pub raw_decode_cache_enabled: bool,
+    /// When true, RAW files are fully demosaiced from sensor data (slow but
+    /// highest quality). When false the embedded camera JPEG preview is
+    /// extracted instead (near-instant).
+    #[serde(default)]
+    pub raw_full_decode: bool,
+    /// Show people with no assigned name in the Explore view.
+    #[serde(default = "default_true")]
+    pub show_unnamed_faces: bool,
+    /// Include hidden people in the Explore view.
+    #[serde(default)]
+    pub show_hidden_faces: bool,
 }
 
 impl Default for ConfigData {
@@ -274,6 +294,11 @@ impl Default for ConfigData {
             download_target_path: None,
             library_preview_full_resolution: false,
             library_thumbnail_cache_mb: 0,
+            cache_disk_cap_mb: default_cache_disk_cap_mb(),
+            raw_decode_cache_enabled: false,
+            raw_full_decode: false,
+            show_unnamed_faces: true,
+            show_hidden_faces: false,
         }
     }
 }
@@ -286,6 +311,11 @@ fn default_true() -> bool {
 /// Helper to default parallel upload worker threads to 3.
 fn default_upload_concurrency() -> u8 {
     3
+}
+
+/// Default total on-disk cache cap in MB.
+fn default_cache_disk_cap_mb() -> u32 {
+    2000
 }
 
 /// Persistent config container wrapping loaded schema and file source info.
@@ -605,5 +635,40 @@ mod tests {
             best_matching_watch_entry(Path::new("/home/user/Pictures-backup/photo.jpg"), &entries)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn face_visibility_defaults_favour_discoverable_named_only() {
+        let data = ConfigData::default();
+        assert!(
+            data.show_unnamed_faces,
+            "unnamed people should be visible by default so users see them"
+        );
+        assert!(
+            !data.show_hidden_faces,
+            "hidden people stay hidden by default"
+        );
+    }
+
+    #[test]
+    fn face_visibility_flags_round_trip_through_json() {
+        let data = ConfigData {
+            show_unnamed_faces: false,
+            show_hidden_faces: true,
+            ..ConfigData::default()
+        };
+        let json = serde_json::to_string(&data).expect("serialize");
+        let restored: ConfigData = serde_json::from_str(&json).expect("deserialize");
+        assert!(!restored.show_unnamed_faces);
+        assert!(restored.show_hidden_faces);
+    }
+
+    #[test]
+    fn face_visibility_flags_default_when_absent_in_json() {
+        // Older config files written before the flags existed must still load.
+        let json = serde_json::to_string(&serde_json::json!({})).unwrap();
+        let restored: ConfigData = serde_json::from_str(&json).expect("deserialize legacy config");
+        assert!(restored.show_unnamed_faces);
+        assert!(!restored.show_hidden_faces);
     }
 }

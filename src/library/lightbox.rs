@@ -4,107 +4,276 @@
 //! swipe navigation. Displays an EXIF metadata panel and provides
 //! download-to-folder and delete-to-trash actions.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use glib::clone;
 use gtk::prelude::*;
 use libadwaita::prelude::*;
 
-use crate::api_client::ThumbnailSize;
+use crate::api_client::{ExifInfo, ThumbnailSize};
 use crate::library::asset_object::AssetObject;
+use crate::library::local_exif::{self, LocalExif};
 
 use super::context_menu::show_asset_context_menu;
 use super::download::{
-    begin_download_session, finish_download_item, start_download, track_download_item,
+    begin_download_session, finish_download_item, open_local_with_default_app, spawn_video_handoff,
+    start_download, track_download_item,
 };
 use super::{LOCAL_ID_PREFIX, LibraryWindowUi, load_source_page, load_texture_oriented};
 
-/// Populate a vertical container box with structured EXIF metadata rows.
-fn fill_exif_box(container: &gtk::Box, exif: &crate::api_client::ExifInfo) {
-    let mut rows: Vec<(String, String)> = Vec::new();
-    let dims = match (exif.exif_image_width, exif.exif_image_height) {
-        (Some(w), Some(h)) => Some(format!("{} × {}", w, h)),
-        _ => None,
-    };
-    if let Some(d) = dims {
-        rows.push(("Dimensions".into(), d));
+/// Everything we can learn about a local file off the main thread before
+/// handing the data back to GTK. `exif` is the cached EXIF parse; `dims`
+/// comes from a pixbuf header-only read; `mtime_iso` falls back when the
+/// file has no `DateTimeOriginal` so we always show *some* date.
+struct LocalProbe {
+    exif: Option<LocalExif>,
+    file_size: Option<u64>,
+    mtime_iso: Option<String>,
+    dims: Option<(u32, u32)>,
+}
+
+/// Render a `SystemTime` as an RFC3339 string in the local timezone so the
+/// existing `format_datetime_display` pipeline can format it consistently
+/// with EXIF-derived timestamps.
+fn systemtime_to_rfc3339(t: std::time::SystemTime) -> String {
+    use chrono::{DateTime, Local};
+    let dt: DateTime<Local> = t.into();
+    dt.to_rfc3339()
+}
+
+/// Project local-file metadata into the API EXIF shape so the existing
+/// renderer handles both sources uniformly.
+fn exif_from_local(local: &LocalExif, file_size: Option<u64>) -> ExifInfo {
+    ExifInfo {
+        make: local.make.clone(),
+        model: local.model.clone(),
+        lens_model: local.lens_model.clone(),
+        f_number: local.f_number,
+        focal_length: local.focal_length,
+        iso: local.iso,
+        exposure_time: local.exposure_time.clone(),
+        file_size_in_byte: file_size,
+        date_time_original: local.date_time_original.clone(),
+        city: None,
+        state: None,
+        country: None,
+        latitude: local.latitude,
+        longitude: local.longitude,
+        description: local.description.clone(),
+        exif_image_width: local.image_width,
+        exif_image_height: local.image_height,
     }
-    if let Some(size) = exif.file_size_in_byte {
-        rows.push(("Size".into(), format_bytes(size)));
+}
+
+fn original_preview_cache_path(
+    cache_dir: &std::path::Path,
+    asset_id: &str,
+    filename: &str,
+) -> std::path::PathBuf {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or("bin");
+    cache_dir.join(format!("{asset_id}.{ext}"))
+}
+
+/// Populate the details sidebar with sectioned EXIF metadata.
+///
+/// Groups fall into three categories — Camera, Image, Location — each rendered
+/// as an `AdwPreferencesGroup` with accent-coloured prefix icons. Empty groups
+/// (e.g. an image with no GPS) are skipped so the pane stays compact.
+///
+/// `taken_label` decides whether the date row reads "Taken" (EXIF
+/// DateTimeOriginal — the camera's capture moment) or "Modified" (filesystem
+/// mtime fallback when no capture timestamp exists).
+fn fill_exif_box(container: &gtk::Box, exif: &crate::api_client::ExifInfo, taken_label: &str) {
+    let camera_group = libadwaita::PreferencesGroup::builder()
+        .title("Camera")
+        .build();
+    let mut camera_rows = 0u32;
+    if let Some(c) = format_camera(exif) {
+        camera_group.add(&accent_row(
+            "camera-photo-symbolic",
+            "mimick-accent-camera",
+            "Body",
+            &c,
+        ));
+        camera_rows += 1;
     }
-    if let Some(dt) = &exif.date_time_original {
-        rows.push(("Taken".into(), format_datetime_display(dt)));
-    }
-    let camera = match (&exif.make, &exif.model) {
-        (Some(m), Some(n)) => Some(format!("{} {}", m, n)),
-        (Some(m), None) => Some(m.clone()),
-        (None, Some(n)) => Some(n.clone()),
-        _ => None,
-    };
-    if let Some(c) = camera {
-        rows.push(("Camera".into(), c));
-    }
-    if let Some(l) = &exif.lens_model {
-        rows.push(("Lens".into(), l.clone()));
-    }
-    let mut shot = Vec::new();
-    if let Some(f) = exif.f_number {
-        shot.push(format!("ƒ/{:.1}", f));
-    }
-    if let Some(et) = &exif.exposure_time {
-        shot.push(et.clone());
-    }
-    if let Some(iso) = exif.iso {
-        shot.push(format!("ISO {}", iso));
-    }
-    if let Some(focal) = exif.focal_length {
-        shot.push(format!("{:.0}mm", focal));
-    }
-    if !shot.is_empty() {
-        rows.push(("Exposure".into(), shot.join(" · ")));
-    }
-    let location = match (&exif.city, &exif.state, &exif.country) {
-        (Some(c), Some(s), Some(co)) => Some(format!("{}, {}, {}", c, s, co)),
-        (Some(c), None, Some(co)) => Some(format!("{}, {}", c, co)),
-        (Some(c), _, _) => Some(c.clone()),
-        (_, Some(s), Some(co)) => Some(format!("{}, {}", s, co)),
-        (_, _, Some(co)) => Some(co.clone()),
-        _ => None,
-    };
-    if let Some(loc) = location {
-        rows.push(("Location".into(), loc));
-    }
-    if let (Some(lat), Some(lon)) = (exif.latitude, exif.longitude) {
-        rows.push(("GPS".into(), format!("{:.5}, {:.5}", lat, lon)));
-    }
-    if let Some(desc) = &exif.description
-        && !desc.is_empty()
+    if let Some(l) = &exif.lens_model
+        && !l.trim().is_empty()
     {
-        rows.push(("Description".into(), desc.clone()));
+        camera_group.add(&accent_row(
+            "view-fullscreen-symbolic",
+            "mimick-accent-camera",
+            "Lens",
+            l,
+        ));
+        camera_rows += 1;
+    }
+    if let Some(exposure) = format_exposure(exif) {
+        camera_group.add(&accent_row(
+            "weather-clear-symbolic",
+            "mimick-accent-camera",
+            "Exposure",
+            &exposure,
+        ));
+        camera_rows += 1;
     }
 
-    for (key, value) in rows {
-        let row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(2)
+    let image_group = libadwaita::PreferencesGroup::builder()
+        .title("Image")
+        .build();
+    let mut image_rows = 0u32;
+    if let (Some(w), Some(h)) = (exif.exif_image_width, exif.exif_image_height) {
+        image_group.add(&accent_row(
+            "view-grid-symbolic",
+            "mimick-accent-image",
+            "Dimensions",
+            &format!("{w} × {h}"),
+        ));
+        image_rows += 1;
+    }
+    if let Some(size) = exif.file_size_in_byte {
+        image_group.add(&accent_row(
+            "drive-harddisk-symbolic",
+            "mimick-accent-image",
+            "Size",
+            &format_bytes(size),
+        ));
+        image_rows += 1;
+    }
+    if let Some(dt) = &exif.date_time_original
+        && !dt.trim().is_empty()
+    {
+        image_group.add(&accent_row(
+            "x-office-calendar-symbolic",
+            "mimick-accent-image",
+            taken_label,
+            &format_datetime_display(dt),
+        ));
+        image_rows += 1;
+    }
+
+    let location_group = libadwaita::PreferencesGroup::builder()
+        .title("Location")
+        .build();
+    let mut location_rows = 0u32;
+    if let Some(loc) = format_location(exif) {
+        location_group.add(&accent_row(
+            "mark-location-symbolic",
+            "mimick-accent-location",
+            "Place",
+            &loc,
+        ));
+        location_rows += 1;
+    }
+    if let (Some(lat), Some(lon)) = (exif.latitude, exif.longitude) {
+        location_group.add(&accent_row(
+            "find-location-symbolic",
+            "mimick-accent-location",
+            "Coordinates",
+            &format!("{lat:.5}, {lon:.5}"),
+        ));
+        location_rows += 1;
+    }
+
+    if camera_rows > 0 {
+        container.append(&camera_group);
+    }
+    if image_rows > 0 {
+        container.append(&image_group);
+    }
+    if location_rows > 0 {
+        container.append(&location_group);
+    }
+
+    if let Some(desc) = &exif.description
+        && !desc.trim().is_empty()
+    {
+        let note_group = libadwaita::PreferencesGroup::builder()
+            .title("Description")
             .build();
-        let k = gtk::Label::builder()
-            .label(&key)
-            .xalign(0.0)
-            .css_classes(vec!["caption".to_string(), "dim-label".to_string()])
+        let row = libadwaita::ActionRow::builder()
+            .title(desc.as_str())
+            .title_lines(0)
+            .css_classes(["property"])
             .build();
-        let v = gtk::Label::builder()
-            .label(&value)
-            .xalign(0.0)
-            .wrap(true)
-            .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .max_width_chars(28)
-            .selectable(true)
-            .build();
-        row.append(&k);
-        row.append(&v);
-        container.append(&row);
+        note_group.add(&row);
+        container.append(&note_group);
+    }
+}
+
+fn accent_row(icon: &str, accent_class: &str, title: &str, value: &str) -> libadwaita::ActionRow {
+    let prefix = gtk::Image::builder()
+        .icon_name(icon)
+        .pixel_size(16)
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::Center)
+        .css_classes(["mimick-detail-icon", accent_class])
+        .build();
+    let row = libadwaita::ActionRow::builder()
+        .title(title)
+        .subtitle(value)
+        .subtitle_lines(2)
+        .css_classes(["property"])
+        .build();
+    row.add_prefix(&prefix);
+    row
+}
+
+fn format_camera(exif: &crate::api_client::ExifInfo) -> Option<String> {
+    match (&exif.make, &exif.model) {
+        (Some(m), Some(n)) => {
+            let m = m.trim();
+            let n = n.trim();
+            if n.starts_with(m) {
+                Some(n.to_string())
+            } else {
+                Some(format!("{m} {n}"))
+            }
+        }
+        (Some(m), None) => Some(m.trim().to_string()),
+        (None, Some(n)) => Some(n.trim().to_string()),
+        _ => None,
+    }
+    .filter(|s| !s.is_empty())
+}
+
+fn format_exposure(exif: &crate::api_client::ExifInfo) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(f) = exif.f_number {
+        parts.push(format!("ƒ/{f:.1}"));
+    }
+    if let Some(et) = &exif.exposure_time
+        && !et.trim().is_empty()
+    {
+        parts.push(et.trim().to_string());
+    }
+    if let Some(iso) = exif.iso {
+        parts.push(format!("ISO {iso}"));
+    }
+    if let Some(focal) = exif.focal_length {
+        parts.push(format!("{focal:.0}mm"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn format_location(exif: &crate::api_client::ExifInfo) -> Option<String> {
+    let parts: Vec<&str> = [&exif.city, &exif.state, &exif.country]
+        .into_iter()
+        .filter_map(|s| s.as_deref().map(str::trim).filter(|t| !t.is_empty()))
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
     }
 }
 
@@ -159,17 +328,20 @@ fn truncate_filename(name: &str, max_chars: usize) -> String {
 }
 
 /// Apply zoom to a lightbox Picture. Zoom is fit-relative: 1.0 = the size the
-/// texture would occupy inside `viewer` under Contain layout. > 1.0 overflows
-/// the viewer for panning. At 1.0 we restore (-1, -1) so the picture
-/// auto-resizes with the window.
-fn apply_lightbox_zoom(picture: &gtk::Picture, viewer: &gtk::ScrolledWindow, zoom: f64) {
+/// texture would occupy inside `viewer` under Contain layout. >1.0 overflows
+/// the viewer for panning. Returns the computed content dimensions when zoomed.
+fn apply_lightbox_zoom(
+    picture: &gtk::Picture,
+    viewer: &gtk::ScrolledWindow,
+    zoom: f64,
+) -> Option<(f64, f64)> {
     if (zoom - 1.0).abs() < 0.001 {
         picture.set_size_request(-1, -1);
-        return;
+        return None;
     }
     let Some(paintable) = picture.paintable() else {
         picture.set_size_request(-1, -1);
-        return;
+        return None;
     };
     let nw = paintable.intrinsic_width().max(1) as f64;
     let nh = paintable.intrinsic_height().max(1) as f64;
@@ -182,7 +354,10 @@ fn apply_lightbox_zoom(picture: &gtk::Picture, viewer: &gtk::ScrolledWindow, zoo
     } else {
         (viewer_w, viewer_w / texture_aspect)
     };
-    picture.set_size_request((fit_w * zoom) as i32, (fit_h * zoom) as i32);
+    let cw = fit_w * zoom;
+    let ch = fit_h * zoom;
+    picture.set_size_request(cw as i32, ch as i32);
+    Some((cw, ch))
 }
 
 /// Construct and present the fullscreen lightbox view for a selected asset.
@@ -244,11 +419,13 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .content_fit(gtk::ContentFit::Contain)
         .vexpand(true)
         .hexpand(true)
+        .css_classes(["mimick-lightbox-picture"])
         .build();
     let picture_b = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Contain)
         .vexpand(true)
         .hexpand(true)
+        .css_classes(["mimick-lightbox-picture"])
         .build();
     let pic_stack = gtk::Stack::builder()
         .transition_duration(180)
@@ -264,8 +441,111 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .child(&pic_stack)
         .vexpand(true)
         .hexpand(true)
+        .kinetic_scrolling(false)
         .min_content_width(120)
         .build();
+
+    // Spinner overlay: a centered Mimick app icon that rotates while a
+    // full-resolution texture is being fetched / decoded. Hidden by default;
+    // the load_into_picture closure toggles it.
+    let loader_icon = gtk::Image::builder()
+        .icon_name("dev.nicx.mimick")
+        .pixel_size(72)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .css_classes(["mimick-loader-icon"])
+        .build();
+    let loader_overlay = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::Crossfade)
+        .transition_duration(180)
+        .reveal_child(false)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .child(&loader_icon)
+        .can_target(false)
+        .build();
+    let picture_overlay = gtk::Overlay::builder().build();
+    picture_overlay.set_child(Some(&scrolled_picture));
+    picture_overlay.add_overlay(&loader_overlay);
+
+    let unavailable_title = gtk::Label::builder()
+        .label("Preview unavailable")
+        .css_classes(["title-3"])
+        .build();
+    let unavailable_filename = gtk::Label::builder()
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .max_width_chars(42)
+        .build();
+    let unavailable_mime = gtk::Label::builder().css_classes(["dim-label"]).build();
+    let unavailable_open = gtk::Button::builder()
+        .label("Open in external app")
+        .css_classes(["suggested-action"])
+        .build();
+    let unavailable_path = Rc::new(RefCell::new(None::<String>));
+    unavailable_open.connect_clicked({
+        let unavailable_path = unavailable_path.clone();
+        move |_| {
+            if let Some(path) = unavailable_path.borrow().as_deref() {
+                open_local_with_default_app(path);
+            }
+        }
+    });
+    let unavailable_card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .css_classes(["mimick-preview-unavailable"])
+        .build();
+    unavailable_card.append(&unavailable_title);
+    unavailable_card.append(&unavailable_filename);
+    unavailable_card.append(&unavailable_mime);
+    unavailable_card.append(&unavailable_open);
+    let unavailable_overlay = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::Crossfade)
+        .transition_duration(180)
+        .reveal_child(false)
+        .halign(gtk::Align::Fill)
+        .valign(gtk::Align::Fill)
+        .child(&unavailable_card)
+        .can_target(false)
+        .build();
+    picture_overlay.add_overlay(&unavailable_overlay);
+
+    // Video poster badge: clickable play icon shown over the still thumbnail
+    // when the current asset is a video; hands off to the grid's player flow.
+    let video_badge_target: Rc<RefCell<Option<(String, String, String)>>> =
+        Rc::new(RefCell::new(None));
+    let video_badge_icon = gtk::Image::builder()
+        .icon_name("mimick-video-symbolic")
+        .pixel_size(72)
+        .css_classes(vec!["mimick-video-badge".to_string()])
+        .build();
+    let video_badge_button = gtk::Button::builder()
+        .child(&video_badge_icon)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .tooltip_text("Play video in external player")
+        .css_classes(vec!["circular".to_string(), "flat".to_string()])
+        .visible(false)
+        .build();
+    video_badge_button.connect_clicked({
+        let video_badge_target = video_badge_target.clone();
+        let ui_for_video = ui.clone();
+        move |_| {
+            let Some((local_path, asset_id, filename)) = video_badge_target.borrow().clone() else {
+                return;
+            };
+            if !local_path.is_empty() {
+                open_local_with_default_app(&local_path);
+            } else {
+                spawn_video_handoff(ui_for_video.clone(), asset_id, filename);
+            }
+        }
+    });
+    picture_overlay.add_overlay(&video_badge_button);
+
     let active_a = Rc::new(Cell::new(true));
     let zoom_level = Rc::new(Cell::new(1.0_f64));
     let initial_full = ui.ctx.config.read().data.library_preview_full_resolution;
@@ -309,16 +589,16 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     actions.append(&actions_spacer);
     actions.append(&resolution_toggle);
     actions.append(&download);
-    viewer.append(&scrolled_picture);
+    viewer.append(&picture_overlay);
     viewer.append(&actions);
 
     let details_inner = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
+        .spacing(14)
+        .margin_top(14)
+        .margin_bottom(14)
+        .margin_start(10)
+        .margin_end(10)
         .build();
     let details_pane = gtk::ScrolledWindow::builder()
         .child(&details_inner)
@@ -372,18 +652,17 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .sync_create()
         .build();
 
-    // On narrow widths, hide the prev/next header buttons — Left/Right
+    // On narrow widths, hide the prev/next header buttons -- Left/Right
     // keyboard shortcuts still work, and the saved space lets the title fit.
+    // The details toggle stays visible so users can still access the EXIF pane.
     let sync_nav_visibility = {
         let prev_btn = prev_btn.clone();
         let next_btn = next_btn.clone();
-        let details_btn = details_btn.clone();
         let split = ui.split.clone();
         move || {
             let show = !split.is_collapsed();
             prev_btn.set_visible(show);
             next_btn.set_visible(show);
-            details_btn.set_visible(show);
         }
     };
     sync_nav_visibility();
@@ -392,23 +671,145 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .connect_notify_local(Some("collapsed"), move |_, _| sync_clone());
 
     let pos_cell = Rc::new(Cell::new(position));
+    // Increments on every navigation. Async load tasks capture the generation
+    // they were started for and skip UI writes if the user has navigated away
+    // by the time their decode finishes (relevant for slow RAW files).
+    let load_gen = Rc::new(Cell::new(0u64));
     let load_into_picture = Rc::new({
         let ui = ui.clone();
-        move |target: gtk::Picture, asset_id: String, local_path: String, full_res: bool| {
+        let loader_overlay = loader_overlay.clone();
+        let unavailable_overlay = unavailable_overlay.clone();
+        let unavailable_filename = unavailable_filename.clone();
+        let unavailable_mime = unavailable_mime.clone();
+        let unavailable_open = unavailable_open.clone();
+        let unavailable_path = unavailable_path.clone();
+        let load_gen = load_gen.clone();
+        let pic_stack = pic_stack.clone();
+        let active_a = active_a.clone();
+        let video_badge_button = video_badge_button.clone();
+        let video_badge_target = video_badge_target.clone();
+        move |target: gtk::Picture,
+              target_is_a: bool,
+              asset_id: String,
+              filename: String,
+              mime: String,
+              local_path: String,
+              full_res: bool| {
             let ui = ui.clone();
+            let loader = loader_overlay.clone();
+            let unavailable_overlay = unavailable_overlay.clone();
+            let unavailable_filename = unavailable_filename.clone();
+            let unavailable_mime = unavailable_mime.clone();
+            let unavailable_open = unavailable_open.clone();
+            let unavailable_path = unavailable_path.clone();
+            let load_gen = load_gen.clone();
+            let pic_stack = pic_stack.clone();
+            let active_a = active_a.clone();
+            let video_badge_button = video_badge_button.clone();
+            let video_badge_target = video_badge_target.clone();
+            let our_gen = load_gen.get().wrapping_add(1);
+            load_gen.set(our_gen);
+            unavailable_overlay.set_reveal_child(false);
+            unavailable_overlay.set_can_target(false);
+            *unavailable_path.borrow_mut() = None;
+            // Videos use the still thumbnail as a poster + play badge; image
+            // decoders would all fail and fall through to "unavailable".
+            let is_video =
+                crate::media_kinds::asset_kind(&mime) == crate::media_kinds::AssetKind::Video;
+            if is_video {
+                *video_badge_target.borrow_mut() =
+                    Some((local_path.clone(), asset_id.clone(), filename.clone()));
+                video_badge_button.set_visible(true);
+            } else {
+                *video_badge_target.borrow_mut() = None;
+                video_badge_button.set_visible(false);
+            }
+            if let Some(texture) = ui
+                .ctx
+                .thumbnail_cache
+                .get_cached(&asset_id, ThumbnailSize::Preview)
+            {
+                target.set_paintable(Some(&texture));
+            }
+            // Reveal the spinner after a short delay so fast cache hits and
+            // quick JPEG decodes don't flash it. Local paths get a longer
+            // delay since most JPEGs decode in well under 250ms, but RAW
+            // and large TIFF decodes can run for seconds and need feedback.
+            let arm_delay_ms: u64 = if local_path.is_empty() { 120 } else { 250 };
+            let loader_for_arm = loader.clone();
+            let cancel_loader = Rc::new(Cell::new(false));
+            let cancel_for_arm = cancel_loader.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(arm_delay_ms), move || {
+                if !cancel_for_arm.get() {
+                    loader_for_arm.set_reveal_child(true);
+                }
+                glib::ControlFlow::Break
+            });
             glib::MainContext::default().spawn_local(async move {
-                if !local_path.is_empty() {
-                    if let Some(texture) = load_texture_oriented(std::path::Path::new(&local_path))
-                    {
+                let is_current = || load_gen.get() == our_gen;
+                // Defer the child switch by one idle so the target picture
+                // re-measures with the new texture before the slide starts.
+                let commit_visible = || {
+                    let pic_stack = pic_stack.clone();
+                    let active_a = active_a.clone();
+                    glib::idle_add_local_once(move || {
+                        pic_stack.set_visible_child_name(if target_is_a { "a" } else { "b" });
+                        active_a.set(target_is_a);
+                    });
+                };
+                let show_unavailable = |path: Option<String>| {
+                    unavailable_filename.set_label(&filename);
+                    unavailable_mime.set_label(&mime);
+                    unavailable_open.set_visible(path.is_some());
+                    *unavailable_path.borrow_mut() = path;
+                    unavailable_overlay.set_can_target(true);
+                    unavailable_overlay.set_reveal_child(true);
+                };
+                if is_video {
+                    // Use the grid's preview thumbnail as the poster.
+                    let thumb_result = ui
+                        .ctx
+                        .thumbnail_cache
+                        .load_thumbnail(&asset_id, ThumbnailSize::Preview)
+                        .await;
+                    if !is_current() {
+                        return;
+                    }
+                    if let Ok(texture) = thumb_result {
                         target.set_paintable(Some(&texture));
                     }
+                    commit_visible();
+                    cancel_loader.set(true);
+                    loader.set_reveal_child(false);
                     return;
+                }
+                if !local_path.is_empty() {
+                    if let Some(texture) =
+                        load_texture_oriented(std::path::Path::new(&local_path)).await
+                    {
+                        if is_current() {
+                            target.set_paintable(Some(&texture));
+                            commit_visible();
+                            cancel_loader.set(true);
+                            loader.set_reveal_child(false);
+                        }
+                        return;
+                    }
+                    if asset_id.starts_with(crate::library::LOCAL_ID_PREFIX) {
+                        if is_current() {
+                            show_unavailable(Some(local_path));
+                            commit_visible();
+                            cancel_loader.set(true);
+                            loader.set_reveal_child(false);
+                        }
+                        return;
+                    }
                 }
                 if full_res {
                     if let Some(cache_dir) = crate::profile::cache_dir().map(|p| p.join("preview"))
                     {
                         let _ = std::fs::create_dir_all(&cache_dir);
-                        let temp = cache_dir.join(format!("{}.bin", asset_id));
+                        let temp = original_preview_cache_path(&cache_dir, &asset_id, &filename);
                         if !temp.exists()
                             && let Err(err) = {
                                 begin_download_session(&ui.ctx, format!("preview {asset_id}"));
@@ -428,19 +829,46 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                             }
                         {
                             log::warn!("Lightbox original fetch failed: {}", err);
+                            if is_current() {
+                                show_unavailable(None);
+                                commit_visible();
+                                cancel_loader.set(true);
+                                loader.set_reveal_child(false);
+                            }
                             return;
                         }
-                        if let Some(texture) = load_texture_oriented(&temp) {
-                            target.set_paintable(Some(&texture));
+                        let decoded = load_texture_oriented(&temp).await;
+                        if !is_current() {
+                            return;
                         }
+                        if let Some(texture) = decoded {
+                            target.set_paintable(Some(&texture));
+                        } else {
+                            show_unavailable(Some(temp.display().to_string()));
+                        }
+                        commit_visible();
+                    } else if is_current() {
+                        show_unavailable(None);
+                        commit_visible();
                     }
-                } else if let Ok(texture) = ui
-                    .ctx
-                    .thumbnail_cache
-                    .load_thumbnail(&asset_id, ThumbnailSize::Preview)
-                    .await
-                {
-                    target.set_paintable(Some(&texture));
+                } else {
+                    let thumb_result = ui
+                        .ctx
+                        .thumbnail_cache
+                        .load_thumbnail(&asset_id, ThumbnailSize::Preview)
+                        .await;
+                    if !is_current() {
+                        return;
+                    }
+                    match thumb_result {
+                        Ok(texture) => target.set_paintable(Some(&texture)),
+                        Err(_) => show_unavailable(None),
+                    }
+                    commit_visible();
+                }
+                if is_current() {
+                    cancel_loader.set(true);
+                    loader.set_reveal_child(false);
                 }
             });
         }
@@ -455,6 +883,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let load_into_picture = load_into_picture.clone();
         let resolution_toggle = resolution_toggle.clone();
         let download = download.clone();
+        let zoom_group = zoom_group.clone();
         let prev_btn = prev_btn.clone();
         let next_btn = next_btn.clone();
         let details_filename = details_filename.clone();
@@ -506,10 +935,15 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             next_btn.set_sensitive(pos + 1 < n);
 
             let is_local = !local_path.is_empty() && asset_id.starts_with(LOCAL_ID_PREFIX);
-            resolution_toggle.set_visible(!is_local);
-            download.set_visible(!is_local);
+            let is_video =
+                crate::media_kinds::asset_kind(&mime) == crate::media_kinds::AssetKind::Video;
+            resolution_toggle.set_visible(!is_local && !is_video);
+            download.set_visible(!is_local && !is_video);
+            zoom_group.set_visible(!is_video);
 
-            // Pick the *inactive* picture to load into, then transition to it.
+            // Load into the *inactive* picture; commit the slide transition
+            // after the texture is set so the user sees the current image
+            // (with loader spinner) until the new one is actually ready.
             let target_is_a = !active_a.get();
             let target = if target_is_a {
                 picture_a.clone()
@@ -526,16 +960,96 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             });
             (*load_into_picture)(
                 target,
+                target_is_a,
                 asset_id.clone(),
-                local_path,
+                filename.clone(),
+                mime.clone(),
+                local_path.clone(),
                 resolution_toggle.is_active(),
             );
-            pic_stack.set_visible_child_name(if target_is_a { "a" } else { "b" });
-            active_a.set(target_is_a);
             nav_dir.set(0);
 
-            if is_local {
-                details_loading.set_visible(false);
+            if is_local
+                && crate::media_kinds::asset_kind(&mime) != crate::media_kinds::AssetKind::Video
+            {
+                // Local image: parse EXIF on a blocking worker.
+                // Hits the on-disk cache so repeat opens are cheap.
+                details_loading.set_visible(true);
+                let pos_cell_async = pos_cell.clone();
+                let details_loading = details_loading.clone();
+                let details_exif = details_exif.clone();
+                let local_path_async = local_path.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let cache_root = local_exif::cache_root();
+                    let path_for_blocking = local_path_async.clone();
+                    let probed = tokio::task::spawn_blocking(move || {
+                        let path = std::path::Path::new(&path_for_blocking);
+                        let meta = std::fs::metadata(path).ok();
+                        let file_size = meta.as_ref().map(|m| m.len());
+                        let mtime_iso = meta
+                            .as_ref()
+                            .and_then(|m| m.modified().ok())
+                            .map(systemtime_to_rfc3339);
+                        // Pixbuf header-only read — covers JPEG, PNG, GIF,
+                        // TIFF, WebP and HEIF/AVIF (when loaders installed).
+                        let dims = gtk::gdk_pixbuf::Pixbuf::file_info(path)
+                            .map(|(_, w, h)| (w, h))
+                            .and_then(|(w, h)| {
+                                let w = u32::try_from(w).ok()?;
+                                let h = u32::try_from(h).ok()?;
+                                Some((w, h))
+                            });
+                        let exif = local_exif::load_or_extract(&cache_root, path);
+                        LocalProbe {
+                            exif,
+                            file_size,
+                            mtime_iso,
+                            dims,
+                        }
+                    })
+                    .await
+                    .ok();
+                    if pos_cell_async.get() != pos {
+                        return;
+                    }
+                    details_loading.set_visible(false);
+                    // Render whatever we have. Files without an EXIF block
+                    // (Unsplash, screenshots, edited copies) still get the
+                    // Image group populated from filesystem + Pixbuf, so the
+                    // user always sees *something* in the details pane.
+                    let Some(probe) = probed else {
+                        return;
+                    };
+                    if probe.exif.is_none()
+                        && probe.file_size.is_none()
+                        && probe.dims.is_none()
+                        && probe.mtime_iso.is_none()
+                    {
+                        return;
+                    }
+                    let mut info = probe
+                        .exif
+                        .as_ref()
+                        .map_or_else(LocalExif::default, Clone::clone);
+                    if info.image_width.is_none() {
+                        info.image_width = probe.dims.map(|(w, _)| w);
+                    }
+                    if info.image_height.is_none() {
+                        info.image_height = probe.dims.map(|(_, h)| h);
+                    }
+                    let used_mtime_fallback = info.date_time_original.is_none();
+                    if used_mtime_fallback {
+                        info.date_time_original = probe.mtime_iso.clone();
+                    }
+                    let taken_label = if used_mtime_fallback {
+                        "Modified"
+                    } else {
+                        "Taken"
+                    };
+                    let projected = exif_from_local(&info, probe.file_size);
+                    fill_exif_box(&details_exif, &projected, taken_label);
+                    details_exif.set_visible(true);
+                });
                 return;
             }
 
@@ -557,7 +1071,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 details_loading.set_visible(false);
                 let Ok(details) = result else { return };
                 if let Some(exif) = details.exif_info {
-                    fill_exif_box(&details_exif, &exif);
+                    fill_exif_box(&details_exif, &exif, "Taken");
                     details_exif.set_visible(true);
                 }
             });
@@ -566,14 +1080,14 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
 
     (*render)();
 
-    prev_btn.connect_clicked(clone!(
+    let goto_prev = Rc::new(clone!(
         #[strong]
         pos_cell,
         #[strong]
         render,
         #[strong]
         nav_dir,
-        move |_| {
+        move || {
             let pos = pos_cell.get();
             if pos > 0 {
                 pos_cell.set(pos - 1);
@@ -581,6 +1095,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 (*render)();
             }
         }
+    ));
+    prev_btn.connect_clicked(clone!(
+        #[strong]
+        goto_prev,
+        move |_| (*goto_prev)()
     ));
     let goto_next = Rc::new(clone!(
         #[strong]
@@ -712,15 +1231,26 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let target_scroll_y = (scroll_y + fy) * ratio - fy;
 
             zoom_level.set(z_new);
-            apply_lightbox_zoom(&active_picture(), &scrolled_picture, z_new);
+            let content = apply_lightbox_zoom(&active_picture(), &scrolled_picture, z_new);
             zoom_reset_btn.set_label(&format!("{}%", (z_new * 100.0).round() as i32));
 
-            // Defer scroll-position update until after layout has run, so the
-            // ScrolledWindow's adjustment ranges reflect the new picture size.
-            glib::idle_add_local_once(move || {
-                hadj.set_value(target_scroll_x);
-                vadj.set_value(target_scroll_y);
-            });
+            // Pre-set adjustment ranges to match the new content size so the
+            // scroll position can be applied in the same frame. Without this
+            // the value would be clamped to the stale (old-zoom) range and
+            // corrected only after layout, causing a one-frame flicker.
+            if let Some((cw, ch)) = content {
+                hadj.set_upper(cw.max(viewer_w));
+                hadj.set_page_size(viewer_w);
+                vadj.set_upper(ch.max(viewer_h));
+                vadj.set_page_size(viewer_h);
+            } else {
+                hadj.set_upper(viewer_w);
+                hadj.set_page_size(viewer_w);
+                vadj.set_upper(viewer_h);
+                vadj.set_page_size(viewer_h);
+            }
+            hadj.set_value(target_scroll_x);
+            vadj.set_value(target_scroll_y);
         }
     ));
 
@@ -759,6 +1289,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
 
     // Trackpad pinch-to-zoom.
+    // Attached to the pic_stack (inside the ScrolledWindow) so the gesture
+    // receives touchpad pinch events before the ScrolledWindow's own handlers.
     let pinch = gtk::GestureZoom::new();
     let pinch_start = Rc::new(Cell::new(1.0_f64));
     pinch.connect_begin(clone!(
@@ -779,7 +1311,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             (*set_zoom)(pinch_start.get() * scale);
         }
     ));
-    scrolled_picture.add_controller(pinch);
+    pic_stack.add_controller(pinch.clone());
 
     // Click-and-drag panning: only acts when zoomed in (otherwise scrollbars
     // have nowhere to scroll to). Snapshots scroll position on begin and
@@ -809,7 +1341,10 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             scrolled_picture.vadjustment().set_value(sy0 - off_y);
         }
     ));
-    scrolled_picture.add_controller(drag);
+    // Attach drag, then group with pinch — GTK requires both controllers
+    // to be on the same widget before grouping.
+    pic_stack.add_controller(drag.clone());
+    drag.group_with(&pinch);
 
     // Double-click on the picture: zoom in 2x toward the click position.
     let double_click = gtk::GestureClick::new();
@@ -858,20 +1393,45 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
     scrolled_picture.add_controller(right_click);
 
+    // Horizontal swipe gesture for prev/next navigation. Only fires when not
+    // zoomed in so it doesn't conflict with pan. Essential on mobile (360px)
+    // where the prev/next header buttons are hidden.
+    let swipe = gtk::GestureSwipe::new();
+    swipe.set_touch_only(false);
+    swipe.connect_swipe(clone!(
+        #[strong]
+        goto_prev,
+        #[strong]
+        goto_next,
+        #[strong]
+        zoom_level,
+        move |_, vx, _vy| {
+            // Ignore swipes when zoomed in — those should pan instead.
+            if (zoom_level.get() - 1.0).abs() > 0.01 {
+                return;
+            }
+            // vx < 0 means finger moved left → go to next asset.
+            // vx > 0 means finger moved right → go to previous asset.
+            const MIN_VELOCITY: f64 = 50.0;
+            if vx < -MIN_VELOCITY {
+                (*goto_next)();
+            } else if vx > MIN_VELOCITY {
+                (*goto_prev)();
+            }
+        }
+    ));
+    pic_stack.add_controller(swipe);
+
     let key_controller = gtk::EventControllerKey::new();
     key_controller.connect_key_pressed(clone!(
         #[strong]
         ui,
         #[strong]
-        pos_cell,
-        #[strong]
-        render,
-        #[strong]
         details_btn,
         #[strong]
-        goto_next,
+        goto_prev,
         #[strong]
-        nav_dir,
+        goto_next,
         #[strong]
         zoom_by,
         #[strong]
@@ -894,12 +1454,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     glib::Propagation::Stop
                 }
                 (false, gtk::gdk::Key::Left) => {
-                    let pos = pos_cell.get();
-                    if pos > 0 {
-                        pos_cell.set(pos - 1);
-                        nav_dir.set(-1);
-                        (*render)();
-                    }
+                    (*goto_prev)();
                     glib::Propagation::Stop
                 }
                 (false, gtk::gdk::Key::Right) => {
@@ -971,4 +1526,22 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
 
     ui.nav.push(&page);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::original_preview_cache_path;
+
+    #[test]
+    fn original_preview_cache_path_keeps_decoder_extension() {
+        let cache = std::path::Path::new("/tmp/previews");
+        assert_eq!(
+            original_preview_cache_path(cache, "remote-id", "PXL_20250516_222429137.dng"),
+            cache.join("remote-id.dng")
+        );
+        assert_eq!(
+            original_preview_cache_path(cache, "remote-id", "extensionless"),
+            cache.join("remote-id.bin")
+        );
+    }
 }

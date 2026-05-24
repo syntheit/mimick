@@ -17,9 +17,11 @@ graph TD
         Main --> SharedState["Arc<Mutex<AppState>> - in memory"]
         Main --> RuntimeEnv[Runtime Environment Checks]
         Main --> StartupScan[Startup Catch-Up Scan]
+        Main --> RemoteSync[Remote Album Reconciler - 5 min loop]
 
         Monitor -->|File Events + SHA-1| QueueManager
         StartupScan -->|Unsynced files| QueueManager
+        RemoteSync -->|Diff & re-queue| QueueManager
         QueueManager -->|1-10 async workers| API[Immich API Client - shared]
         QueueManager -->|Update directly| SharedState
         QueueManager -->|Pause policy checks| RuntimeEnv
@@ -28,10 +30,17 @@ graph TD
     end
 
     subgraph Library UI [GTK4 / Libadwaita]
-        Window[Library View / Settings] -->|500ms timer| SharedState
+        Window[Library / Settings Window] -->|500ms timer| SharedState
         Window -->|Diagnostics export| Diagnostics[diagnostics.rs]
-        Window -->|Fetch & Bidirectional Sync| API
-        Window -->|ThumbHash Rendering| ThumbCache[Thumbnail Cache]
+        Window -->|Fetch / Bidirectional Sync| API
+        Window -->|Server thumbnails + ThumbHash placeholder| ThumbCache[Thumbnail Cache - LRU + disk]
+        Window --> LocalSource[Local Source Enumeration]
+        Window --> LocalExif[Local EXIF Parser]
+        Window --> Lightbox[Lightbox + Multi-format Decoders]
+        Lightbox -->|libraw, libheif-rs, jxl-oxide, resvg, psd, turbojpeg| ThumbCache
+        Lightbox -->|Video handoff: spawn_video_handoff| ExternalPlayer[System Default Player]
+        LocalSource -->|Synthetic asset rows| Window
+        LocalExif -->|Cached EXIF| Window
     end
 
     Main -->|present / set_visible| Window
@@ -42,6 +51,9 @@ graph TD
         RetryFile["retries.json (~/.cache/mimick/) - written on shutdown only"]
         StateFile["status.json (~/.cache/mimick/) - written on shutdown only"]
         ThumbStore["thumbnails/ (~/.cache/mimick/thumbnails/)"]
+        RawCache["raw_decode/ (~/.cache/mimick/raw_decode/)"]
+        ExifCache["exif/ (~/.cache/mimick/exif/)"]
+        VideoCache["video/ (~/.cache/mimick/video/) - external player handoff"]
         SyncIndex["synced_index.json (~/.local/share/mimick/)"]
     end
 
@@ -51,6 +63,9 @@ graph TD
     QueueManager -->|Write on exit| RetryFile
     Main -->|Read/Write| SyncIndex
     ThumbCache -->|LRU / Write| ThumbStore
+    Lightbox -->|Demosaic cache write| RawCache
+    LocalExif -->|Write| ExifCache
+    Lightbox -->|Remote video download| VideoCache
     Diagnostics -->|Copy selected files| Storage
 ```
 
@@ -100,11 +115,12 @@ Thread-safe upload orchestrator using a single `Arc<Mutex<AppState>>` for all co
 - Structured error diagnostics with actionable guidance for common failure modes
 - Extended endpoints for library integration (Explore, Albums, Search, Smart Search, OCR)
 
-### 5. Library View & Settings UI (`src/settings_window.rs`, `src/library/*`)
+### 5. Library View & Settings UI (`src/settings_window/`, `src/library/`)
 
 - The main user interface is a unified `adw::PreferencesWindow` that doubles as the Library View and the Settings panel.
 - Built on demand from `AppContext`; close destroys the window (unless background sync is disabled, in which case the app quits)
 - Includes distinct library pages: **Photos**, **Explore**, **Albums**, and **Search**.
+- Supports manual uploads via the `upload_picker` module, directly enqueueing multi-file selections.
 - `Arc<Mutex<AppState>>` accessed from `AppContext`; the 500ms `glib::timeout_add_local` timer reads it without any disk I/O to drive the footer Sync Status indicator.
 - Test Connection button uses the shared client -- no new reqwest pool per click
 - Saving applies updated API settings, queue policy, worker limit, and watched folders to the running process without a restart
@@ -191,12 +207,31 @@ Utility module for displaying user-friendly labels for watch paths, especially p
 - Detects document-portal paths (`/run/user/.../doc/...`) and shows the folder name instead
 - Provides subtitle hints for portal-selected folders in the UI
 
-### 16. State & Persistence
+### 16. Remote Album Reconciler (`src/remote_sync.rs`)
+
+Periodic background task that re-runs the per-folder album↔folder diff on a fixed interval (5 min) so changes made directly in Immich (asset additions, deletions, album moves) propagate to local folders without requiring an app restart.
+
+- Skips silently when background sync is disabled, when the queue is paused, or when the API connectivity check fails
+- Delegates the actual diff to `startup_scan::reconcile_entry`, so the catch-up code path is shared between launch and steady-state reconciliation
+- Runs alongside the live file monitor; the monitor handles fresh local edits while this loop handles remote-side and missed events
+
+### 17. Lightbox + Decoders (`src/library/lightbox.rs`, `src/library/mod.rs`)
+
+Full-screen viewer with its own multi-format decoder pipeline, independent of the grid thumbnail cache.
+
+- Decoder routing by extension (see `texture_decoder_for_path`): RAW via libraw + imagepipe fallback, HEIF/AVIF via libheif-rs, JXL via jxl-oxide, SVG via resvg, PSD via the pure-Rust `psd` crate, JPEG via turbojpeg, then pixbuf, then the `image` crate as final fallback
+- RAW fast path extracts the embedded camera JPEG preview, picking the largest SOI-bounded payload in the file (resolves tiny previews on Samsung DNG and similar); the full demosaic path is gated behind the "Full RAW Decoding" setting and writes to `~/.cache/mimick/raw_decode/`
+- Videos take a poster path: the still thumbnail is shown with a clickable play badge; clicking hands off to the same external-player flow used by grid clicks (`open_local_with_default_app` for local files, `spawn_video_handoff` for remote files via `~/.cache/mimick/video/`)
+- EXIF details fetched via the API for remote assets or via `local_exif` for local files (skipped entirely for videos)
+
+### 18. State & Persistence
 
 - **`AppState`**: in-memory struct shared by workers and UI via `Arc<Mutex<AppState>>`; includes pause state, pause reason, last completed file, diagnostics export count, and recent queue events
 - **`StateManager`** (`src/state_manager.rs`): reads saved state on startup for crash recovery; writes on graceful shutdown only
 - **Retry queue**: in-memory during session; disk path `~/.cache/mimick/retries.json` written only on exit
 - **Sync index**: persisted at `~/.local/share/mimick/synced_index.json` to skip unchanged files across restarts and to detect album-target changes
 - **Thumbnail cache**: `~/.cache/mimick/thumbnails/` for fast preview rendering
+- **RAW Decode cache**: `~/.cache/mimick/raw_decode/` for persisting full sensor demosaics
+- **Local EXIF cache**: `~/.cache/mimick/exif/` for persisting local metadata reads
 - **Notifications**: natively handled via `gio::Notification` and the XDG notification portal; ensures safe delivery without `notify-send` sub-processes when sandboxed
 - **Keyring**: API keys are securely persisted through the `oo7` crate -- natively talking D-Bus Secret Service, or reading an encrypted sandbox file when running across the Flatpak boundary

@@ -728,6 +728,7 @@ async fn hash_to_task(
         album_id,
         album_name,
         reassociate_only,
+        skip_album: false,
     })
 }
 

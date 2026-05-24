@@ -7,17 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Face visibility filters in the Explore view allowing users to show/hide face-tagged assets with server-side filtering via new `personVisibility` parameter.
+- Server Statistics Dialog displaying key library metrics (total assets, photos, videos, archive count, person count, etc.) in a responsive FlowBox layout that adapts to window size.
+- Cargo audit configuration to ignore unmaintained EXIF dependencies, streamlining the security audit workflow.
+- Subtle press animations across all interactive UI elements (header buttons, sidebar rows, grid tiles, explore/album tiles, settings rows, dialog buttons). Uses a brief scale-down (0.97x, 80ms) on press; animations are automatically disabled when the GTK `gtk-enable-animations` system setting is off.
+- RAW rendering mode toggle in Settings > Library: "Full RAW Decoding" switch allows users to choose between fast embedded JPEG preview extraction (~10ms, default) and full sensor demosaic via libraw (~1-3s). The decode cache setting is gated to only appear when full decode is enabled.
+- Embedded JPEG preview extraction from RAW files via `libraw_unpack_thumb` + `libraw_dcraw_make_mem_thumb`. Supported across all major RAW formats (CR2, CR3, NEF, ARW, DNG, ORF, RW2, PEF, FFF, RAF, SR2, MRW, etc.) with automatic fallback to full demosaic when no embedded preview exists.
+- Toggleable RAW decode cache setting in Settings > Library. Stores demosaiced textures as PNGs on disk to skip re-processing on re-opens. Defaults to off to conserve storage.
+- Lightbox swipe gesture navigation: swipe left for next asset, swipe right for previous. Works with both touch and trackpad input. Automatically disabled when zoomed in to avoid conflicting with pan gestures. Essential on mobile viewports (360px) where the prev/next header buttons are hidden.
+
 ### Changed
 
 - Mobile and narrow viewport UI overhaul: optimized component dimensions for 360px width screens, adjusted album and explore tile layouts to 2-column on mobile with uniform sizing, reduced header controls footprint, and improved overall narrow-screen usability.
 - Album and explore view tile rendering now uses fixed 100px height with viewport-responsive width (via FlowBox homogeneous layout), ensuring consistent thumbnail aspect ratios and eliminating layout jitter on window resizes.
 - Grid view minimum columns reduced from 3 to 2 on narrow viewports to fit within 360px width constraints without overflow.
 - Added comprehensive rustdoc comments across all source files: module-level `//!` docs expanded to multi-line descriptions, and doc comments added to all public and private structs, enums, functions, and fields.
+- Top toolbar redesigned with context-aware search, sorting, and action triggers, providing better integration with face filters and statistics features.
+- Explore and album cover layouts now use breakpoint-driven responsive sizing (600sp threshold) to prevent image stretching on different viewport sizes.
+- Server statistics API endpoints enhanced to support library metrics and aggregation queries.
 
 ### Fixed
 
+- Lightbox now shows a video poster with a clickable play badge when navigating to a video asset (via arrow keys or Prev/Next), instead of the "Preview unavailable" overlay. Clicking the badge hands off to the same external-player flow used by grid clicks (local files via system default app, remote files downloaded to `~/.cache/mimick/video/`). Zoom controls, resolution toggle, and download button are hidden while a video is the current asset.
+- RAW embedded preview extraction now scans the file directly for the largest SOI-bounded JPEG as the primary path, instead of relying on libraw's preferred thumbnail. Resolves the postage-stamp preview problem on cameras that store a tiny JPEG followed by a full-resolution one (Sony ARW and similar). When no JPEG is present in the file at all (Samsung DNG, OnePlus DNG, and other phone DNGs that store their preview as uncompressed TIFF strips), the bitmap thumbnail from `libraw_dcraw_make_mem_thumb` is used as the fallback with container orientation applied. The full RAW demosaic path is unchanged.
+- Embedded JPEG previews extracted from RAW files (.fff, .pef, .dng, .3fr, .RAW, etc.) now display with correct orientation. The extractor routes through `Pixbuf::apply_embedded_orientation` for JPEG thumbnails and applies the RAW container's `flip` field via `Pixbuf::rotate_simple` for bitmap thumbnails. Previously `Texture::from_bytes` ignored EXIF orientation tags.
+- RAW thumbnails from cameras that pre-rotate the embedded preview (Kodak DCR, Nikon E5700 NEF, Leaf MOS) no longer appear double-rotated. A new `is_thumbnail_prerotated` check compares the preview aspect ratio against rotated sensor dimensions and skips the container flip when the preview is already oriented correctly.
+- SOI JPEG scanner no longer selects lossless JPEG payloads (SOF3 / `FF C3`) as preview candidates. RAW files wrap compressed Bayer sensor data in SOF3 containers that are never renderable. Previously the scanner selected these multi-MB blobs as the "largest JPEG", wasting a Pixbuf decode attempt before falling back to libraw. Affects 19 of 55 tested RAW formats (Nikon NEF/NRW, Pentax PEF, Canon CR3, Kodak KDC, Panasonic RW2/RWL, Leica DNG, Hasselblad 3FR, Sony SRF, Phase One CAP, Sigma X3F).
+- Local folder thumbnail generation for RAW files now skips the `gdk_pixbuf::from_file_at_scale` attempt entirely, going straight to the custom RAW decoder. Pixbuf never recognises RAW formats, so the previous attempt always failed with "Couldn't recognize the image file format" before falling through to the custom decoder, adding latency and log noise on every RAW thumbnail.
+- Lightbox details pane toggle button is no longer hidden at narrow viewports (360px). Previously all three header buttons (prev, next, details) were hidden when the split view collapsed, leaving no discoverable way to access the EXIF details pane on mobile.
+- Lightbox trackpad pinch-to-zoom now works reliably and is smooth. Zoom is now jitter-free: scroll adjustment ranges are pre-set synchronously to match the new content size so the scroll position applies in the same frame as the resize, eliminating the one-frame flicker from the previous deferred update.
 - Album/explore tile thumbnails now maintain uniform sizes within a viewport and display correctly at 360px window width, with no collapse on window-height changes.
 - FlowBox children per line constraints adjusted (min 2, max 6 for albums) to ensure 2-column layout on mobile while limiting tile width growth on desktop.
+- Raw asset handling and EXIF metadata extraction now properly exports `gexiv2_metadata_free` for modern gexiv2 linking compatibility.
+- Lightbox JPEG XL decoding switched from `jpegxl-rs` (system `libjxl` bindings, frequently mismatched at runtime) to `jxl-oxide` (pure-Rust). Removes the "Generic Error. Please build `libjxl` from source" failure mode on valid JXL files and drops the libjxl system dependency. Now also handles 1-channel grayscale and 2-channel grayscale-with-alpha JXL inputs by expanding to RGB / RGBA.
+- Lightbox RAW decoding now uses `libraw` (vendored C++) as the primary decoder with `imagepipe` as a pure-Rust fallback. libraw applies per-camera color matrices and white balance so output matches darktable / Lightroom instead of imagepipe's generic sRGB pipeline. Adds proper support for ARI (Arriraw), FFF (Hasselblad), CR3 (Canon mirrorless), ERF (Epson), Sony ARW variants, Phase One IIQ, and Sigma Foveon X3F -- formats imagepipe either rejected outright or rendered with wrong colours.
+- libraw decoder now explicitly enables `use_camera_wb` (camera as-shot white balance) and `user_qual = 3` (AHD demosaic) via direct `libraw-sys` FFI, since the `libraw-rs` Rust wrapper does not expose those params. Fixes the muted / blue cast that was visible on Nikon NEF, Hasselblad FFF, and Canon CR3 files compared to darktable.
+- Added PSD (Photoshop) lightbox decoding via the pure-Rust `psd` crate. Previously `.psd` files fell through every decoder and showed "Preview unavailable".
+- Fixed `gtk_gesture_group: assertion ... == ... failed` GTK-CRITICAL that fired every time the lightbox opened. The drag gesture must be attached to its widget *before* `group_with(&pinch)` is called.
+- Release profile switched from `panic = "abort"` to `panic = "unwind"` so `catch_unwind` actually catches third-party decoder panics. Previously, `rawloader`'s out-of-bounds slice access on certain malformed RAW files (IIQ, ARW, CR3) aborted the entire app -- `catch_unwind` is a no-op under abort. The ~60-100 KB unwinding-machinery cost is worth the crash resistance for a viewer that ingests user files.
+- Lightbox SVG rendering now uses `resvg` (pure-Rust) instead of relying on the gdk-pixbuf SVG loader, which is not always present in Flatpak runtimes. Restores SVG previews regardless of which pixbuf loaders the host bundles.
+- Lightbox SVG parser now tolerates real-world SVGs that use undeclared XML namespace prefixes (e.g. `c2pa:` C2PA provenance metadata from Adobe exports). Missing namespaces are injected with placeholder URIs before parsing.
+- Lightbox JPEG decoding now uses `libjpeg-turbo` (`turbojpeg` crate, vendored) as the primary decoder. Supports arithmetic-coded JPEGs (DAC marker) that `image-rs` and `gdk-pixbuf`'s Glycin backend reject with "header DAC is not supported".
+- Lightbox WebP decoding now uses `libwebp` (`webp` crate, vendored) as the primary decoder. Handles complex WebP bitstreams that `image-rs`'s pure-Rust WebP decoder rejects as "corrupt".
+- Lightbox JPEG 2000 (`.jp2`) decoding added via `openjpeg` (`jpeg2k` crate, vendored). Previously these were silently unsupported by both pixbuf and image-rs and only showed "Preview unavailable".
+- Lightbox RAW decoder now catches panics from `imagepipe`/`rawloader` (out-of-bounds in `crw.rs` and `packed.rs` decoders on certain RAW files) and falls through to libraw rather than crashing the worker thread.
+- Process-wide panic hook now filters out the noisy stderr messages from caught `rawloader`/`imagepipe` panics so the log stays readable when iterating over a folder of RAW files.
+- Lightbox navigation between assets is now race-free: each load tags itself with a generation counter and skips its own `set_paintable` if the user has already navigated to a different asset by the time the decode finishes. Previously a slow RAW decode could clobber a newer image after rapid Next/Prev.
+- Lightbox slide transitions now fire after the new image decodes, not before. Previously the slide animated to a copy of the current image (or to a blank target) and the new image popped in after; now the current image stays visible with a loader spinner while decode runs, and the slide animates straight to the loaded result.
+- Pixbuf and image-rs decode failures in the lightbox now log at debug level instead of silently returning, making future format-support issues diagnosable from `mimick.log`.
+- Dropped MPO from the supported-extensions registry; Immich's server rejects the format, so mimick no longer queues `.mpo` files for upload or tries to render them in the lightbox.
+- Centralized the RAW-extension list in `media_kinds` (next to MIME mappings) and removed the duplicate hardcoded list from `library/mod.rs`. New `media_kinds::is_raw_ext()` helper for callers.
+- Local folder thumbnails now generate correctly for RAW images (CR3, NEF, ARW, DNG, ORF, etc.) and other formats without built-in gdk-pixbuf loaders (HEIF, JXL, JP2, PSD). When `Pixbuf::from_file_at_scale` fails, the thumbnail cache falls back to `load_texture_blocking` (the same decoder pipeline used by the lightbox) and converts the result via `TextureDownloader` (GDK 4.10+) for scaling and disk caching. Previously these assets showed as broken/missing thumbnails in the linked folder local view.
+- Explore view no longer filters the people row down to a single person after navigating away and back. The shared `search_entry` widget previously carried a person's name set by the person-click handler into the next Explore-view activation, where it was reapplied as the people filter. Clearing the entry on `content_stack` view switches restores the full people list. The same fix applies to the Albums view.
+- Lightbox slide animation between assets is smoother. The stack child switch is now deferred by one idle tick so the target `GtkPicture` re-measures with the newly-painted texture before the slide starts; the first frame no longer captures the previous texture's aspect ratio.
+- Added debug-level logging when the "Show hidden" people filter is toggled, printing the new state and the number of hidden people in the cached list so wiring issues vs empty server-side data are distinguishable from the log.
+
+### Security
+
+- Replaced `std::env::temp_dir()` usage in the RAW decode cache with `tempfile::NamedTempFile` to avoid predictable temp path vulnerabilities (`rust.lang.security.temp-dir.temp-dir`).
 
 ## [9.5.4] - 2026-05-17
 
