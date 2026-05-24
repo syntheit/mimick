@@ -28,6 +28,9 @@ pub struct ExploreViewParts {
     people_section: gtk::Box,
     places_section: gtk::Box,
     things_section: gtk::Box,
+    people_spinner: gtk::Spinner,
+    places_spinner: gtk::Spinner,
+    things_spinner: gtk::Spinner,
     pub people_filter_button: gtk::MenuButton,
     cached_people: Rc<RefCell<Vec<Person>>>,
     cached_people_click: Rc<RefCell<Option<PersonClick>>>,
@@ -46,9 +49,9 @@ pub fn build_explore_view() -> ExploreViewParts {
         .margin_end(16)
         .build();
 
-    let (people_section, people_row, people_filter_button) = build_people_section();
-    let (places_section, places_grid) = build_tile_section("Places");
-    let (things_section, things_grid) = build_tile_section("Things");
+    let (people_section, people_row, people_spinner, people_filter_button) = build_people_section();
+    let (places_section, places_grid, places_spinner) = build_tile_section("Places");
+    let (things_section, things_grid, things_spinner) = build_tile_section("Things");
 
     outer.append(&people_section);
     outer.append(&places_section);
@@ -70,6 +73,9 @@ pub fn build_explore_view() -> ExploreViewParts {
         people_section,
         places_section,
         things_section,
+        people_spinner,
+        places_spinner,
+        things_spinner,
         people_filter_button,
         cached_people: Rc::new(RefCell::new(Vec::new())),
         cached_people_click: Rc::new(RefCell::new(None)),
@@ -78,8 +84,28 @@ pub fn build_explore_view() -> ExploreViewParts {
     }
 }
 
+/// Reveal each section with its spinner active, so the user gets immediate
+/// visual feedback that data is on the way. Each `populate_*` call clears
+/// its own spinner when results arrive.
+pub fn show_loading(parts: &ExploreViewParts) {
+    for (section, spinner) in [
+        (&parts.people_section, &parts.people_spinner),
+        (&parts.places_section, &parts.places_spinner),
+        (&parts.things_section, &parts.things_spinner),
+    ] {
+        section.set_visible(true);
+        spinner.set_visible(true);
+        spinner.start();
+    }
+}
+
+fn stop_spinner(spinner: &gtk::Spinner) {
+    spinner.stop();
+    spinner.set_visible(false);
+}
+
 /// Build a horizontal scrolled gallery row dedicated to recognized people circles.
-fn build_people_section() -> (gtk::Box, gtk::Box, gtk::MenuButton) {
+fn build_people_section() -> (gtk::Box, gtk::Box, gtk::Spinner, gtk::MenuButton) {
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
@@ -93,6 +119,11 @@ fn build_people_section() -> (gtk::Box, gtk::Box, gtk::MenuButton) {
     let title = heading("People");
     title.set_hexpand(true);
     header.append(&title);
+    let spinner = gtk::Spinner::builder()
+        .visible(false)
+        .valign(gtk::Align::Center)
+        .build();
+    header.append(&spinner);
     let filter_button = gtk::MenuButton::builder()
         .icon_name("view-more-symbolic")
         .tooltip_text("Filter people")
@@ -113,17 +144,29 @@ fn build_people_section() -> (gtk::Box, gtk::Box, gtk::MenuButton) {
         .height_request(140)
         .build();
     section.append(&scroller);
-    (section, row, filter_button)
+    (section, row, spinner, filter_button)
 }
 
 /// Build a flow grid section mapping image tiles for Places or Things category.
-fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
+fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox, gtk::Spinner) {
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
         .visible(false)
         .build();
-    section.append(&heading(title));
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    let title_label = heading(title);
+    title_label.set_hexpand(true);
+    header.append(&title_label);
+    let spinner = gtk::Spinner::builder()
+        .visible(false)
+        .valign(gtk::Align::Center)
+        .build();
+    header.append(&spinner);
+    section.append(&header);
     let grid = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .row_spacing(8)
@@ -134,7 +177,7 @@ fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox) {
         .halign(gtk::Align::Start)
         .build();
     section.append(&grid);
-    (section, grid)
+    (section, grid, spinner)
 }
 
 /// Helper to create a styled section heading label.
@@ -159,6 +202,7 @@ pub fn populate_people<F>(
 ) where
     F: Fn(String, String) + 'static,
 {
+    stop_spinner(&parts.people_spinner);
     *parts.cached_people.borrow_mut() = people;
     *parts.cached_people_click.borrow_mut() = Some(Rc::new(on_click));
     *parts.cached_ctx.borrow_mut() = Some(ctx.clone());
@@ -295,6 +339,9 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         people_section: parts.people_section.clone(),
         places_section: parts.places_section.clone(),
         things_section: parts.things_section.clone(),
+        people_spinner: parts.people_spinner.clone(),
+        places_spinner: parts.places_spinner.clone(),
+        things_spinner: parts.things_spinner.clone(),
         people_filter_button: parts.people_filter_button.clone(),
         cached_people: parts.cached_people.clone(),
         cached_people_click: parts.cached_people_click.clone(),
@@ -312,6 +359,7 @@ pub fn populate_places<F>(
 ) where
     F: Fn(&str, String) + 'static,
 {
+    stop_spinner(&parts.places_spinner);
     while let Some(child) = parts.places_grid.first_child() {
         parts.places_grid.remove(&child);
     }
@@ -338,6 +386,7 @@ pub fn populate_explore<F>(
 ) where
     F: Fn(&str, String) + 'static,
 {
+    stop_spinner(&parts.things_spinner);
     while let Some(child) = parts.things_grid.first_child() {
         parts.things_grid.remove(&child);
     }

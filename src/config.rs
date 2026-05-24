@@ -251,6 +251,11 @@ pub struct ConfigData {
     /// In-memory thumbnail cache cap in megabytes (0 = use built-in default of 80MB).
     #[serde(default)]
     pub library_thumbnail_cache_mb: u32,
+    /// Total on-disk cache cap in megabytes across all subcaches
+    /// (thumbnails, raw_decode, exif, video, preview, open-in).
+    /// Pruning runs once at startup. Defaults to 2000 MB.
+    #[serde(default = "default_cache_disk_cap_mb")]
+    pub cache_disk_cap_mb: u32,
     /// When true, decoded RAW textures are cached to disk for faster re-opens.
     /// Disable to save storage; each cached file is a full-resolution PNG.
     #[serde(default)]
@@ -289,6 +294,7 @@ impl Default for ConfigData {
             download_target_path: None,
             library_preview_full_resolution: false,
             library_thumbnail_cache_mb: 0,
+            cache_disk_cap_mb: default_cache_disk_cap_mb(),
             raw_decode_cache_enabled: false,
             raw_full_decode: false,
             show_unnamed_faces: true,
@@ -305,6 +311,11 @@ fn default_true() -> bool {
 /// Helper to default parallel upload worker threads to 3.
 fn default_upload_concurrency() -> u8 {
     3
+}
+
+/// Default total on-disk cache cap in MB.
+fn default_cache_disk_cap_mb() -> u32 {
+    2000
 }
 
 /// Persistent config container wrapping loaded schema and file source info.

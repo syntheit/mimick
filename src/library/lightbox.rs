@@ -732,25 +732,20 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             {
                 target.set_paintable(Some(&texture));
             }
-            // Don't flash the spinner for the synchronous local-file path —
-            // it'll be gone before the user perceives anything. For network
-            // / decode paths we reveal after a 120ms delay to avoid flicker
-            // on cache hits.
-            let arm_delay_ms = if local_path.is_empty() { 120 } else { 0 };
+            // Reveal the spinner after a short delay so fast cache hits and
+            // quick JPEG decodes don't flash it. Local paths get a longer
+            // delay since most JPEGs decode in well under 250ms, but RAW
+            // and large TIFF decodes can run for seconds and need feedback.
+            let arm_delay_ms: u64 = if local_path.is_empty() { 120 } else { 250 };
             let loader_for_arm = loader.clone();
             let cancel_loader = Rc::new(Cell::new(false));
             let cancel_for_arm = cancel_loader.clone();
-            if arm_delay_ms > 0 {
-                glib::timeout_add_local(
-                    std::time::Duration::from_millis(arm_delay_ms),
-                    move || {
-                        if !cancel_for_arm.get() {
-                            loader_for_arm.set_reveal_child(true);
-                        }
-                        glib::ControlFlow::Break
-                    },
-                );
-            }
+            glib::timeout_add_local(std::time::Duration::from_millis(arm_delay_ms), move || {
+                if !cancel_for_arm.get() {
+                    loader_for_arm.set_reveal_child(true);
+                }
+                glib::ControlFlow::Break
+            });
             glib::MainContext::default().spawn_local(async move {
                 let is_current = || load_gen.get() == our_gen;
                 // Defer the child switch by one idle so the target picture

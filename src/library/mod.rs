@@ -1830,6 +1830,12 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     connect_grid_handlers(ui.clone());
     connect_filters_button(ui.clone(), filters_button);
 
+    let close_ctx = ui.ctx.clone();
+    window.connect_close_request(move |_| {
+        close_ctx.thumbnail_cache.clear_memory();
+        glib::Propagation::Proceed
+    });
+
     bootstrap_window(ui);
     window.present();
 }
@@ -2133,24 +2139,32 @@ fn load_status(ui: Rc<LibraryWindowUi>) {
 }
 
 /// Load smart/metadata sections onto the Explore dashboard view.
+///
+/// Switches to the Explore stack child immediately so the user sees the
+/// section headers + per-section spinners while data is in flight. Each of
+/// the three fetches runs as an independent task, so a slow endpoint never
+/// blocks the others — first contentful paint happens as soon as the
+/// fastest section returns.
 fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     if ui.explore.populated.get() {
         ui.content_stack.set_visible_child_name("explore");
         return;
     }
-    ui.content_stack.set_visible_child_name("loading");
     ui.explore.populated.set(true);
     let ctx = ui.ctx.clone();
     explore_view::wire_people_filter(&ui.explore, ctx.clone(), || {});
+    explore_view::show_loading(&ui.explore);
+    ui.content_stack.set_visible_child_name("explore");
 
-    glib::MainContext::default().spawn_local(clone!(
+    let mctx = glib::MainContext::default();
+
+    mctx.spawn_local(clone!(
         #[strong]
         ui,
+        #[strong]
+        ctx,
         async move {
             let people = ctx.api_client.fetch_people(true).await.unwrap_or_default();
-            let sections = ctx.api_client.fetch_explore().await.unwrap_or_default();
-            let places = ctx.api_client.fetch_all_places().await.unwrap_or_default();
-
             let click_ui = ui.clone();
             explore_view::populate_people(&ui.explore, ctx.clone(), people, move |id, name| {
                 let filters = MetadataSearchFilters {
@@ -2166,6 +2180,16 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                 apply_timeline_ui_state(&click_ui, &request.1);
                 load_source_page(click_ui.clone(), request, false);
             });
+        }
+    ));
+
+    mctx.spawn_local(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        ctx,
+        async move {
+            let places = ctx.api_client.fetch_all_places().await.unwrap_or_default();
             let click_ui = ui.clone();
             explore_view::populate_places(&ui.explore, ctx.clone(), places, move |_kind, value| {
                 let next = LibrarySource::AdvancedSearch {
@@ -2179,6 +2203,16 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                 apply_timeline_ui_state(&click_ui, &request.1);
                 load_source_page(click_ui.clone(), request, false);
             });
+        }
+    ));
+
+    mctx.spawn_local(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        ctx,
+        async move {
+            let sections = ctx.api_client.fetch_explore().await.unwrap_or_default();
             let click_ui = ui.clone();
             explore_view::populate_explore(
                 &ui.explore,
@@ -2194,7 +2228,6 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                     load_source_page(click_ui.clone(), request, false);
                 },
             );
-            ui.content_stack.set_visible_child_name("explore");
         }
     ));
 }

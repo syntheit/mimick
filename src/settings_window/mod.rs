@@ -624,6 +624,17 @@ pub fn build_settings_window_with_parent(
         .build();
     library_group.add(&cache_size_row);
 
+    let disk_cache_adj = gtk::Adjustment::new(2000.0, 200.0, 10000.0, 100.0, 500.0, 0.0);
+    let disk_cache_row = adw::SpinRow::builder()
+        .title("Disk Cache Size (MB)")
+        .subtitle(
+            "Total on-disk cap across thumbnails, decoded RAW previews, EXIF, \
+             video, and preview caches. Pruning runs once at startup.",
+        )
+        .adjustment(&disk_cache_adj)
+        .build();
+    library_group.add(&disk_cache_row);
+
     // Debounce the spinner save: a held-down arrow fires connect_value_notify
     // many times per second, and each save takes the config write lock + does
     // synchronous JSON serialise + atomic_write on the UI thread. We coalesce
@@ -646,6 +657,26 @@ pub fn build_settings_window_with_parent(
             }
         });
         pending_cache_save.set(Some(id));
+    });
+
+    let pending_disk_cache_save: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
+    let ctx_for_disk_cache = ctx.clone();
+    disk_cache_row.connect_value_notify(move |row| {
+        let new_value = row.value() as u32;
+        if let Some(id) = pending_disk_cache_save.take() {
+            id.remove();
+        }
+        let ctx_for_save = ctx_for_disk_cache.clone();
+        let pending = pending_disk_cache_save.clone();
+        let id = glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            pending.set(None);
+            let mut cfg = ctx_for_save.config.write();
+            if cfg.data.cache_disk_cap_mb != new_value {
+                cfg.data.cache_disk_cap_mb = new_value;
+                cfg.save();
+            }
+        });
+        pending_disk_cache_save.set(Some(id));
     });
 
     // --- WATCH FOLDERS GROUP ---
@@ -692,6 +723,8 @@ pub fn build_settings_window_with_parent(
         raw_cache_row,
         #[weak]
         cache_size_row,
+        #[weak]
+        disk_cache_row,
         #[weak]
         concurrency_row,
         #[weak]
@@ -784,6 +817,7 @@ pub fn build_settings_window_with_parent(
             let raw_decode_cache_enabled = raw_cache_row.is_active();
             let raw_full_decode = raw_full_decode_row.is_active();
             let library_thumbnail_cache_mb = cache_size_row.value() as u32;
+            let cache_disk_cap_mb = disk_cache_row.value() as u32;
             let upload_concurrency = concurrency_row.value() as u8;
             let quiet_hours_enabled = quiet_hours_row.is_active();
             let quiet_hours_start = quiet_hours_enabled.then(|| quiet_start_row.value() as u8);
@@ -914,6 +948,7 @@ pub fn build_settings_window_with_parent(
                         new_config.data.raw_full_decode = raw_full_decode;
                         crate::library::set_raw_full_decode(raw_full_decode);
                         new_config.data.library_thumbnail_cache_mb = library_thumbnail_cache_mb;
+                        new_config.data.cache_disk_cap_mb = cache_disk_cap_mb;
                         new_config.data.startup_catchup_mode = catchup_mode;
                         new_config.data.upload_concurrency = upload_concurrency;
                         new_config.data.quiet_hours_start = quiet_hours_start;
@@ -1169,7 +1204,11 @@ pub fn build_settings_window_with_parent(
     actions_flow.insert(&export_btn, -1);
 
     let clear_cache_btn = Button::builder()
-        .label("Clear Thumbnail Cache")
+        .label("Clear Cache")
+        .tooltip_text(
+            "Removes all on-disk caches: thumbnails, decoded RAW previews, \
+             EXIF, video, and preview files.",
+        )
         .hexpand(true)
         .build();
     actions_flow.insert(&clear_cache_btn, -1);
@@ -1300,14 +1339,25 @@ pub fn build_settings_window_with_parent(
         #[weak]
         window,
         move |_| {
-            let (heading, body) = match thumbnail_cache.clear() {
-                Ok(()) => (
-                    "Thumbnail Cache Cleared",
-                    "Removed cached library thumbnails.".to_string(),
-                ),
-                Err(err) => ("Could Not Clear Cache", err),
-            };
-            show_alert(&window, heading, &body);
+            // Drop the in-memory thumbnail textures immediately, then wipe
+            // every on-disk cache subdirectory off the UI thread.
+            let _ = thumbnail_cache.clear();
+            let window_for_done = window.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let result = tokio::task::spawn_blocking(crate::cache_manager::clear_all_blocking)
+                    .await
+                    .map_err(|err| err.to_string())
+                    .and_then(|inner| inner);
+                let (heading, body) = match result {
+                    Ok(()) => (
+                        "Cache Cleared",
+                        "Removed thumbnails, decoded RAW previews, EXIF, video, and preview caches."
+                            .to_string(),
+                    ),
+                    Err(err) => ("Could Not Clear Cache", err),
+                };
+                show_alert(&window_for_done, heading, &body);
+            });
         }
     ));
 
@@ -1346,6 +1396,9 @@ pub fn build_settings_window_with_parent(
     raw_cache_row.set_sensitive(config.data.raw_full_decode);
     if config.data.library_thumbnail_cache_mb > 0 {
         cache_size_row.set_value(config.data.library_thumbnail_cache_mb as f64);
+    }
+    if config.data.cache_disk_cap_mb > 0 {
+        disk_cache_row.set_value(config.data.cache_disk_cap_mb as f64);
     }
     concurrency_row.set_value(config.data.upload_concurrency as f64);
     let qh_enabled = config.data.quiet_hours_start.is_some();

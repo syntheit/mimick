@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 mod api_client;
 mod app_context;
 mod autostart;
+mod cache_manager;
 mod config;
 mod diagnostics;
 mod library;
@@ -469,7 +470,18 @@ async fn main() {
             api_client.clone(),
             config.data.library_thumbnail_cache_mb,
         ));
-        thumbnail_cache.spawn_disk_prune_task();
+        // One-shot startup prune across every cache directory. Runs on a
+        // blocking thread after a short delay so it does not contend with
+        // window setup or initial sync work.
+        let cache_cap_mb = config.data.cache_disk_cap_mb;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let cap_bytes = (cache_cap_mb as u64).saturating_mul(1024 * 1024);
+            let _ = tokio::task::spawn_blocking(move || {
+                cache_manager::prune_all_blocking(cap_bytes);
+            })
+            .await;
+        });
         let library_state = Arc::new(parking_lot::Mutex::new(LibraryState::new()));
         let shared_config = Arc::new(parking_lot::RwLock::new(config));
         let ctx = Arc::new(AppContext {

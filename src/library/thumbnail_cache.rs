@@ -11,8 +11,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::sync::Arc;
 
 use gdk4::Texture;
 use gdk4::prelude::TextureExt;
@@ -124,10 +123,9 @@ pub struct ThumbnailCache {
 
 impl ThumbnailCache {
     const DEFAULT_MAX_BYTES: usize = 80 * 1024 * 1024;
-    const DISK_CAP_BYTES: u64 = 1024 * 1024 * 1024;
-    const DISK_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
 
-    /// Construct a new thumbnail cache manager.
+    /// Construct a new thumbnail cache manager. Disk pruning is handled
+    /// centrally by `cache_manager` at startup, not here.
     pub fn with_capacity_mb(api_client: std::sync::Arc<ImmichApiClient>, mb: u32) -> Self {
         let cache_dir = crate::profile::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp").join(crate::profile::dir_segment()))
@@ -139,36 +137,13 @@ impl ThumbnailCache {
             (mb as usize).saturating_mul(1024 * 1024)
         };
 
-        let cache = Self {
+        Self {
             api_client,
             memory: Mutex::new(SizedLruCache::new(max_bytes)),
             cache_dir,
             load_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_LOADS)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
-        };
-        let _ = cache.prune_disk_cache(Self::DISK_CAP_BYTES);
-        cache
-    }
-
-    /// Spawn a background task that prunes the on-disk thumbnail cache on an
-    /// interval. The task holds only a `Weak<Self>` so the cache can drop
-    /// normally; the loop exits as soon as the upgrade fails.
-    pub fn spawn_disk_prune_task(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Self::DISK_PRUNE_INTERVAL);
-            ticker.tick().await; // skip the immediate first tick (constructor already pruned)
-            loop {
-                ticker.tick().await;
-                let Some(cache) = Weak::upgrade(&weak) else {
-                    break;
-                };
-                let _ = tokio::task::spawn_blocking(move || {
-                    let _ = cache.prune_disk_cache(Self::DISK_CAP_BYTES);
-                })
-                .await;
-            }
-        });
+        }
     }
 
     #[cfg(test)]
@@ -410,45 +385,11 @@ impl ThumbnailCache {
         Ok(())
     }
 
-    /// Prune disk cache entries until the total size falls under the byte limit.
-    fn prune_disk_cache(&self, max_bytes: u64) -> Result<(), String> {
-        if !self.cache_dir.exists() {
-            return Ok(());
-        }
-
-        let mut entries = Vec::new();
-        let mut total_size = 0u64;
-
-        if let Ok(dir) = std::fs::read_dir(&self.cache_dir) {
-            for entry in dir.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    let size = metadata.len();
-                    let modified = metadata
-                        .modified()
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    total_size += size;
-                    entries.push((entry.path(), size, modified));
-                }
-            }
-        }
-
-        if total_size <= max_bytes {
-            return Ok(());
-        }
-
-        // Sort by oldest first
-        entries.sort_by_key(|a| a.2);
-
-        for (path, size, _) in entries {
-            if total_size <= max_bytes {
-                break;
-            }
-            if std::fs::remove_file(path).is_ok() {
-                total_size = total_size.saturating_sub(size);
-            }
-        }
-
-        Ok(())
+    /// Drop every cached texture from RAM without touching the disk cache.
+    /// Invoked when the library window closes so the texture memory is
+    /// released until the user reopens it.
+    pub fn clear_memory(&self) {
+        self.memory.lock().clear();
     }
 
     /// Return the physical disk cache path for a remote asset thumbnail.
