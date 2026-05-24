@@ -430,18 +430,22 @@ fn apply_exif_orientation(pixbuf: &gtk::gdk_pixbuf::Pixbuf, orient: u8) -> gtk::
 }
 
 /// Decode JPEG bytes to a texture, applying EXIF orientation or libraw flip.
+///
+/// For RAW-embedded previews, the camera often stores orientation only in the
+/// container metadata (`flip`) and leaves the embedded JPEG's own EXIF at
+/// orientation=1. We therefore trust the embedded EXIF only when it carries a
+/// meaningful rotation (>1); otherwise we fall back to the container's `flip`.
 fn jpeg_bytes_to_oriented_texture(bytes: &[u8], flip: i32) -> Option<gdk4::Texture> {
     let stream = gtk::gio::MemoryInputStream::from_bytes(&glib::Bytes::from(bytes));
     let raw_pixbuf =
         gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gtk::gio::Cancellable::NONE).ok()?;
-    // Prefer our own EXIF read because pixbuf's loader drops EXIF on some
-    // RAW-embedded JPEGs; only when we can't find one do we fall through.
-    let oriented = if let Some(orient) = read_jpeg_exif_orientation(bytes) {
-        apply_exif_orientation(&raw_pixbuf, orient)
-    } else {
-        raw_pixbuf
-            .apply_embedded_orientation()
-            .unwrap_or_else(|| apply_libraw_flip(&raw_pixbuf, flip))
+    let exif_orient = read_jpeg_exif_orientation(bytes);
+    let oriented = match exif_orient {
+        // Embedded JPEG carries a meaningful rotation — trust it.
+        Some(o) if o > 1 => apply_exif_orientation(&raw_pixbuf, o),
+        // EXIF says identity (1) or no EXIF tag at all:
+        // fall back to the RAW container's flip value from libraw.
+        _ => apply_libraw_flip(&raw_pixbuf, flip),
     };
     pixbuf_to_texture(&oriented)
 }
@@ -938,14 +942,26 @@ fn decode_jpeg_texture(path: &std::path::Path) -> Option<gdk4::Texture> {
             return None;
         }
     };
+    let orient = read_jpeg_exif_orientation(&bytes);
     match turbojpeg::decompress(&bytes, turbojpeg::PixelFormat::RGB) {
-        Ok(image) => memory_texture(
-            image.width.try_into().ok()?,
-            image.height.try_into().ok()?,
-            gdk4::MemoryFormat::R8g8b8,
-            image.pixels,
-            image.pitch,
-        ),
+        Ok(image) => {
+            let width: i32 = image.width.try_into().ok()?;
+            let height: i32 = image.height.try_into().ok()?;
+            let raw_pixbuf = gtk::gdk_pixbuf::Pixbuf::from_mut_slice(
+                image.pixels,
+                gtk::gdk_pixbuf::Colorspace::Rgb,
+                false,
+                8,
+                width,
+                height,
+                image.pitch as i32,
+            );
+            let oriented = match orient {
+                Some(o) if o != 1 => apply_exif_orientation(&raw_pixbuf, o),
+                _ => raw_pixbuf,
+            };
+            pixbuf_to_texture(&oriented)
+        }
         Err(err) => {
             log::debug!("turbojpeg decode failed for {}: {}", path.display(), err);
             None
