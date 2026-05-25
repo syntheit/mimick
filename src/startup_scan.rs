@@ -32,6 +32,8 @@ struct ScanCandidate {
     watch_path: String,
     /// Inferred or configured album name.
     album_name: String,
+    /// Whether XMP sidecar attachment is enabled for this candidate.
+    sidecar_enabled: bool,
 }
 
 /// Scans watch folders at startup and queues new, changed, or retargeted files for upload.
@@ -60,8 +62,15 @@ pub async fn queue_unsynced_files(
         .last_successful_sync_at
         .unwrap_or_default();
 
-    let (candidates, mut seen_paths, skipped_enum, enum_errors) =
-        enumerate_candidates(&watch_paths, catchup_mode, last_sync, &shared_state);
+    let global_xmp_enabled = app_ctx.config.read().data.upload_xmp_sidecars;
+
+    let (candidates, mut seen_paths, skipped_enum, enum_errors) = enumerate_candidates(
+        &watch_paths,
+        catchup_mode,
+        last_sync,
+        &shared_state,
+        global_xmp_enabled,
+    );
 
     // ── Stage 2: Async decide + queue ────────────────────────────────────
 
@@ -171,6 +180,7 @@ pub async fn queue_unsynced_files(
                     Some(album_name),
                     reassociate_only,
                     cached_checksum,
+                    candidate.sidecar_enabled,
                 )
                 .await
                 {
@@ -586,6 +596,7 @@ fn enumerate_candidates(
     fallback_catchup_mode: StartupCatchupMode,
     last_sync: f64,
     shared_state: &Arc<Mutex<AppState>>,
+    global_xmp_enabled: bool,
 ) -> (Vec<ScanCandidate>, HashSet<String>, usize, usize) {
     let skipped = AtomicUsize::new(0);
     let errors = AtomicUsize::new(0);
@@ -670,10 +681,13 @@ fn enumerate_candidates(
 
                             seen_paths.lock().insert(path_str.clone());
                             let album_name = effective_album_name(entry, &path);
+                            let sidecar_enabled =
+                                entry.rules().xmp_sidecar_enabled(global_xmp_enabled);
                             results.push(ScanCandidate {
                                 path: path_str,
                                 watch_path: watch_path_str.clone(),
                                 album_name,
+                                sidecar_enabled,
                             });
                         }
                         Err(err) => {
@@ -703,6 +717,7 @@ async fn hash_to_task(
     album_name: Option<String>,
     reassociate_only: bool,
     checksum: Option<String>,
+    sidecar_enabled: bool,
 ) -> Result<FileTask, ()> {
     let checksum = if let Some(checksum) = checksum {
         checksum
@@ -721,6 +736,13 @@ async fn hash_to_task(
         }
     };
 
+    let sidecar_path = if sidecar_enabled {
+        crate::sidecar::find_sidecar(std::path::Path::new(&path))
+            .map(|p| p.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+
     Ok(FileTask {
         path,
         watch_path,
@@ -729,6 +751,7 @@ async fn hash_to_task(
         album_name,
         reassociate_only,
         skip_album: false,
+        sidecar_path,
     })
 }
 

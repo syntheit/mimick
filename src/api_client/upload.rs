@@ -18,10 +18,14 @@ use super::{ApiIssue, ImmichApiClient, TransferProgressCallback};
 
 impl ImmichApiClient {
     /// Upload a single local asset to the Immich server with progressive status tracking.
+    ///
+    /// When `sidecar_path` points to an existing XMP file it is attached as the
+    /// `sidecarData` multipart field so Immich ingests it alongside the asset.
     pub async fn upload_asset(
         &self,
         file_path: &str,
         checksum: &str,
+        sidecar_path: Option<&str>,
         progress: Option<TransferProgressCallback>,
     ) -> Option<String> {
         let base_url = match self.get_active_url().await {
@@ -115,13 +119,38 @@ impl ImmichApiClient {
             .mime_str(mime)
             .ok()?;
 
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .part("assetData", file_part)
             .text("deviceAssetId", device_asset_id)
             .text("deviceId", device_id)
             .text("fileCreatedAt", created_at)
             .text("fileModifiedAt", modified_at)
             .text("isFavorite", "false");
+
+        // Attach XMP sidecar when present.
+        if let Some(sidecar) = sidecar_path {
+            let sidecar_p = Path::new(sidecar);
+            if sidecar_p.exists() {
+                match tokio::fs::read(sidecar_p).await {
+                    Ok(sidecar_bytes) => {
+                        let sidecar_filename = sidecar_p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "sidecar.xmp".to_string());
+                        if let Ok(sidecar_part) = reqwest::multipart::Part::bytes(sidecar_bytes)
+                            .file_name(sidecar_filename.clone())
+                            .mime_str("application/xml")
+                        {
+                            form = form.part("sidecarData", sidecar_part);
+                            log::info!("Attaching sidecar: {}", sidecar_filename);
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("Could not read sidecar '{}': {}", sidecar, err);
+                    }
+                }
+            }
+        }
 
         let url = format!("{}/api/assets", base_url);
         let api_key = self.settings.read().api_key.clone();

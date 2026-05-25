@@ -324,8 +324,25 @@ pub async fn execute_uploads(
     watch_path: PathBuf,
     entries: Vec<LocalEntry>,
 ) -> usize {
+    let folder_xmp = {
+        let cfg = ctx.config.read();
+        let global_xmp = cfg.data.upload_xmp_sidecars;
+        cfg.data
+            .watch_paths
+            .iter()
+            .find(|e| e.path() == watch_path.to_string_lossy())
+            .map(|e| e.rules().xmp_sidecar_enabled(global_xmp))
+            .unwrap_or(global_xmp)
+    };
+
     let mut queued = 0;
     for entry in entries {
+        let sidecar_path = if folder_xmp {
+            crate::sidecar::find_sidecar(&entry.local.path)
+                .map(|p| p.to_string_lossy().into_owned())
+        } else {
+            None
+        };
         let task = FileTask {
             path: entry.local.path.to_string_lossy().to_string(),
             watch_path: watch_path.to_string_lossy().to_string(),
@@ -334,6 +351,7 @@ pub async fn execute_uploads(
             album_name: Some(album_name.clone()),
             reassociate_only: false,
             skip_album: false,
+            sidecar_path,
         };
         if ctx.queue_manager.add_to_queue(task).await {
             queued += 1;

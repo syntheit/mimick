@@ -70,6 +70,10 @@ pub struct FileTask {
     /// existing parent-dir-as-album fallback still applies.
     #[serde(default)]
     pub skip_album: bool,
+    /// Absolute path to an XMP sidecar file to attach during upload.
+    /// `None` when no companion sidecar exists or sidecar upload is disabled.
+    #[serde(default)]
+    pub sidecar_path: Option<String>,
 }
 
 pub struct QueueManager {
@@ -892,8 +896,13 @@ async fn handle_upload(
             Some(existing)
         }
         None => {
-            api.upload_asset(&task.path, &task.checksum, Some(progress.clone()))
-                .await
+            api.upload_asset(
+                &task.path,
+                &task.checksum,
+                task.sidecar_path.as_deref(),
+                Some(progress.clone()),
+            )
+            .await
         }
     };
 
@@ -1124,6 +1133,7 @@ mod tests {
             album_name: Some("Album".to_string()),
             reassociate_only: false,
             skip_album: false,
+            sidecar_path: None,
         };
         let js = serde_json::to_string(&task).unwrap();
         assert!(js.contains("sha123"));
@@ -1150,6 +1160,10 @@ mod tests {
             !task.skip_album,
             "legacy entries inherit album-creation behaviour"
         );
+        assert!(
+            task.sidecar_path.is_none(),
+            "legacy entries default to no sidecar"
+        );
     }
 
     #[test]
@@ -1162,6 +1176,7 @@ mod tests {
             album_name: None,
             reassociate_only: false,
             skip_album: true,
+            sidecar_path: None,
         };
         let js = serde_json::to_string(&task).unwrap();
         let restored: FileTask = serde_json::from_str(&js).unwrap();
@@ -1181,6 +1196,7 @@ mod tests {
             album_name: None,
             reassociate_only: false,
             skip_album: false,
+            sidecar_path: None,
         };
 
         let tasks = vec![task];
@@ -1201,6 +1217,7 @@ mod tests {
             album_name: Some("Album".into()),
             reassociate_only: false,
             skip_album: false,
+            sidecar_path: None,
         };
 
         assert!(qm.add_to_queue(task.clone()).await);
@@ -1223,6 +1240,7 @@ mod tests {
             album_name: None,
             reassociate_only: false,
             skip_album: false,
+            sidecar_path: None,
         };
 
         retry_list.lock().push(task.clone());
@@ -1258,6 +1276,7 @@ mod tests {
             album_name: None,
             reassociate_only: false,
             skip_album: false,
+            sidecar_path: None,
         };
 
         retry_list.lock().push(task.clone());
