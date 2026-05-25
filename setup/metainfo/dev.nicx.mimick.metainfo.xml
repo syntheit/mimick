@@ -13,15 +13,22 @@
     <name>Nick Cardoso</name>
   </developer>
   <description>
-    <p>Mimick is a native Linux desktop client for self-hosted Immich servers. It monitors your folders in the background and automatically syncs photos and videos to your server.</p>
+    <p
+        >Mimick is a native Linux desktop client for self-hosted Immich servers. It monitors your folders in the background and automatically syncs photos and videos to your server.</p>
     <ul>
-      <li>Per-folder sync methods: upload only, download only, or full bidirectional sync with optional deletion mirroring.</li>
-      <li>Built-in Library View for browsing your timeline, managing albums, and searching with Smart Search, OCR, and metadata filters.</li>
-      <li>SHA-1 deduplication, parallel upload workers, and offline retry queue for reliable transfers.</li>
-      <li>Environment-aware: automatically pauses on battery or metered connections. Configurable quiet hours and per-folder rules.</li>
-      <li>Built in Rust with GTK4 and Libadwaita. System tray integration and Flatpak sandbox support.</li>
+      <li
+            >Per-folder sync methods: upload only, download only, or full bidirectional sync with optional deletion mirroring.</li>
+      <li
+            >Built-in Library View for browsing your timeline, managing albums, and searching with Smart Search, OCR, and metadata filters.</li>
+      <li
+            >SHA-1 deduplication, parallel upload workers, and offline retry queue for reliable transfers.</li>
+      <li
+            >Environment-aware: automatically pauses on battery or metered connections. Configurable quiet hours and per-folder rules.</li>
+      <li
+            >Built in Rust with GTK4 and Libadwaita. System tray integration and Flatpak sandbox support.</li>
     </ul>
-    <p>Mimick is a community-developed client and is not affiliated with or endorsed by the Immich project.</p>
+    <p
+        >Mimick is a community-developed client and is not affiliated with or endorsed by the Immich project.</p>
   </description>
 
   <screenshots>
@@ -33,7 +40,9 @@
     <screenshot>
       <image
             >https://raw.githubusercontent.com/nicx17/mimick/main/docs/screenshots/explore_page_view_showing_people_places_sidebar_on.png</image>
-      <caption xml:lang="en">Explore page showing People, Places, and Things</caption>
+      <caption
+                xml:lang="en"
+            >Explore page showing People, Places, and Things</caption>
     </screenshot>
     <screenshot>
       <image
@@ -53,7 +62,9 @@
     <screenshot>
       <image
             >https://raw.githubusercontent.com/nicx17/mimick/main/docs/screenshots/library_view_showing_sync_album_dialog_upload_download_apply_cancel.png</image>
-      <caption xml:lang="en">Album sync dialog with upload and download actions</caption>
+      <caption
+                xml:lang="en"
+            >Album sync dialog with upload and download actions</caption>
     </screenshot>
     <screenshot>
       <image
@@ -104,15 +115,50 @@
   </keywords>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="9.6.0" date="2026-05-25">
+      <description>
+        <ul>
+          <li
+                    >Face visibility filters in Explore let you show or hide unnamed and hidden people from the People row.</li>
+          <li
+                    >New Server Statistics dialog shows total assets, photos, videos, archived items, and people on your Immich server.</li>
+          <li
+                    >New RAW handling options in Settings — pick a fast embedded JPEG preview or a full sensor demosaic for the lightbox, with an optional decode cache.</li>
+          <li
+                    >RAW thumbnails now use the embedded JPEG preview for CR2, CR3, NEF, ARW, DNG, ORF, RAF, RW2, PEF and other formats, with correct orientation.</li>
+          <li
+                    >Swipe left or right in the lightbox to move between photos on touch and trackpad. Videos now show a poster with a play button when you navigate to them.</li>
+          <li>PSD, JPEG 2000 (<code
+                        >.jp2</code>), arithmetic-coded JPEG, complex WebP, and grayscale JPEG XL files now display in the lightbox.</li>
+          <li
+                    >XMP sidecar files next to your photos now upload alongside them. The <code
+                        >.xmp</code> companion is detected automatically. Toggle globally in Settings or per folder.</li>
+          <li
+                    >New press animations on header buttons, sidebar entries, grid tiles, settings rows, and dialogs.</li>
+          <li
+                    >The UI now works down to 360px wide — two-column grids and album layouts, fixed-height tiles, and a slimmer toolbar.</li>
+          <li
+                    >One "Clear Cache" button and a configurable disk size limit (default 2000 MB) now cover thumbnails, decoded RAWs, EXIF, and downloaded previews. Pruning only runs at startup.</li>
+          <li
+                    >Explore page loads faster on large libraries — People, Places, and Things fetch in parallel.</li>
+          <li
+                    >Lightbox slide transitions now wait for the new image to decode, and a loader appears for slow local RAW and TIFF decodes.</li>
+
+        </ul>
+      </description>
+    </release>
     <release version="9.5.4" date="2026-05-17">
       <description>
-        <p>Each watch folder can now be set to one of three sync methods: Full (upload and download), Upload Only, or Download Only.Deletion mirroring is also available per folder, letting local file removals propagate to the remote album. Startup catch-up mode can now be configured independently on each folder.</p>
+        <p
+                >Each watch folder can now be set to one of three sync methods: Full (upload and download), Upload Only, or Download Only.Deletion mirroring is also available per folder, letting local file removals propagate to the remote album. Startup catch-up mode can now be configured independently on each folder.</p>
       </description>
     </release>
     <release version="9.5.3" date="2026-05-11">
       <description>
-        <p>This major update brings significant enhancements to the library viewing experience, including new lightbox image zoom capabilities, smooth slide animations, and dedicated back navigation. The Explore page has also been upgraded to show all of your geotagged locations, and asset timestamps now accurately reflect your local timezone.</p>
-        <p>Under the hood, Mimick has received massive performance improvements to handle larger libraries. Startup scans and thumbnail loading are now heavily parallelized, memory usage is strictly bounded with a new sliding window architecture, and quitting the application gracefully waits for active uploads to finish safely.</p>
+        <p
+                >This major update brings significant enhancements to the library viewing experience, including new lightbox image zoom capabilities, smooth slide animations, and dedicated back navigation. The Explore page has also been upgraded to show all of your geotagged locations, and asset timestamps now accurately reflect your local timezone.</p>
+        <p
+                >Under the hood, Mimick has received massive performance improvements to handle larger libraries. Startup scans and thumbnail loading are now heavily parallelized, memory usage is strictly bounded with a new sliding window architecture, and quitting the application gracefully waits for active uploads to finish safely.</p>
       </description>
     </release>
     <release version="9.5.2" date="2026-05-07">

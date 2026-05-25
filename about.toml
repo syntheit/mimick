@@ -12,6 +12,8 @@ accepted = [
     "Unicode-DFS-2016",
     "MPL-2.0",
     "LGPL-2.1-or-later",
+    "LGPL-3.0-only",
+    "LGPL-2.1",
     "CC0-1.0",
     "Unlicense",
     "0BSD",
