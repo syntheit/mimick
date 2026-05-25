@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [9.6.0] - 2026-05-25
 
 ### Added
 
@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lightbox RAW decoding now uses `libraw` (vendored C++) as the primary decoder with `imagepipe` as a pure-Rust fallback. libraw applies per-camera color matrices and white balance so output matches darktable / Lightroom instead of imagepipe's generic sRGB pipeline. Adds proper support for ARI (Arriraw), FFF (Hasselblad), CR3 (Canon mirrorless), ERF (Epson), Sony ARW variants, Phase One IIQ, and Sigma Foveon X3F -- formats imagepipe either rejected outright or rendered with wrong colours.
 - libraw decoder now explicitly enables `use_camera_wb` (camera as-shot white balance) and `user_qual = 3` (AHD demosaic) via direct `libraw-sys` FFI, since the `libraw-rs` Rust wrapper does not expose those params. Fixes the muted / blue cast that was visible on Nikon NEF, Hasselblad FFF, and Canon CR3 files compared to darktable.
 - Added PSD (Photoshop) lightbox decoding via the pure-Rust `psd` crate. Previously `.psd` files fell through every decoder and showed "Preview unavailable".
-- Fixed `gtk_gesture_group: assertion ... == ... failed` GTK-CRITICAL that fired every time the lightbox opened. The drag gesture must be attached to its widget *before* `group_with(&pinch)` is called.
+- Fixed `gtk_gesture_group: assertion ... == ... failed` GTK-CRITICAL that fired every time the lightbox opened. The drag gesture must be attached to its widget _before_ `group_with(&pinch)` is called.
 - Release profile switched from `panic = "abort"` to `panic = "unwind"` so `catch_unwind` actually catches third-party decoder panics. Previously, `rawloader`'s out-of-bounds slice access on certain malformed RAW files (IIQ, ARW, CR3) aborted the entire app -- `catch_unwind` is a no-op under abort. The ~60-100 KB unwinding-machinery cost is worth the crash resistance for a viewer that ingests user files.
 - Lightbox SVG rendering now uses `resvg` (pure-Rust) instead of relying on the gdk-pixbuf SVG loader, which is not always present in Flatpak runtimes. Restores SVG previews regardless of which pixbuf loaders the host bundles.
 - Lightbox SVG parser now tolerates real-world SVGs that use undeclared XML namespace prefixes (e.g. `c2pa:` C2PA provenance metadata from Adobe exports). Missing namespaces are injected with placeholder URIs before parsing.
@@ -97,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [9.5.3] - 2026-05-11
 
 ### Added
+
 - Back navigation in the library window. The header bar now includes a back button (Alt+Left) that returns to the previously visited view (Photos, Album, Explore, etc.). A nav-history stack is maintained per library source — searches are not pushed since they're ephemeral, and consecutive duplicates are coalesced. The button is disabled when there's no history to return to.
 - Lightbox image zoom support via Ctrl+scroll wheel, trackpad pinch gesture, on-screen `−` / `+` / `100%` button group, and Ctrl+`+` / Ctrl+`-` / Ctrl+`0` keyboard shortcuts. The current zoom percentage is shown in the centre button (click it to reset to fit). The zoomed image scrolls within the viewer for panning. Zoom level resets to fit-to-window when navigating between assets.
 - Lightbox slide animation when navigating between images. Forward navigation (next button or Right arrow) slides the new image in from the right; backward navigation slides it in from the left. Falls back gracefully when GTK animations are disabled in system settings.
