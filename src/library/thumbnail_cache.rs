@@ -237,9 +237,16 @@ impl ThumbnailCache {
         .map_err(|err| err.to_string())?;
 
         if let Some(bytes) = from_disk {
+            let byte_len = bytes.len();
             let texture = decode_to_scaled_texture(bytes)
                 .await
                 .map_err(|err| err.to_string())?;
+            log::debug!(
+                "Thumbnail disk-cache hit for {:?} {}: {} bytes",
+                size,
+                asset_id,
+                byte_len
+            );
             self.memory.lock().insert(key.to_string(), texture.clone());
             return Ok(texture);
         }
@@ -247,7 +254,10 @@ impl ThumbnailCache {
         if is_cancelled() {
             return Err("cancelled".to_string());
         }
+        let fetch_started = std::time::Instant::now();
         let bytes = self.api_client.fetch_thumbnail(asset_id, size).await?;
+        let fetch_ms = fetch_started.elapsed().as_millis();
+        let byte_len = bytes.len();
         let cache_dir = self.cache_dir.clone();
         let cache_file_for_write = cache_file.clone();
         let bytes_for_write = bytes.clone();
@@ -259,6 +269,13 @@ impl ThumbnailCache {
         let texture = decode_to_scaled_texture(bytes)
             .await
             .map_err(|err| err.to_string())?;
+        log::debug!(
+            "Thumbnail fetched from server for {:?} {}: {} bytes in {}ms",
+            size,
+            asset_id,
+            byte_len,
+            fetch_ms,
+        );
 
         self.memory.lock().insert(key.to_string(), texture.clone());
         Ok(texture)
@@ -327,11 +344,19 @@ impl ThumbnailCache {
         .map_err(|err| err.to_string())?;
 
         if let Some(texture) = from_disk {
+            log::debug!(
+                "Local thumbnail disk-cache hit for {} ({}x{})",
+                path.display(),
+                texture.width(),
+                texture.height(),
+            );
             self.memory.lock().insert(key.to_string(), texture.clone());
             return Ok(texture);
         }
 
+        let decode_started = std::time::Instant::now();
         let path = path.to_path_buf();
+        let log_path = path.clone();
         let cache_dir = self.cache_dir.clone();
         let texture = tokio::task::spawn_blocking(move || -> Result<Texture, String> {
             let is_raw = crate::media_kinds::is_raw_path(&path);
@@ -380,6 +405,13 @@ impl ThumbnailCache {
         })
         .await
         .map_err(|err| err.to_string())??;
+        log::debug!(
+            "Local thumbnail decoded fresh for {} in {}ms ({}x{})",
+            log_path.display(),
+            decode_started.elapsed().as_millis(),
+            texture.width(),
+            texture.height(),
+        );
         self.memory.lock().insert(key.to_string(), texture.clone());
         Ok(texture)
     }
