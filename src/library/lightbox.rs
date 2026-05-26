@@ -721,7 +721,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 asset_id,
                 filename,
                 mime,
-                if local_path.is_empty() { "remote" } else { "local" },
+                if local_path.is_empty() {
+                    "remote"
+                } else {
+                    "local"
+                },
                 full_res,
                 if is_video { "video" } else { "image" },
             );
@@ -853,9 +857,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                                 }
                                 return;
                             }
-                            let downloaded_bytes = std::fs::metadata(&temp)
-                                .map(|m| m.len())
-                                .unwrap_or(0);
+                            let downloaded_bytes =
+                                std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
                             log::debug!(
                                 "Lightbox original downloaded for {} in {}ms ({} bytes)",
                                 asset_id,
