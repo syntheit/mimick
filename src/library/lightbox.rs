@@ -1317,9 +1317,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         move |_| (*zoom_reset)()
     ));
 
-    // Trackpad pinch-to-zoom.
-    // Attached to the pic_stack (inside the ScrolledWindow) so the gesture
-    // receives touchpad pinch events before the ScrolledWindow's own handlers.
+    // Trackpad pinch-to-zoom. On scrolled_picture so it shares a stable
+    // coordinate frame with drag (see drag comment below).
     let pinch = gtk::GestureZoom::new();
     let pinch_start = Rc::new(Cell::new(1.0_f64));
     pinch.connect_begin(clone!(
@@ -1340,11 +1339,12 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             (*set_zoom)(pinch_start.get() * scale);
         }
     ));
-    pic_stack.add_controller(pinch.clone());
+    scrolled_picture.add_controller(pinch.clone());
 
-    // Click-and-drag panning: only acts when zoomed in (otherwise scrollbars
-    // have nowhere to scroll to). Snapshots scroll position on begin and
-    // applies cumulative offsets on each update.
+    // Click-and-drag panning when zoomed in. Attached to scrolled_picture,
+    // not pic_stack: pic_stack moves under the cursor when we update the
+    // scroll adjustments, which makes the gesture's pic_stack-local offset
+    // oscillate frame-to-frame and jitter the image.
     let drag_start = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
     let drag = gtk::GestureDrag::new();
     drag.set_button(gtk::gdk::BUTTON_PRIMARY);
@@ -1370,9 +1370,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             scrolled_picture.vadjustment().set_value(sy0 - off_y);
         }
     ));
-    // Attach drag, then group with pinch — GTK requires both controllers
-    // to be on the same widget before grouping.
-    pic_stack.add_controller(drag.clone());
+    scrolled_picture.add_controller(drag.clone());
     drag.group_with(&pinch);
 
     // Double-click on the picture: zoom in 2x toward the click position.
@@ -1422,9 +1420,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
     scrolled_picture.add_controller(right_click);
 
-    // Horizontal swipe gesture for prev/next navigation. Only fires when not
-    // zoomed in so it doesn't conflict with pan. Essential on mobile (360px)
-    // where the prev/next header buttons are hidden.
+    // Horizontal swipe for prev/next navigation; ignored when zoomed in.
     let swipe = gtk::GestureSwipe::new();
     swipe.set_touch_only(false);
     swipe.connect_swipe(clone!(
