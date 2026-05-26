@@ -115,7 +115,9 @@ async fn load_texture_oriented(path: &std::path::Path) -> Option<gdk4::Texture> 
 }
 
 pub(super) fn load_texture_blocking(path: &std::path::Path) -> Option<gdk4::Texture> {
+    let started = std::time::Instant::now();
     let decoder = texture_decoder_for_path(path);
+    let mut winning_route = decoder;
     let texture = match decoder {
         TextureDecoder::Raw => decode_raw_texture(path),
         TextureDecoder::Heif => decode_heif_texture(path),
@@ -129,15 +131,58 @@ pub(super) fn load_texture_blocking(path: &std::path::Path) -> Option<gdk4::Text
         TextureDecoder::ImageFallback => None,
     };
 
-    texture
+    let result = texture
         .or_else(|| {
             if decoder != TextureDecoder::Pixbuf {
-                decode_pixbuf_texture(path)
+                let fallback = decode_pixbuf_texture(path);
+                if fallback.is_some() {
+                    winning_route = TextureDecoder::Pixbuf;
+                }
+                fallback
             } else {
                 None
             }
         })
-        .or_else(|| decode_image_texture(path))
+        .or_else(|| {
+            let fallback = decode_image_texture(path);
+            if fallback.is_some() {
+                winning_route = TextureDecoder::ImageFallback;
+            }
+            fallback
+        });
+
+    let elapsed_ms = started.elapsed().as_millis();
+    match &result {
+        Some(texture) => {
+            if winning_route == decoder {
+                log::debug!(
+                    "Decoded {} via {:?} in {}ms ({}x{})",
+                    path.display(),
+                    decoder,
+                    elapsed_ms,
+                    texture.width(),
+                    texture.height(),
+                );
+            } else {
+                log::debug!(
+                    "Decoded {} via {:?} fallback (primary {:?} failed) in {}ms ({}x{})",
+                    path.display(),
+                    winning_route,
+                    decoder,
+                    elapsed_ms,
+                    texture.width(),
+                    texture.height(),
+                );
+            }
+        }
+        None => log::warn!(
+            "All decoders rejected {} (route {:?}) after {}ms",
+            path.display(),
+            decoder,
+            elapsed_ms,
+        ),
+    }
+    result
 }
 
 fn texture_decoder_for_path(path: &std::path::Path) -> TextureDecoder {

@@ -716,6 +716,19 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             // decoders would all fail and fall through to "unavailable".
             let is_video =
                 crate::media_kinds::asset_kind(&mime) == crate::media_kinds::AssetKind::Video;
+            log::debug!(
+                "Lightbox load: asset={} file={:?} mime={} source={} full_res={} kind={}",
+                asset_id,
+                filename,
+                mime,
+                if local_path.is_empty() {
+                    "remote"
+                } else {
+                    "local"
+                },
+                full_res,
+                if is_video { "video" } else { "image" },
+            );
             if is_video {
                 *video_badge_target.borrow_mut() =
                     Some((local_path.clone(), asset_id.clone(), filename.clone()));
@@ -810,8 +823,15 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     {
                         let _ = std::fs::create_dir_all(&cache_dir);
                         let temp = original_preview_cache_path(&cache_dir, &asset_id, &filename);
-                        if !temp.exists()
-                            && let Err(err) = {
+                        if temp.exists() {
+                            log::debug!(
+                                "Lightbox original cache hit for {} at {}",
+                                asset_id,
+                                temp.display(),
+                            );
+                        } else {
+                            let download_started = std::time::Instant::now();
+                            let download_result = {
                                 begin_download_session(&ui.ctx, format!("preview {asset_id}"));
                                 let progress = track_download_item(
                                     &ui.ctx,
@@ -826,16 +846,25 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                                     .await;
                                 finish_download_item(&ui.ctx, &asset_id);
                                 result
+                            };
+                            if let Err(err) = download_result {
+                                log::warn!("Lightbox original fetch failed: {}", err);
+                                if is_current() {
+                                    show_unavailable(None);
+                                    commit_visible();
+                                    cancel_loader.set(true);
+                                    loader.set_reveal_child(false);
+                                }
+                                return;
                             }
-                        {
-                            log::warn!("Lightbox original fetch failed: {}", err);
-                            if is_current() {
-                                show_unavailable(None);
-                                commit_visible();
-                                cancel_loader.set(true);
-                                loader.set_reveal_child(false);
-                            }
-                            return;
+                            let downloaded_bytes =
+                                std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
+                            log::debug!(
+                                "Lightbox original downloaded for {} in {}ms ({} bytes)",
+                                asset_id,
+                                download_started.elapsed().as_millis(),
+                                downloaded_bytes,
+                            );
                         }
                         let decoded = load_texture_oriented(&temp).await;
                         if !is_current() {
