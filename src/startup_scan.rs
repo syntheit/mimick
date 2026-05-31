@@ -74,38 +74,7 @@ pub async fn queue_unsynced_files(
 
     // ── Stage 2: Async decide + queue ────────────────────────────────────
 
-    // 2a. Pre-batch album ID resolution: collect unique names, resolve in parallel.
-    let unique_albums: Vec<String> = candidates
-        .iter()
-        .map(|c| c.album_name.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    let album_id_cache: Arc<Mutex<HashMap<String, Option<String>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    // Resolve album IDs with bounded concurrency.
-    {
-        let api = api_client.clone();
-        let cache = album_id_cache.clone();
-        stream::iter(unique_albums)
-            .for_each_concurrent(8, |name| {
-                let api = api.clone();
-                let cache = cache.clone();
-                async move {
-                    match api.get_album_id_if_exists(&name).await {
-                        Ok(id) => {
-                            cache.lock().insert(name, id);
-                        }
-                        Err(err) => {
-                            log::warn!("Startup scan: album lookup failed for '{}': {}", name, err);
-                        }
-                    }
-                }
-            })
-            .await;
-    }
+    let album_id_cache = resolve_album_ids_for_candidates(&candidates, &api_client).await;
 
     // 2b. Per-candidate: sync_decision -> hash (if needed) -> collect FileTask.
     //     Tasks are NOT yet queued; we batch a server-side checksum check next
@@ -193,61 +162,12 @@ pub async fn queue_unsynced_files(
         })
         .await;
 
-    // 2c. Batch pre-flight: ask the server which checksums it already has, so
-    //     pre-existing assets bypass the upload queue entirely.
+    // 2c & 2d: Batch pre-flight existing check, split tasks, and inline reassociate hits.
     let prepared_tasks: Vec<FileTask> = std::mem::take(&mut *prepared.lock());
-    let unique_checksums: Vec<String> = prepared_tasks
-        .iter()
-        .map(|t| t.checksum.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let existing_on_server = if unique_checksums.is_empty() {
-        HashMap::new()
-    } else {
-        api_client.bulk_existing_asset_ids(&unique_checksums).await
-    };
+    let (to_upload, reassociated_count) =
+        filter_and_reassociate_existing(prepared_tasks, &api_client, &sync_index).await;
 
-    // 2d. Split tasks. Hits get reassociated inline (no upload); misses go to
-    //     the upload queue.
-    let mut to_reassociate: Vec<(FileTask, String)> = Vec::new();
-    let mut to_upload: Vec<FileTask> = Vec::new();
-    for task in prepared_tasks {
-        match existing_on_server.get(&task.checksum) {
-            Some(asset_id) => to_reassociate.push((task, asset_id.clone())),
-            None => to_upload.push(task),
-        }
-    }
-
-    let reassociated = Arc::new(AtomicUsize::new(0));
-    stream::iter(to_reassociate)
-        .for_each_concurrent(8, |(task, asset_id)| {
-            let api = api_client.clone();
-            let sync_index = sync_index.clone();
-            let reassociated = reassociated.clone();
-            async move {
-                if let Some(ref album_id) = task.album_id
-                    && !album_id.is_empty()
-                {
-                    let _ = api
-                        .add_assets_to_album(album_id, std::slice::from_ref(&asset_id))
-                        .await;
-                }
-                let target = SyncTarget {
-                    album_name: task.album_name.clone(),
-                    album_id: task.album_id.clone(),
-                };
-                if let Err(err) = sync_index.record_synced(&task.path, &task.checksum, &target) {
-                    log::warn!(
-                        "Could not record sync index for pre-existing asset '{}': {}",
-                        task.path,
-                        err
-                    );
-                }
-                reassociated.fetch_add(1, Ordering::Relaxed);
-            }
-        })
-        .await;
+    let reassociated = Arc::new(AtomicUsize::new(reassociated_count));
 
     let queued = Arc::new(AtomicUsize::new(0));
     for task in to_upload {
@@ -266,22 +186,7 @@ pub async fn queue_unsynced_files(
 
     sync_album_to_folder_entries(&watch_paths, app_ctx).await;
 
-    // Prune index entries for files that no longer exist. If a folder is
-    // configured to mirror local deletions to the album, keep its missing
-    // records so the next album sync can move the remote asset to trash.
-    for entry in &watch_paths {
-        let rules = entry.rules();
-        if !rules.delete_folder_to_album {
-            continue;
-        }
-        let root = Path::new(entry.path());
-        for (path, _) in sync_index.records_under_path(root) {
-            seen_paths.insert(path);
-        }
-    }
-    if let Err(err) = sync_index.prune_missing(&seen_paths) {
-        log::warn!("Failed to prune sync index after startup scan: {}", err);
-    }
+    prune_index_entries_for_missing_files(&watch_paths, &mut seen_paths, &sync_index);
 
     let total_queued = queued.load(Ordering::Relaxed);
     let total_skipped = skipped.load(Ordering::Relaxed);
@@ -469,12 +374,22 @@ pub async fn reconcile_entry(app_ctx: Arc<AppContext>, entry: &WatchPathEntry) {
         }
     };
 
+    execute_reconcile_diff(app_ctx.clone(), &album_name, &album_id, watch_path, diff).await;
+}
+
+async fn execute_reconcile_diff(
+    app_ctx: Arc<AppContext>,
+    album_name: &str,
+    album_id: &str,
+    watch_path: std::path::PathBuf,
+    diff: crate::library::album_sync::AlbumDiff,
+) {
     if !diff.to_download.is_empty() {
         let (downloaded, failed) = album_sync::execute_downloads(
             app_ctx.clone(),
             watch_path.clone(),
-            Some(album_id.clone()),
-            Some(album_name.clone()),
+            Some(album_id.to_string()),
+            Some(album_name.to_string()),
             diff.to_download,
         )
         .await;
@@ -500,7 +415,7 @@ pub async fn reconcile_entry(app_ctx: Arc<AppContext>, entry: &WatchPathEntry) {
     if !diff.to_delete_remote.is_empty() {
         let count = diff.to_delete_remote.len();
         let trashed =
-            album_sync::execute_remote_deletions(app_ctx.clone(), &album_id, diff.to_delete_remote)
+            album_sync::execute_remote_deletions(app_ctx.clone(), album_id, diff.to_delete_remote)
                 .await;
         log::info!(
             "Folder-to-album deletion sync for '{}' moved {} of {} remote item(s) to Immich trash",
@@ -508,6 +423,29 @@ pub async fn reconcile_entry(app_ctx: Arc<AppContext>, entry: &WatchPathEntry) {
             trashed,
             count
         );
+    }
+}
+
+fn prune_index_entries_for_missing_files(
+    watch_paths: &[WatchPathEntry],
+    seen_paths: &mut HashSet<String>,
+    sync_index: &ShardedSyncIndex,
+) {
+    // Prune index entries for files that no longer exist. If a folder is
+    // configured to mirror local deletions to the album, keep its missing
+    // records so the next album sync can move the remote asset to trash.
+    for entry in watch_paths {
+        let rules = entry.rules();
+        if !rules.delete_folder_to_album {
+            continue;
+        }
+        let root = Path::new(entry.path());
+        for (path, _) in sync_index.records_under_path(root) {
+            seen_paths.insert(path);
+        }
+    }
+    if let Err(err) = sync_index.prune_missing(seen_paths) {
+        log::warn!("Failed to prune sync index after startup scan: {}", err);
     }
 }
 
@@ -637,64 +575,43 @@ fn enumerate_candidates(
                 };
 
                 for child in read_dir {
-                    match child {
-                        Ok(entry_fs) => {
-                            let path = entry_fs.path();
-                            if path.is_dir() {
-                                stack.push(path);
-                                continue;
-                            }
-
-                            if !is_supported_media_path(&path) {
-                                continue;
-                            }
-                            if is_temporary_file(&path) || !entry.rules().matches(&path) {
-                                continue;
-                            }
-
-                            let path_str = path.to_string_lossy().into_owned();
-
-                            // Apply catchup-mode filtering.
-                            if catchup_mode == StartupCatchupMode::RecentOnly {
-                                if let Ok(meta) = entry_fs.metadata()
-                                    && let Ok(modified) = meta.modified()
-                                    && let Ok(duration) =
-                                        std::time::SystemTime::now().duration_since(modified)
-                                    && duration.as_secs() > 7 * 86400
-                                {
-                                    skipped.fetch_add(1, Ordering::Relaxed);
-                                    continue;
-                                }
-                            } else if catchup_mode == StartupCatchupMode::NewFilesOnly
-                                && let Ok(meta) = entry_fs.metadata()
-                                && let Ok(created) = meta.created().or_else(|_| meta.modified())
-                            {
-                                let created_secs = created
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs_f64();
-                                if created_secs < last_sync {
-                                    skipped.fetch_add(1, Ordering::Relaxed);
-                                    continue;
-                                }
-                            }
-
-                            seen_paths.lock().insert(path_str.clone());
-                            let album_name = effective_album_name(entry, &path);
-                            let sidecar_enabled =
-                                entry.rules().xmp_sidecar_enabled(global_xmp_enabled);
-                            results.push(ScanCandidate {
-                                path: path_str,
-                                watch_path: watch_path_str.clone(),
-                                album_name,
-                                sidecar_enabled,
-                            });
-                        }
+                    let entry_fs = match child {
+                        Ok(e) => e,
                         Err(err) => {
                             errors.fetch_add(1, Ordering::Relaxed);
                             log::warn!("Startup scan directory entry error: {}", err);
+                            continue;
                         }
+                    };
+
+                    let path = entry_fs.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                        continue;
                     }
+
+                    if !is_supported_media_path(&path)
+                        || is_temporary_file(&path)
+                        || !entry.rules().matches(&path)
+                    {
+                        continue;
+                    }
+
+                    if should_skip_for_catchup(&catchup_mode, &entry_fs, last_sync) {
+                        skipped.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    let path_str = path.to_string_lossy().into_owned();
+                    seen_paths.lock().insert(path_str.clone());
+                    let album_name = effective_album_name(entry, &path);
+                    let sidecar_enabled = entry.rules().xmp_sidecar_enabled(global_xmp_enabled);
+                    results.push(ScanCandidate {
+                        path: path_str,
+                        watch_path: watch_path_str.clone(),
+                        album_name,
+                        sidecar_enabled,
+                    });
                 }
             }
             results
@@ -707,6 +624,40 @@ fn enumerate_candidates(
         skipped.into_inner(),
         errors.into_inner(),
     )
+}
+
+fn should_skip_for_catchup(
+    mode: &StartupCatchupMode,
+    entry_fs: &std::fs::DirEntry,
+    last_sync: f64,
+) -> bool {
+    let meta = match entry_fs.metadata() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    match mode {
+        StartupCatchupMode::RecentOnly => {
+            let Ok(modified) = meta.modified() else {
+                return false;
+            };
+            let Ok(duration) = std::time::SystemTime::now().duration_since(modified) else {
+                return false;
+            };
+            duration.as_secs() > 7 * 86400
+        }
+        StartupCatchupMode::NewFilesOnly => {
+            let Ok(created) = meta.created().or_else(|_| meta.modified()) else {
+                return false;
+            };
+            let created_secs = created
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            created_secs < last_sync
+        }
+        _ => false,
+    }
 }
 
 /// Hash a candidate file and submit it to the upload queue.
@@ -784,6 +735,109 @@ async fn resolve_album(
         .lock()
         .insert(album_name.to_string(), resolved.clone());
     Ok(resolved)
+}
+
+async fn resolve_album_ids_for_candidates(
+    candidates: &[ScanCandidate],
+    api_client: &Arc<ImmichApiClient>,
+) -> Arc<Mutex<HashMap<String, Option<String>>>> {
+    let unique_albums: Vec<String> = candidates
+        .iter()
+        .map(|c| c.album_name.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let album_id_cache: Arc<Mutex<HashMap<String, Option<String>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let cache = album_id_cache.clone();
+    stream::iter(unique_albums)
+        .for_each_concurrent(8, |name| {
+            let api = api_client.clone();
+            let cache = cache.clone();
+            async move {
+                match api.get_album_id_if_exists(&name).await {
+                    Ok(id) => {
+                        cache.lock().insert(name, id);
+                    }
+                    Err(err) => {
+                        log::warn!("Startup scan: album lookup failed for '{}': {}", name, err);
+                    }
+                }
+            }
+        })
+        .await;
+
+    album_id_cache
+}
+
+async fn filter_and_reassociate_existing(
+    prepared_tasks: Vec<FileTask>,
+    api_client: &Arc<ImmichApiClient>,
+    sync_index: &Arc<ShardedSyncIndex>,
+) -> (Vec<FileTask>, usize) {
+    let unique_checksums: Vec<String> = prepared_tasks
+        .iter()
+        .map(|t| t.checksum.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let existing_on_server = if unique_checksums.is_empty() {
+        HashMap::new()
+    } else {
+        api_client.bulk_existing_asset_ids(&unique_checksums).await
+    };
+
+    let mut to_reassociate: Vec<(FileTask, String)> = Vec::new();
+    let mut to_upload: Vec<FileTask> = Vec::new();
+    for task in prepared_tasks {
+        match existing_on_server.get(&task.checksum) {
+            Some(asset_id) => to_reassociate.push((task, asset_id.clone())),
+            None => to_upload.push(task),
+        }
+    }
+
+    let reassociated = Arc::new(AtomicUsize::new(0));
+    process_reassociation(api_client, sync_index, to_reassociate, reassociated.clone()).await;
+
+    (to_upload, reassociated.load(Ordering::Relaxed))
+}
+
+async fn process_reassociation(
+    api_client: &Arc<ImmichApiClient>,
+    sync_index: &Arc<ShardedSyncIndex>,
+    to_reassociate: Vec<(FileTask, String)>,
+    reassociated: Arc<AtomicUsize>,
+) {
+    stream::iter(to_reassociate)
+        .for_each_concurrent(8, |(task, asset_id)| {
+            let api = api_client.clone();
+            let sync_index = sync_index.clone();
+            let reassociated = reassociated.clone();
+            async move {
+                if let Some(ref album_id) = task.album_id
+                    && !album_id.is_empty()
+                {
+                    let _ = api
+                        .add_assets_to_album(album_id, std::slice::from_ref(&asset_id))
+                        .await;
+                }
+                let target = SyncTarget {
+                    album_name: task.album_name.clone(),
+                    album_id: task.album_id.clone(),
+                };
+                if let Err(err) = sync_index.record_synced(&task.path, &task.checksum, &target) {
+                    log::warn!(
+                        "Could not record sync index for pre-existing asset '{}': {}",
+                        task.path,
+                        err
+                    );
+                }
+                reassociated.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+        .await;
 }
 
 #[cfg(test)]
