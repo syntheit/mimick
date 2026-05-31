@@ -260,9 +260,9 @@ pub struct ConfigData {
     /// When true, lightbox loads original full-resolution image instead of preview.
     #[serde(default)]
     pub library_preview_full_resolution: bool,
-    /// In-memory thumbnail cache cap in megabytes (0 = use built-in default of 80MB).
-    #[serde(default)]
-    pub library_thumbnail_cache_mb: u32,
+    /// Grid thumbnail quality: "auto", "thumbnail", "preview". Defaults to auto.
+    #[serde(default = "default_grid_quality")]
+    pub library_grid_quality: String,
     /// Total on-disk cache cap in megabytes across all subcaches
     /// (thumbnails, raw_decode, exif, video, preview, open-in).
     /// Pruning runs once at startup. Defaults to 2000 MB.
@@ -309,7 +309,7 @@ impl Default for ConfigData {
             library_view_enabled: false,
             download_target_path: None,
             library_preview_full_resolution: false,
-            library_thumbnail_cache_mb: 0,
+            library_grid_quality: default_grid_quality(),
             cache_disk_cap_mb: default_cache_disk_cap_mb(),
             raw_decode_cache_enabled: false,
             raw_full_decode: false,
@@ -323,6 +323,10 @@ impl Default for ConfigData {
 /// Helper to default boolean fields to true during serialization.
 fn default_true() -> bool {
     true
+}
+
+fn default_grid_quality() -> String {
+    "auto".to_string()
 }
 
 /// Helper to default parallel upload worker threads to 3.

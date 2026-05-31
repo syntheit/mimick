@@ -19,10 +19,10 @@ use crate::library::albums_view::{
     AlbumClick, AlbumsViewParts, build_albums_view, populate_albums,
 };
 use crate::library::explore_view::{ExploreViewParts, build_explore_view};
-use crate::library::grid_view::{GridViewParts, build_grid_view};
 use crate::library::local_source::{
     LocalAsset, enumerate_local, enumerate_local_for_entry, filter_by_filename,
 };
+use crate::library::masonry::{GridViewParts, build_grid_view};
 use crate::library::sidebar::{SidebarParts, build_sidebar};
 use crate::library::state::{LibraryLoadState, LibrarySource};
 use crate::state_manager::TransferDirection;
@@ -45,9 +45,9 @@ pub mod albums_view;
 pub mod asset_model;
 pub mod asset_object;
 pub mod explore_view;
-pub mod grid_view;
 pub mod local_exif;
 pub mod local_source;
+pub mod masonry;
 pub mod sidebar;
 pub mod state;
 pub mod style;
@@ -1808,12 +1808,16 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
     breakpoint.add_setter(&transfer_bar, "visible", Some(&false.to_value()));
     let narrow_apply = narrow_flag.clone();
+    let canvas_for_apply = grid.canvas.clone();
     breakpoint.connect_apply(move |_| {
         narrow_apply.set(true);
+        canvas_for_apply.set_narrow(true);
     });
     let narrow_unapply = narrow_flag.clone();
+    let canvas_for_unapply = grid.canvas.clone();
     breakpoint.connect_unapply(move |_| {
         narrow_unapply.set(false);
+        canvas_for_unapply.set_narrow(false);
     });
     window.add_breakpoint(breakpoint);
 
@@ -1907,7 +1911,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         #[strong]
         ui,
         move |position, x, y| {
-            show_asset_context_menu(ui.clone(), &ui.grid.view, position, x, y);
+            show_asset_context_menu(ui.clone(), &ui.grid.canvas, position, x, y);
         }
     )));
 
@@ -2793,6 +2797,7 @@ fn local_to_library_asset(local: LocalAsset) -> LibraryAsset {
         width: None,
         height: None,
         checksum: None,
+        exif_info: None,
     }
 }
 

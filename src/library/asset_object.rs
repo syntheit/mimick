@@ -52,6 +52,15 @@ mod imp {
         /// has been matched to one via checksum); empty string otherwise.
         #[property(get, set)]
         remote_id: RefCell<String>,
+
+        /// Native pixel width of the asset; 0 = unknown (settled later from
+        /// thumbnail decode for sources without EXIF metadata).
+        #[property(get, set)]
+        width: Cell<u32>,
+
+        /// Native pixel height of the asset; 0 = unknown.
+        #[property(get, set)]
+        height: Cell<u32>,
     }
 
     #[glib::object_subclass]
@@ -69,27 +78,34 @@ glib::wrapper! {
     pub struct AssetObject(ObjectSubclass<imp::AssetObject>);
 }
 
+/// Constructor parameters for a remote `AssetObject`.
+/// Pass `width` / `height` as 0 when unknown.
+pub struct AssetInit<'a> {
+    pub id: &'a str,
+    pub filename: &'a str,
+    pub mime_type: &'a str,
+    pub created_at: &'a str,
+    pub asset_type: &'a str,
+    pub sync_state: u32,
+    pub thumbhash: Option<&'a str>,
+    pub width: u32,
+    pub height: u32,
+}
+
 impl AssetObject {
-    /// Create a new `AssetObject` with all fields populated.
-    pub fn new(
-        id: &str,
-        filename: &str,
-        mime_type: &str,
-        created_at: &str,
-        asset_type: &str,
-        sync_state: u32,
-        thumbhash: Option<&str>,
-    ) -> Self {
+    pub fn new(init: AssetInit<'_>) -> Self {
         glib::Object::builder()
-            .property("id", id)
-            .property("filename", filename)
-            .property("mime-type", mime_type)
-            .property("created-at", created_at)
-            .property("asset-type", asset_type)
-            .property("sync-state", sync_state)
-            .property("thumbhash", thumbhash)
+            .property("id", init.id)
+            .property("filename", init.filename)
+            .property("mime-type", init.mime_type)
+            .property("created-at", init.created_at)
+            .property("asset-type", init.asset_type)
+            .property("sync-state", init.sync_state)
+            .property("thumbhash", init.thumbhash)
             .property("local-path", "")
-            .property("remote-id", id)
+            .property("remote-id", init.id)
+            .property("width", init.width)
+            .property("height", init.height)
             .build()
     }
 
@@ -114,6 +130,8 @@ impl AssetObject {
             .property("thumbhash", None::<String>)
             .property("local-path", local_path)
             .property("remote-id", "")
+            .property("width", 0u32)
+            .property("height", 0u32)
             .build()
     }
 }

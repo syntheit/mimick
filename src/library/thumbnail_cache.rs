@@ -20,7 +20,10 @@ use lru::LruCache;
 use tokio::sync::{Semaphore, watch};
 
 use crate::api_client::{ImmichApiClient, ThumbnailSize};
-const MAX_CONCURRENT_LOADS: usize = 8;
+
+const FALLBACK_CPUS: usize = 4;
+const SMALL_LOAD_MAX: usize = 16;
+const LARGE_LOAD_MAX: usize = 6;
 
 type InflightSlot = Option<Result<Texture, String>>;
 type InflightRx = watch::Receiver<InflightSlot>;
@@ -66,6 +69,7 @@ struct SizedLruCache {
     inner: LruCache<String, Texture>,
     current_bytes: usize,
     max_bytes: usize,
+    evictions_since_log: usize,
 }
 
 impl SizedLruCache {
@@ -77,12 +81,28 @@ impl SizedLruCache {
             inner: LruCache::new(NonZeroUsize::new(count_cap).unwrap()),
             current_bytes: 0,
             max_bytes,
+            evictions_since_log: 0,
         }
+    }
+
+    fn stats(&mut self) -> (usize, usize, usize, usize) {
+        let evictions = self.evictions_since_log;
+        self.evictions_since_log = 0;
+        (
+            self.inner.len(),
+            self.current_bytes,
+            self.max_bytes,
+            evictions,
+        )
     }
 
     /// Retrieve a texture from the cache if present, updating LRU recency.
     fn get(&mut self, key: &str) -> Option<Texture> {
         self.inner.get(key).cloned()
+    }
+
+    fn peek(&self, key: &str) -> Option<Texture> {
+        self.inner.peek(key).cloned()
     }
 
     /// Insert a texture into the cache, evicting entries to respect the byte budget.
@@ -99,6 +119,7 @@ impl SizedLruCache {
                 self.current_bytes = self
                     .current_bytes
                     .saturating_sub(estimate_texture_bytes(&removed));
+                self.evictions_since_log += 1;
             } else {
                 break;
             }
@@ -117,31 +138,44 @@ pub struct ThumbnailCache {
     api_client: std::sync::Arc<ImmichApiClient>,
     memory: Mutex<SizedLruCache>,
     cache_dir: PathBuf,
-    load_semaphore: Arc<Semaphore>,
+    small_semaphore: Arc<Semaphore>,
+    large_semaphore: Arc<Semaphore>,
     inflight: InflightMap,
 }
 
 impl ThumbnailCache {
-    const DEFAULT_MAX_BYTES: usize = 80 * 1024 * 1024;
+    /// Floor for the auto-sized RAM budget, so very low-memory systems still
+    /// hold a working set of decoded thumbnails.
+    const AUTO_MIN_BYTES: usize = 500 * 1024 * 1024;
+    const AUTO_MAX_BYTES: usize = 3 * 1024 * 1024 * 1024;
+    const AUTO_FRACTION_PERCENT: usize = 20;
 
     /// Construct a new thumbnail cache manager. Disk pruning is handled
     /// centrally by `cache_manager` at startup, not here.
-    pub fn with_capacity_mb(api_client: std::sync::Arc<ImmichApiClient>, mb: u32) -> Self {
+    pub fn new(api_client: std::sync::Arc<ImmichApiClient>) -> Self {
         let cache_dir = crate::profile::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp").join(crate::profile::dir_segment()))
             .join("thumbnails");
 
-        let max_bytes = if mb == 0 {
-            Self::DEFAULT_MAX_BYTES
-        } else {
-            (mb as usize).saturating_mul(1024 * 1024)
-        };
+        let max_bytes = auto_memory_budget();
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(FALLBACK_CPUS);
+        let small = SMALL_LOAD_MAX.min(cpus.saturating_mul(2)).max(2);
+        let large = LARGE_LOAD_MAX.min(cpus).max(2);
+        log::info!(
+            "ThumbnailCache memory budget: {} MB (auto), concurrency small={} large={}",
+            max_bytes / (1024 * 1024),
+            small,
+            large,
+        );
 
         Self {
             api_client,
             memory: Mutex::new(SizedLruCache::new(max_bytes)),
             cache_dir,
-            load_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_LOADS)),
+            small_semaphore: Arc::new(Semaphore::new(small)),
+            large_semaphore: Arc::new(Semaphore::new(large)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -156,15 +190,35 @@ impl ThumbnailCache {
             api_client,
             memory: Mutex::new(SizedLruCache::new(max_bytes)),
             cache_dir,
-            load_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_LOADS)),
+            small_semaphore: Arc::new(Semaphore::new(SMALL_LOAD_MAX)),
+            large_semaphore: Arc::new(Semaphore::new(LARGE_LOAD_MAX)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Retrieve a thumbnail texture from memory if present.
+    /// Retrieve a thumbnail texture from memory if present, updating LRU recency.
     pub fn get_cached(&self, asset_id: &str, size: ThumbnailSize) -> Option<Texture> {
         let key = cache_key(asset_id, size);
         self.memory.lock().get(&key)
+    }
+
+    /// Same as `get_cached` but does not touch LRU order. Use for read-only
+    /// per-frame paint lookups.
+    pub fn peek_cached(&self, asset_id: &str, size: ThumbnailSize) -> Option<Texture> {
+        let key = cache_key(asset_id, size);
+        self.memory.lock().peek(&key)
+    }
+
+    /// (entries, current_bytes, max_bytes, evictions_since_last_call).
+    pub fn cache_stats(&self) -> (usize, usize, usize, usize) {
+        self.memory.lock().stats()
+    }
+
+    fn semaphore_for(&self, size: ThumbnailSize) -> Arc<Semaphore> {
+        match size {
+            ThumbnailSize::Thumbnail => self.small_semaphore.clone(),
+            ThumbnailSize::Preview | ThumbnailSize::Fullsize => self.large_semaphore.clone(),
+        }
     }
 
     /// Asynchronously fetch a remote thumbnail with default non-cancellable execution.
@@ -215,8 +269,7 @@ impl ThumbnailCache {
             return Err("cancelled".to_string());
         }
         let _permit = self
-            .load_semaphore
-            .clone()
+            .semaphore_for(size)
             .acquire_owned()
             .await
             .map_err(|err| err.to_string())?;
@@ -237,16 +290,9 @@ impl ThumbnailCache {
         .map_err(|err| err.to_string())?;
 
         if let Some(bytes) = from_disk {
-            let byte_len = bytes.len();
-            let texture = decode_to_scaled_texture(bytes)
+            let texture = decode_to_scaled_texture(bytes, target_dim_for_bucket(size))
                 .await
                 .map_err(|err| err.to_string())?;
-            log::debug!(
-                "Thumbnail disk-cache hit for {:?} {}: {} bytes",
-                size,
-                asset_id,
-                byte_len
-            );
             self.memory.lock().insert(key.to_string(), texture.clone());
             return Ok(texture);
         }
@@ -254,10 +300,7 @@ impl ThumbnailCache {
         if is_cancelled() {
             return Err("cancelled".to_string());
         }
-        let fetch_started = std::time::Instant::now();
         let bytes = self.api_client.fetch_thumbnail(asset_id, size).await?;
-        let fetch_ms = fetch_started.elapsed().as_millis();
-        let byte_len = bytes.len();
         let cache_dir = self.cache_dir.clone();
         let cache_file_for_write = cache_file.clone();
         let bytes_for_write = bytes.clone();
@@ -266,17 +309,9 @@ impl ThumbnailCache {
             let _ = std::fs::write(&cache_file_for_write, &bytes_for_write);
         })
         .await;
-        let texture = decode_to_scaled_texture(bytes)
+        let texture = decode_to_scaled_texture(bytes, target_dim_for_bucket(size))
             .await
             .map_err(|err| err.to_string())?;
-        log::debug!(
-            "Thumbnail fetched from server for {:?} {}: {} bytes in {}ms",
-            size,
-            asset_id,
-            byte_len,
-            fetch_ms,
-        );
-
         self.memory.lock().insert(key.to_string(), texture.clone());
         Ok(texture)
     }
@@ -319,8 +354,7 @@ impl ThumbnailCache {
             return Err("cancelled".to_string());
         }
         let _permit = self
-            .load_semaphore
-            .clone()
+            .semaphore_for(ThumbnailSize::Thumbnail)
             .acquire_owned()
             .await
             .map_err(|err| err.to_string())?;
@@ -344,12 +378,6 @@ impl ThumbnailCache {
         .map_err(|err| err.to_string())?;
 
         if let Some(texture) = from_disk {
-            log::debug!(
-                "Local thumbnail disk-cache hit for {} ({}x{})",
-                path.display(),
-                texture.width(),
-                texture.height(),
-            );
             self.memory.lock().insert(key.to_string(), texture.clone());
             return Ok(texture);
         }
@@ -463,6 +491,7 @@ fn cache_key(asset_id: &str, size: ThumbnailSize) -> String {
     match size {
         ThumbnailSize::Thumbnail => format!("thumbnail:{}", asset_id),
         ThumbnailSize::Preview => format!("preview:{}", asset_id),
+        ThumbnailSize::Fullsize => format!("fullsize:{}", asset_id),
     }
 }
 
@@ -476,6 +505,32 @@ fn local_cache_key(asset_id: &str) -> String {
 /// Estimate memory byte size occupied by a texture.
 fn estimate_texture_bytes(texture: &Texture) -> usize {
     texture.width().max(1) as usize * texture.height().max(1) as usize * 4
+}
+
+/// Pick a thumbnail-cache RAM budget from `MemTotal` in `/proc/meminfo`,
+/// clamped to `[AUTO_MIN_BYTES, AUTO_MAX_BYTES]`. Falls back to the floor
+/// if the file can't be read.
+fn auto_memory_budget() -> usize {
+    let total = read_meminfo_total_bytes().unwrap_or(0);
+    if total == 0 {
+        return ThumbnailCache::AUTO_MIN_BYTES;
+    }
+    let fraction = total / 100 * ThumbnailCache::AUTO_FRACTION_PERCENT;
+    fraction.clamp(
+        ThumbnailCache::AUTO_MIN_BYTES,
+        ThumbnailCache::AUTO_MAX_BYTES,
+    )
+}
+
+fn read_meminfo_total_bytes() -> Option<usize> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb: usize = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
 }
 
 /// Decode a file through the custom pipeline (RAW / non-pixbuf formats) and
@@ -513,14 +568,22 @@ fn custom_decode_to_thumbnail(path: &std::path::Path) -> Result<gtk::gdk_pixbuf:
         .ok_or_else(|| "Failed to scale pixbuf".to_string())
 }
 
+fn target_dim_for_bucket(size: ThumbnailSize) -> i32 {
+    match size {
+        ThumbnailSize::Thumbnail => 256,
+        ThumbnailSize::Preview => 1440,
+        ThumbnailSize::Fullsize => 2560,
+    }
+}
+
 /// Asynchronously decode image bytes into a scaled texture.
-async fn decode_to_scaled_texture(bytes: Vec<u8>) -> Result<Texture, String> {
+async fn decode_to_scaled_texture(bytes: Vec<u8>, max_dim: i32) -> Result<Texture, String> {
     tokio::task::spawn_blocking(move || -> Result<Texture, String> {
         let stream = gtk::gio::MemoryInputStream::from_bytes(&Bytes::from_owned(bytes));
         let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(
             &stream,
-            256,
-            256,
+            max_dim,
+            max_dim,
             true,
             gtk::gio::Cancellable::NONE,
         )
