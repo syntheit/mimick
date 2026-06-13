@@ -69,20 +69,6 @@ fn consume_flag(flag: &parking_lot::Mutex<bool>) -> bool {
     }
 }
 
-/// Suppress stderr noise from `rawloader`/`imagepipe` panics — they're
-/// caught via `catch_unwind` at the call site, but the default hook still
-/// prints before unwinding reaches it.
-fn install_filtering_panic_hook() {
-    let default = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let file = info.location().map(|l| l.file()).unwrap_or("");
-        if file.contains("/rawloader-") || file.contains("/imagepipe-") {
-            return;
-        }
-        default(info);
-    }));
-}
-
 #[tokio::main]
 async fn main() {
     // Mirror logs to stdout and to a rotating cache file for easier support/debugging.
@@ -116,8 +102,6 @@ async fn main() {
         .write_mode(WriteMode::Direct)
         .start()
         .expect("Failed to initialize logger");
-
-    install_filtering_panic_hook();
 
     if let Some(name) = profile::name() {
         log::info!(
@@ -170,6 +154,9 @@ async fn main() {
         log::info!("Mimick primary instance initializing");
         // Always follow the desktop's light/dark preference.
         adw::StyleManager::default().set_color_scheme(adw::ColorScheme::Default);
+
+        // Register global CSS for button animations and UI components
+        crate::library::style::ensure_registered();
 
         thread_local! {
             static APP_HOLD: std::cell::RefCell<Option<gtk::gio::ApplicationHoldGuard>> = const { std::cell::RefCell::new(None) };

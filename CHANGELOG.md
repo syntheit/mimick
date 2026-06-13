@@ -9,20 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Shift+Click range selection in the library grid. Clicking an asset with Shift held selects the contiguous range from the last-clicked anchor to the current position. Ctrl+Shift adds the range to the existing selection without clearing it.
+- Download folder confirmation dialog. When no default download folder is saved, the folder picker now appears on every download. After choosing a folder, a prompt asks whether to save it as the default ("Always") or use it once ("Just Once").
+- Download Folder setting in the Library preferences group. Shows the current saved folder with Change and Clear buttons, so users can view and manage the default download location from Settings.
+- Batch download summary dialog. After a multi-select download completes, a dialog reports how many assets were downloaded, skipped, or failed, and names the destination folder.
+- Unified file conflict dialog for batch downloads. When existing files are found, a single dialog offers Skip, Rename (auto-suffix), or Overwrite, with an "Apply to all remaining conflicts" checkbox instead of spawning one dialog per file.
+- Added `cargo test --locked` to `validate.sh` to match CI and catch regressions locally.
+- Added detailed permission error dialogs across the Library, Explore, and Server Statistics views to clearly identify missing API scopes (e.g. `HTTP 401/403`) instead of treating them as generic network failures.
 - New masonry layout for the Photos view in Library. Images now keep their natural aspect ratios and pack into justified rows instead of a fixed tile grid.
 - New `Library Thumbnail Quality` setting with `Auto`, `Thumbnail`, `Preview`, and `Full Size` options. `Auto` chooses a size based on the rendered cell size, and `Full Size` falls back automatically when the server does not provide that image size.
 
 ### Changed
 
+- Updated README and in-app missing permission dialogs to explicitly document `asset.statistics` as a required API key scope for fetching server statistics.
 - Library layout now uses image dimensions from Immich EXIF data earlier in the load path, so rows are sized more accurately from the first paint.
 - Thumbnail memory cache is now sized automatically from available system RAM, using up to 20% of memory with built-in minimum and maximum limits, so the manual memory-cache limit setting has been removed.
 - Thumbnail loading now uses separate concurrency limits for smaller thumbnails and larger preview/full-size requests to keep browsing responsive while larger images are still loading.
 - Library settings text was shortened and cleaned up to make common options easier to scan.
+- Removed the redundant "(Selected via Flatpak portal)" text globally (affects Settings, Diagnostics, Album views) since the app is exclusively distributed via Flatpak.
+- `validate.sh` now uses `set -euo pipefail`, passes `--locked` to clippy/test, `--deny warnings` to cargo audit, and fails fast when `cargo-audit` is missing instead of auto-installing it.
 
 ### Fixed
 
+- Fixed Shift+Click in the library grid having no effect. The click handler now checks `SHIFT_MASK` and selects the contiguous range between the anchor and clicked position.
+- Fixed library downloads silently persisting the chosen folder on first use and never prompting again. The folder picker now appears each time until the user explicitly opts into a default.
+- Fixed batch download showing "Download Complete" even when all assets were skipped. The heading now reads "No Assets Downloaded" or "Download Failed" as appropriate.
+- Fixed batch download spawning a separate overwrite dialog for every conflicting file simultaneously. Conflicts are now resolved sequentially with a unified dialog.
+- Fixed batch download summary showing the full sandbox path instead of just the folder name.
+- Selection mode now automatically exits after a batch download completes.
+- Fixed an issue where the footer statistics would remain permanently missing if the initial network connection failed at startup.
+- Fixed the Server Statistics missing permissions dialog text truncating on narrow screens (like 360px width) by allowing it to wrap.
+- Fixed `validate.sh` to automatically apply `cargo fmt` fixes instead of failing on formatting errors.
+- Fixed native GTK button hover and scale animations across the app by replacing the rigid CSS transition with a smoother `cubic-bezier` curve.
 - Masonry grid scrolling and thumbnail loading are now more stable. Items close to the visible area load first, and the layout no longer shifts as much while images are coming in.
 - Large cells can now request higher-quality preview and full-size thumbnail buckets correctly, with automatic fallback when a higher bucket is unavailable on the server.
+- Queue Inspector: Fixed the Recent Queue Activity layout so it no longer redundantly duplicates the filename in two columns.
+- Queue Inspector: Allowed filenames to smoothly wrap to multiple lines, preventing truncation (cut off with ellipses) when the window is narrow.
+- Settings: Replaced the Application Quit button's FlowBox layout with a native Libadwaita ActionRow, fixing an oversized invisible touch target anomaly and matching standard OS styling.
 
 ### Refactored
 

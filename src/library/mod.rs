@@ -595,13 +595,29 @@ fn bootstrap_window(ui: Rc<LibraryWindowUi>) {
     load_source_page(ui, initial_request, false);
 }
 
-/// Start a periodic server health checking loop updating status icons in the UI.
 fn spawn_server_ping_loop(ui: Rc<LibraryWindowUi>) {
     glib::timeout_add_seconds_local(5, move || {
         let ui_for_tick = ui.clone();
         glib::MainContext::default().spawn_local(async move {
             let _ = ui_for_tick.ctx.api_client.check_connection().await;
             let route = ui_for_tick.ctx.api_client.active_route_label().await;
+
+            // If we are online but missing stats (e.g. from an initial network failure), re-fetch them.
+            if route.is_some() {
+                let missing_stats = {
+                    let state = ui_for_tick.ctx.library_state.lock();
+                    state.status.stats.is_none() || state.status.about.is_none()
+                };
+                if missing_stats {
+                    let stats = ui_for_tick.ctx.api_client.fetch_server_stats().await.ok();
+                    let about = ui_for_tick.ctx.api_client.fetch_server_about().await.ok();
+                    if stats.is_some() || about.is_some() {
+                        let mut state = ui_for_tick.ctx.library_state.lock();
+                        state.set_status(stats, about);
+                    }
+                }
+            }
+
             update_footer(&ui_for_tick, route);
         });
         glib::ControlFlow::Continue
@@ -921,7 +937,13 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ctx,
         async move {
-            let people = ctx.api_client.fetch_people(true).await.unwrap_or_default();
+            let people_res = ctx.api_client.fetch_people(false).await;
+            if let Err(e) = &people_res
+                && (e.contains("HTTP 401") || e.contains("HTTP 403"))
+            {
+                show_library_permission_error(&ui.window);
+            }
+            let people = people_res.unwrap_or_default();
             let click_ui = ui.clone();
             explore_view::populate_people(&ui.explore, ctx.clone(), people, move |id, name| {
                 let filters = MetadataSearchFilters {
@@ -946,7 +968,13 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ctx,
         async move {
-            let places = ctx.api_client.fetch_all_places().await.unwrap_or_default();
+            let places_res = ctx.api_client.fetch_all_places().await;
+            if let Err(e) = &places_res
+                && (e.contains("HTTP 401") || e.contains("HTTP 403"))
+            {
+                show_library_permission_error(&ui.window);
+            }
+            let places = places_res.unwrap_or_default();
             let click_ui = ui.clone();
             explore_view::populate_places(&ui.explore, ctx.clone(), places, move |_kind, value| {
                 let next = LibrarySource::AdvancedSearch {
@@ -969,7 +997,13 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ctx,
         async move {
-            let sections = ctx.api_client.fetch_explore().await.unwrap_or_default();
+            let sections_res = ctx.api_client.fetch_explore().await;
+            if let Err(e) = &sections_res
+                && (e.contains("HTTP 401") || e.contains("HTTP 403"))
+            {
+                show_library_permission_error(&ui.window);
+            }
+            let sections = sections_res.unwrap_or_default();
             let click_ui = ui.clone();
             explore_view::populate_explore(
                 &ui.explore,
@@ -1524,4 +1558,14 @@ async fn merge_album_unified_page(
 
     local_rows.append(&mut remote);
     Ok((local_rows, has_more))
+}
+
+/// Helper to show a permissions error dialog for library views.
+fn show_library_permission_error(window: &libadwaita::ApplicationWindow) {
+    let dialog = libadwaita::AlertDialog::builder()
+        .heading("Missing API Permissions")
+        .body("Your API key is missing permissions required for the Library view. Please ensure the key has 'asset.read', 'asset.view', 'asset.download', and 'person.read' enabled.")
+        .build();
+    dialog.add_response("close", "Close");
+    dialog.present(Some(window));
 }
