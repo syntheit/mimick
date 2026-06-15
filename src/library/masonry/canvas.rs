@@ -95,6 +95,8 @@ mod imp {
         /// Anchor position for Shift+Click range selection.
         pub last_selected: Cell<Option<u32>>,
         pub permission_warned: Cell<bool>,
+        /// Cached video badge icon paintable, resolved lazily from the icon theme.
+        pub video_icon: OnceCell<gdk4::Paintable>,
     }
 
     #[glib::object_subclass]
@@ -311,10 +313,64 @@ mod imp {
             if selected {
                 snapshot.append_color(&sctx.select_tint, &rect);
             }
+
+            // Video badge: paint a centred play icon over video asset cells.
+            let is_video = asset
+                .property::<String>("asset-type")
+                .eq_ignore_ascii_case("VIDEO");
+            if is_video {
+                self.paint_video_badge(snapshot, it.x, row.y, it.w, row.h);
+            }
+
             if clipped {
                 snapshot.pop();
             }
             result
+        }
+
+        /// Paint the video play-icon badge centred on the cell.
+        ///
+        /// A semi-transparent dark circle is drawn behind the icon for contrast,
+        /// then the cached `mimick-video-symbolic` icon is rendered on top.
+        fn paint_video_badge(
+            &self,
+            snapshot: &gtk::Snapshot,
+            cell_x: f32,
+            cell_y: f32,
+            cell_w: f32,
+            cell_h: f32,
+        ) {
+            let icon = self
+                .video_icon
+                .get_or_init(|| resolve_video_icon(&self.obj()));
+
+            let icon_size = (cell_h * 0.22).clamp(16.0, 48.0);
+            let bg_size = icon_size * 1.6;
+
+            // Centre the background circle.
+            let bg_x = cell_x + (cell_w - bg_size) * 0.5;
+            let bg_y = cell_y + (cell_h - bg_size) * 0.5;
+            let bg_rect = Rect::new(bg_x, bg_y, bg_size, bg_size);
+            let half = bg_size * 0.5;
+            let corner = Size::new(half, half);
+            let rounded = RoundedRect::new(bg_rect, corner, corner, corner, corner);
+
+            let bg_color = gdk4::RGBA::new(0.0, 0.0, 0.0, 0.55);
+            snapshot.push_rounded_clip(&rounded);
+            snapshot.append_color(&bg_color, &bg_rect);
+            snapshot.pop();
+
+            // Centre the icon inside the circle.
+            let icon_x = cell_x + (cell_w - icon_size) * 0.5;
+            let icon_y = cell_y + (cell_h - icon_size) * 0.5;
+            snapshot.save();
+            snapshot.translate(&gtk::graphene::Point::new(icon_x, icon_y));
+            icon.snapshot(
+                snapshot.upcast_ref::<gdk4::Snapshot>(),
+                icon_size as f64,
+                icon_size as f64,
+            );
+            snapshot.restore();
         }
 
         fn queue_load_if_needed(
@@ -480,6 +536,25 @@ fn placeholder_color() -> gdk4::RGBA {
     } else {
         gdk4::RGBA::new(0.90, 0.90, 0.92, 1.0)
     }
+}
+
+/// Resolve the video badge icon from the icon theme. The result is cached
+/// per-canvas via a `OnceCell` so the theme lookup only happens once.
+fn resolve_video_icon(widget: &MasonryCanvas) -> gdk4::Paintable {
+    let display = widget
+        .native()
+        .map(|n| n.display())
+        .unwrap_or_else(|| gtk::gdk::Display::default().expect("default GDK display"));
+    let theme = gtk::IconTheme::for_display(&display);
+    let icon = theme.lookup_icon(
+        "mimick-video-symbolic",
+        &[],
+        48,
+        1,
+        gtk::TextDirection::None,
+        gtk::IconLookupFlags::FORCE_SYMBOLIC,
+    );
+    icon.upcast::<gdk4::Paintable>()
 }
 
 fn bucket_for_asset(
