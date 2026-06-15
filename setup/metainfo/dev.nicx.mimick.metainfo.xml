@@ -40,9 +40,7 @@
     <screenshot>
       <image
             >https://raw.githubusercontent.com/nicx17/mimick/main/docs/screenshots/explore_page_view_showing_people_places_sidebar_on.png</image>
-      <caption
-                xml:lang="en"
-            >Explore page showing People, Places, and Things</caption>
+      <caption xml:lang="en">Explore page showing People, Places, and Things</caption>
     </screenshot>
     <screenshot>
       <image
@@ -62,9 +60,7 @@
     <screenshot>
       <image
             >https://raw.githubusercontent.com/nicx17/mimick/main/docs/screenshots/library_view_showing_sync_album_dialog_upload_download_apply_cancel.png</image>
-      <caption
-                xml:lang="en"
-            >Album sync dialog with upload and download actions</caption>
+      <caption xml:lang="en">Album sync dialog with upload and download actions</caption>
     </screenshot>
     <screenshot>
       <image
@@ -115,15 +111,33 @@
   </keywords>
   <content_rating type="oars-1.1" />
   <releases>
-  <release version="9.6.1" date="2026-05-31">
-    <description>
-      <ul>
-        <li>Lightbox drag-to-pan is now smooth when you are zoomed in.</li>
-        <li
+    <release version="9.7.0" date="2026-06-16">
+      <description>
+        <ul>
+          <li>New masonry layout for the Photos view — images now keep their natural aspect ratios instead of a fixed tile grid.</li>
+          <li>Download folder prompt now appears each time until you choose to save a default. You can manage the saved folder from Settings.</li>
+          <li>Batch downloads now show a summary dialog with counts of downloaded, skipped, and failed assets.</li>
+          <li>File conflicts during batch download are handled in a single dialog with Skip, Rename, or Overwrite options and an "Apply to all" checkbox.</li>
+          <li>New Library Thumbnail Quality setting with Auto, Thumbnail, Preview, and Full Size options.</li>
+          <li>Thumbnail memory cache now sizes itself automatically from available system RAM. The manual cache size setting has been removed.</li>
+          <li>Missing API permission errors (401/403) now show clear dialogs explaining which scopes are needed instead of a generic network error.</li>
+          <li>Smoother button hover and press animations across the app.</li>
+          <li>Fixed footer statistics staying blank if the initial network connection failed at startup.</li>
+          <li>Fixed selection mode not exiting after a batch download.</li>
+          <li>Queue Inspector filenames no longer truncate on narrow windows and the layout no longer duplicates the filename column.</li>
+          <li>Settings Quit button now uses a standard Libadwaita row, fixing an oversized touch target.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="9.6.1" date="2026-05-31">
+      <description>
+        <ul>
+          <li>Lightbox drag-to-pan is now smooth when you are zoomed in.</li>
+          <li
                     >API key permission help was updated to use the correct Immich permission names.</li>
-      </ul>
-    </description>
-  </release>
+        </ul>
+      </description>
+    </release>
     <release version="9.6.0" date="2026-05-25">
       <description>
         <ul>
