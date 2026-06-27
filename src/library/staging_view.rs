@@ -103,6 +103,27 @@ pub fn build_staging_window(
     toolbar.add_bottom_bar(&status_label);
     window.set_content(Some(&toolbar));
 
+    // --- Responsive narrow breakpoint (matches main library window at 600sp) ---
+    {
+        let breakpoint = libadwaita::Breakpoint::new(
+            libadwaita::BreakpointCondition::parse("max-width: 600sp")
+                .expect("valid breakpoint condition"),
+        );
+        let narrow_flag = narrow.clone();
+        let canvas_for_apply = grid.canvas.clone();
+        breakpoint.connect_apply(move |_| {
+            narrow_flag.set(true);
+            canvas_for_apply.set_narrow(true);
+        });
+        let narrow_flag = narrow.clone();
+        let canvas_for_unapply = grid.canvas.clone();
+        breakpoint.connect_unapply(move |_| {
+            narrow_flag.set(false);
+            canvas_for_unapply.set_narrow(false);
+        });
+        window.add_breakpoint(breakpoint);
+    }
+
     // --- Clone captures for closures ---
     let files_rc = Rc::new(files);
     let selection = grid.selection.clone();
