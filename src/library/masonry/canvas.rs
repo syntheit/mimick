@@ -382,7 +382,10 @@ mod imp {
             snapshot.restore();
         }
 
-        /// Paint a checkbox icon in the top-left corner of a tile.
+        /// Paint a checkbox indicator in the top-left corner of a tile.
+        ///
+        /// Unchecked: semi-transparent bordered square (outline only).
+        /// Checked: accent-coloured filled square with a checkmark icon.
         fn paint_checkbox(
             &self,
             snapshot: &gtk::Snapshot,
@@ -391,42 +394,67 @@ mod imp {
             cell_h: f32,
             selected: bool,
         ) {
-            let icon = if selected {
-                self.check_icon
-                    .get_or_init(|| resolve_symbolic_icon(&self.obj(), "object-select-symbolic"))
+            let box_size = (cell_h * 0.14).clamp(16.0, 26.0);
+            let margin = 6.0_f32;
+            let bx = cell_x + margin;
+            let by = cell_y + margin;
+
+            let r = 4.0_f32;
+            let corner = Size::new(r, r);
+            let outer_rect = Rect::new(bx, by, box_size, box_size);
+            let outer_round = RoundedRect::new(outer_rect, corner, corner, corner, corner);
+
+            if selected {
+                // Filled square with theme accent colour.
+                let accent = accent_bg_color();
+                snapshot.push_rounded_clip(&outer_round);
+                snapshot.append_color(&accent, &outer_rect);
+                snapshot.pop();
+
+                // Checkmark icon inside.
+                let icon = self
+                    .check_icon
+                    .get_or_init(|| resolve_symbolic_icon(&self.obj(), "object-select-symbolic"));
+                let icon_inset = 3.0_f32;
+                let icon_size = box_size - icon_inset * 2.0;
+                snapshot.save();
+                snapshot.translate(&gtk::graphene::Point::new(bx + icon_inset, by + icon_inset));
+                icon.snapshot(
+                    snapshot.upcast_ref::<gdk4::Snapshot>(),
+                    icon_size as f64,
+                    icon_size as f64,
+                );
+                snapshot.restore();
             } else {
-                self.uncheck_icon
-                    .get_or_init(|| resolve_symbolic_icon(&self.obj(), "checkbox-symbolic"))
-            };
+                // Outlined square: draw outer bg then inner cutout for border effect.
+                let border_w = 2.0_f32;
+                let border_color = gdk4::RGBA::new(1.0, 1.0, 1.0, 0.8);
+                let inner_color = gdk4::RGBA::new(0.0, 0.0, 0.0, 0.3);
 
-            let icon_size = (cell_h * 0.16).clamp(14.0, 28.0);
-            let padding = 4.0_f32;
-            let ix = cell_x + padding;
-            let iy = cell_y + padding;
+                snapshot.push_rounded_clip(&outer_round);
+                snapshot.append_color(&border_color, &outer_rect);
 
-            // Semi-transparent background pill for contrast.
-            let bg_size = icon_size + padding * 2.0;
-            let bg_rect = Rect::new(ix - padding, iy - padding, bg_size, bg_size);
-            let half = bg_size * 0.5;
-            let corner = Size::new(half, half);
-            let rounded = RoundedRect::new(bg_rect, corner, corner, corner, corner);
-            let bg_color = if selected {
-                gdk4::RGBA::new(0.2, 0.6, 1.0, 0.7)
-            } else {
-                gdk4::RGBA::new(0.0, 0.0, 0.0, 0.45)
-            };
-            snapshot.push_rounded_clip(&rounded);
-            snapshot.append_color(&bg_color, &bg_rect);
-            snapshot.pop();
+                let inner_rect = Rect::new(
+                    bx + border_w,
+                    by + border_w,
+                    box_size - border_w * 2.0,
+                    box_size - border_w * 2.0,
+                );
+                let ir = (r - border_w).max(0.0);
+                let inner_corner = Size::new(ir, ir);
+                let inner_round = RoundedRect::new(
+                    inner_rect,
+                    inner_corner,
+                    inner_corner,
+                    inner_corner,
+                    inner_corner,
+                );
+                snapshot.push_rounded_clip(&inner_round);
+                snapshot.append_color(&inner_color, &inner_rect);
+                snapshot.pop();
 
-            snapshot.save();
-            snapshot.translate(&gtk::graphene::Point::new(ix, iy));
-            icon.snapshot(
-                snapshot.upcast_ref::<gdk4::Snapshot>(),
-                icon_size as f64,
-                icon_size as f64,
-            );
-            snapshot.restore();
+                snapshot.pop();
+            }
         }
 
         fn queue_load_if_needed(
@@ -584,6 +612,12 @@ impl imp::SnapshotStats {
         }
         self.painted += 1;
     }
+}
+
+/// Get the current theme accent background colour from libadwaita.
+fn accent_bg_color() -> gdk4::RGBA {
+    let accent = libadwaita::StyleManager::default().accent_color();
+    accent.to_rgba()
 }
 
 fn placeholder_color() -> gdk4::RGBA {
