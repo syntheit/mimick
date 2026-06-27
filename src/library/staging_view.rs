@@ -1,9 +1,9 @@
 //! Staging view for files opened via "Open With" or the `--upload` CLI flag.
 //!
 //! Presents externally-provided file paths in a masonry grid with selection
-//! checkboxes, a right-side preview pane, and Upload / Upload to Album
-//! actions. Reuses the existing `MasonryCanvas`, `LibraryAssetModel`,
-//! `AssetObject`, `ThumbnailCache`, and `spawn_enqueue` infrastructure.
+//! checkboxes and Upload / Upload to Album actions. Reuses the existing
+//! `MasonryCanvas`, `LibraryAssetModel`, `AssetObject`, `ThumbnailCache`,
+//! and `spawn_enqueue` infrastructure.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -46,24 +46,23 @@ pub fn build_staging_window(
         .build();
 
     // --- Header bar ---
-    // Use icon+tooltip buttons so the header fits at 360px without overflow.
     let header = libadwaita::HeaderBar::builder()
         .show_start_title_buttons(true)
         .show_end_title_buttons(true)
         .build();
 
     let upload_btn = gtk::Button::builder()
-        .icon_name("document-send-symbolic")
+        .label("Upload")
         .tooltip_text("Upload selected files to library")
         .css_classes(["suggested-action", "mimick-pressable"])
         .build();
     let upload_album_btn = gtk::Button::builder()
-        .icon_name("folder-pictures-symbolic")
+        .label("Album")
         .tooltip_text("Upload selected files to an album")
         .css_classes(["mimick-pressable"])
         .build();
     let select_all_btn = gtk::Button::builder()
-        .icon_name("edit-select-all-symbolic")
+        .label("All")
         .tooltip_text("Select all / Deselect all")
         .css_classes(["mimick-pressable"])
         .build();
@@ -88,61 +87,6 @@ pub fn build_staging_window(
     let assets = build_staging_assets(&files);
     grid.model.reset_with_objects(assets);
 
-    // --- Preview split pane ---
-    let preview_picture = gtk::Picture::builder()
-        .content_fit(gtk::ContentFit::Contain)
-        .vexpand(true)
-        .hexpand(true)
-        .build();
-    let preview_filename = gtk::Label::builder()
-        .halign(gtk::Align::Start)
-        .ellipsize(gtk::pango::EllipsizeMode::Middle)
-        .css_classes(["title-4"])
-        .build();
-    let preview_info = gtk::Label::builder()
-        .halign(gtk::Align::Start)
-        .css_classes(["dim-label"])
-        .build();
-    let preview_box = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
-    preview_box.append(&preview_picture);
-    preview_box.append(&preview_filename);
-    preview_box.append(&preview_info);
-
-    let preview_scroll = gtk::ScrolledWindow::builder()
-        .child(&preview_box)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .build();
-
-    let split = libadwaita::OverlaySplitView::builder()
-        .sidebar_position(gtk::PackType::End)
-        .show_sidebar(false)
-        .collapsed(true) // overlay mode at narrow widths
-        .enable_show_gesture(true)
-        .enable_hide_gesture(true)
-        .min_sidebar_width(200.0)
-        .max_sidebar_width(400.0)
-        .sidebar_width_fraction(0.40)
-        .build();
-    split.set_content(Some(&grid.scrolled));
-    split.set_sidebar(Some(&preview_scroll));
-
-    // Track narrow state and collapse the split pane when the window is small.
-    {
-        let split_ref = split.clone();
-        window.connect_default_width_notify(move |win| {
-            let is_narrow = win.default_width() < 600;
-            split_ref.set_collapsed(is_narrow);
-        });
-    }
-
     // --- Status bar ---
     let status_label = gtk::Label::builder()
         .halign(gtk::Align::Start)
@@ -155,51 +99,13 @@ pub fn build_staging_window(
     let file_count = grid.model.n_items();
     status_label.set_text(&format!("{} file(s) staged", file_count));
 
-    toolbar.set_content(Some(&split));
+    toolbar.set_content(Some(&grid.scrolled));
     toolbar.add_bottom_bar(&status_label);
     window.set_content(Some(&toolbar));
 
     // --- Clone captures for closures ---
     let files_rc = Rc::new(files);
     let selection = grid.selection.clone();
-    let model_for_click = grid.model.clone();
-    let split_ref = split.clone();
-    let preview_picture_ref = preview_picture.clone();
-    let preview_filename_ref = preview_filename.clone();
-    let preview_info_ref = preview_info.clone();
-
-    // --- Tile click -> preview ---
-    grid.canvas.set_activate_handler(move |position| {
-        let Some(item) = model_for_click.item(position).and_downcast::<AssetObject>() else {
-            return;
-        };
-        let filename = item.property::<String>("filename");
-        let local_path = item.property::<String>("local-path");
-        let asset_type = item.property::<String>("asset-type");
-        let is_video = asset_type.eq_ignore_ascii_case("VIDEO");
-
-        preview_filename_ref.set_text(&filename);
-        split_ref.set_show_sidebar(true);
-
-        if is_video {
-            preview_picture_ref.set_paintable(None::<&gdk4::Paintable>);
-            preview_info_ref.set_text("Video file - upload to view on server");
-        } else {
-            let picture = preview_picture_ref.clone();
-            let info = preview_info_ref.clone();
-            let path = PathBuf::from(&local_path);
-            glib::MainContext::default().spawn_local(async move {
-                if let Some(texture) = crate::library::load_texture_oriented(&path).await {
-                    let dims = format!("{} x {} px", texture.width(), texture.height());
-                    info.set_text(&dims);
-                    picture.set_paintable(Some(&texture));
-                } else {
-                    info.set_text("Could not decode image");
-                    picture.set_paintable(None::<&gdk4::Paintable>);
-                }
-            });
-        }
-    });
 
     // --- Select All / Deselect All ---
     {

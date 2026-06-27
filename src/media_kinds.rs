@@ -155,6 +155,14 @@ pub fn asset_kind(mime: &str) -> AssetKind {
     }
 }
 
+/// Whether the path's extension maps to a video MIME type.
+pub fn is_video_path(path: &Path) -> bool {
+    matches!(
+        extension_lower(path).and_then(|ext| mime_for(&ext)),
+        Some(mime) if mime.starts_with("video/")
+    )
+}
+
 /// Extract the extension from a path and return it lowercased.
 fn extension_lower(path: &Path) -> Option<String> {
     path.extension()

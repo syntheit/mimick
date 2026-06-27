@@ -387,10 +387,12 @@ impl ThumbnailCache {
         let log_path = path.clone();
         let cache_dir = self.cache_dir.clone();
         let texture = tokio::task::spawn_blocking(move || -> Result<Texture, String> {
+            let is_video = crate::media_kinds::is_video_path(&path);
             let is_raw = crate::media_kinds::is_raw_path(&path);
-            // For RAW files, gdk_pixbuf never recognises the format, so skip
-            // straight to the custom decoder to avoid a wasted attempt + log noise.
-            let pixbuf = if is_raw {
+
+            let pixbuf = if is_video {
+                ffmpeg_extract_thumbnail(&path)?
+            } else if is_raw {
                 // Try custom RAW decoder first (skips the pixbuf attempt that
                 // always fails for most camera RAW formats).
                 custom_decode_to_thumbnail(&path).or_else(|_| {
@@ -534,12 +536,98 @@ fn read_meminfo_total_bytes() -> Option<usize> {
     None
 }
 
-/// Decode a file through the custom pipeline (RAW / non-pixbuf formats) and
+/// Extract a thumbnail frame from a video file using `ffmpeg`.
+///
+/// Runs `ffmpeg -ss 1 -i <path> -frames:v 1 -vf scale=256:-1 <tmp.png>` and
+/// loads the resulting PNG as a pixbuf. The temporary file is removed
+/// immediately after loading. Falls back to a 0-second seek if the 1-second
+/// seek fails (very short clips).
+fn ffmpeg_extract_thumbnail(path: &std::path::Path) -> Result<gtk::gdk_pixbuf::Pixbuf, String> {
+    use std::process::Command;
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_name = format!(
+        "mimick_vthumb_{}.png",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let tmp_path = tmp_dir.join(&tmp_name);
+
+    // Try to extract a frame at 1 second (avoids black intro frames).
+    let result = Command::new("ffmpeg")
+        .args(["-y", "-ss", "1", "-i"])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=256:-1",
+            "-loglevel",
+            "error",
+        ])
+        .arg(&tmp_path)
+        .output();
+
+    let output = match result {
+        Ok(o) => o,
+        Err(err) => {
+            return Err(format!("ffmpeg not available: {}", err));
+        }
+    };
+
+    // If the 1s seek failed (video < 1s), retry at 0s.
+    if !output.status.success() || !tmp_path.exists() {
+        let _ = Command::new("ffmpeg")
+            .args(["-y", "-ss", "0", "-i"])
+            .arg(path)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=256:-1",
+                "-loglevel",
+                "error",
+            ])
+            .arg(&tmp_path)
+            .output();
+    }
+
+    if !tmp_path.exists() {
+        return Err(format!(
+            "ffmpeg failed to extract frame from {}",
+            path.display()
+        ));
+    }
+
+    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_file(&tmp_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        e.to_string()
+    })?;
+    let _ = std::fs::remove_file(&tmp_path);
+
+    // Scale down if larger than 256x256 (ffmpeg -vf scale only constrains width).
+    let w = pixbuf.width();
+    let h = pixbuf.height();
+    if w > 256 || h > 256 {
+        let scale = (256.0 / w as f64).min(256.0 / h as f64);
+        let tw = ((w as f64 * scale).round() as i32).max(1);
+        let th = ((h as f64 * scale).round() as i32).max(1);
+        pixbuf
+            .scale_simple(tw, th, gtk::gdk_pixbuf::InterpType::Bilinear)
+            .ok_or_else(|| "Failed to scale video thumbnail".to_string())
+    } else {
+        Ok(pixbuf)
+    }
+}
+
+/// Decodes an image file through the application's custom texture pipeline and
 /// scale the result down to a 256x256 thumbnail pixbuf.
 ///
 /// RAW paths use the thumbnail-specific decoder (embedded JPEG first, full
 /// demosaic only as last resort) so the global "Full RAW Decoding" toggle
-/// — which is meant for lightbox quality — never penalises grid loading.
+/// -- which is meant for lightbox quality -- never penalises grid loading.
 fn custom_decode_to_thumbnail(path: &std::path::Path) -> Result<gtk::gdk_pixbuf::Pixbuf, String> {
     let full_texture = if crate::media_kinds::is_raw_path(path) {
         super::decode_raw_thumbnail_texture(path)
