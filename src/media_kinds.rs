@@ -206,4 +206,25 @@ mod tests {
         assert!(!is_raw_path(Path::new("video.mp4")));
         assert!(!is_raw_path(Path::new("noext")));
     }
+
+    #[test]
+    fn desktop_file_mime_types_match() {
+        use std::collections::BTreeSet;
+        let desktop = include_str!("../setup/dev.nicx.mimick.desktop");
+        let mime_line = desktop
+            .lines()
+            .find(|l| l.starts_with("MimeType="))
+            .expect("No MimeType= line in .desktop file");
+        let declared: BTreeSet<&str> = mime_line
+            .strip_prefix("MimeType=")
+            .unwrap()
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .collect();
+        let source: BTreeSet<&str> = MIME_BY_EXT.values().copied().collect();
+        assert_eq!(
+            declared, source,
+            "MimeType= in .desktop file does not match MIME_BY_EXT in media_kinds.rs"
+        );
+    }
 }

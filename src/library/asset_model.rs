@@ -105,6 +105,17 @@ impl LibraryAssetModel {
             self.items_changed(0, prev_n, new_n);
         }
     }
+
+    /// Replace all items with pre-built `AssetObject`s and emit a full reset.
+    ///
+    /// Used by the staging view which constructs local-only `AssetObject`s
+    /// from file paths rather than going through the `LibraryAsset` pipeline.
+    pub fn reset_with_objects(&self, objects: Vec<AssetObject>) {
+        let prev_n = self.imp().items.borrow().len() as u32;
+        let new_n = objects.len() as u32;
+        *self.imp().items.borrow_mut() = objects;
+        self.items_changed(0, prev_n, new_n);
+    }
 }
 
 fn build_sorted_asset_objects(

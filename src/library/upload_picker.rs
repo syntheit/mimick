@@ -56,8 +56,26 @@ pub fn pick_and_upload(
     });
 }
 
-fn spawn_enqueue(ctx: Arc<AppContext>, album: Option<(String, String)>, paths: Vec<PathBuf>) {
+pub(super) fn spawn_enqueue(
+    ctx: Arc<AppContext>,
+    album: Option<(String, String)>,
+    paths: Vec<PathBuf>,
+) {
+    spawn_enqueue_with_callback(ctx, album, paths, |_, _| {});
+}
+
+/// Enqueue files for upload and invoke `on_complete(queued, skipped)` on the
+/// main context when all files have been hashed and enqueued.
+pub(super) fn spawn_enqueue_with_callback<F>(
+    ctx: Arc<AppContext>,
+    album: Option<(String, String)>,
+    paths: Vec<PathBuf>,
+    on_complete: F,
+) where
+    F: FnOnce(usize, usize) + 'static,
+{
     glib::MainContext::default().spawn_local(async move {
+        let total = paths.len();
         let mut queued = 0usize;
         for path in paths {
             let Some(path_str) = path.to_str().map(str::to_owned) else {
@@ -106,6 +124,12 @@ fn spawn_enqueue(ctx: Arc<AppContext>, album: Option<(String, String)>, paths: V
                 queued += 1;
             }
         }
-        log::info!("Manual upload: queued {} file(s)", queued);
+        let skipped = total - queued;
+        log::info!(
+            "Manual upload: queued {} file(s), skipped {}",
+            queued,
+            skipped
+        );
+        on_complete(queued, skipped);
     });
 }
