@@ -97,6 +97,10 @@ mod imp {
         pub permission_warned: Cell<bool>,
         /// Cached video badge icon paintable, resolved lazily from the icon theme.
         pub video_icon: OnceCell<gdk4::Paintable>,
+        /// Cached checkbox icon (selected state).
+        pub check_icon: OnceCell<gdk4::Paintable>,
+        /// Cached checkbox icon (unselected state).
+        pub uncheck_icon: OnceCell<gdk4::Paintable>,
     }
 
     #[glib::object_subclass]
@@ -314,6 +318,11 @@ mod imp {
                 snapshot.append_color(&sctx.select_tint, &rect);
             }
 
+            // Checkbox badge in select mode.
+            if self.select_mode.get() {
+                self.paint_checkbox(snapshot, it.x, row.y, row.h, selected);
+            }
+
             // Video badge: paint a centred play icon over video asset cells.
             let is_video = asset
                 .property::<String>("asset-type")
@@ -365,6 +374,53 @@ mod imp {
             let icon_y = cell_y + (cell_h - icon_size) * 0.5;
             snapshot.save();
             snapshot.translate(&gtk::graphene::Point::new(icon_x, icon_y));
+            icon.snapshot(
+                snapshot.upcast_ref::<gdk4::Snapshot>(),
+                icon_size as f64,
+                icon_size as f64,
+            );
+            snapshot.restore();
+        }
+
+        /// Paint a checkbox icon in the top-left corner of a tile.
+        fn paint_checkbox(
+            &self,
+            snapshot: &gtk::Snapshot,
+            cell_x: f32,
+            cell_y: f32,
+            cell_h: f32,
+            selected: bool,
+        ) {
+            let icon = if selected {
+                self.check_icon
+                    .get_or_init(|| resolve_symbolic_icon(&self.obj(), "object-select-symbolic"))
+            } else {
+                self.uncheck_icon
+                    .get_or_init(|| resolve_symbolic_icon(&self.obj(), "checkbox-symbolic"))
+            };
+
+            let icon_size = (cell_h * 0.16).clamp(14.0, 28.0);
+            let padding = 4.0_f32;
+            let ix = cell_x + padding;
+            let iy = cell_y + padding;
+
+            // Semi-transparent background pill for contrast.
+            let bg_size = icon_size + padding * 2.0;
+            let bg_rect = Rect::new(ix - padding, iy - padding, bg_size, bg_size);
+            let half = bg_size * 0.5;
+            let corner = Size::new(half, half);
+            let rounded = RoundedRect::new(bg_rect, corner, corner, corner, corner);
+            let bg_color = if selected {
+                gdk4::RGBA::new(0.2, 0.6, 1.0, 0.7)
+            } else {
+                gdk4::RGBA::new(0.0, 0.0, 0.0, 0.45)
+            };
+            snapshot.push_rounded_clip(&rounded);
+            snapshot.append_color(&bg_color, &bg_rect);
+            snapshot.pop();
+
+            snapshot.save();
+            snapshot.translate(&gtk::graphene::Point::new(ix, iy));
             icon.snapshot(
                 snapshot.upcast_ref::<gdk4::Snapshot>(),
                 icon_size as f64,
@@ -541,13 +597,17 @@ fn placeholder_color() -> gdk4::RGBA {
 /// Resolve the video badge icon from the icon theme. The result is cached
 /// per-canvas via a `OnceCell` so the theme lookup only happens once.
 fn resolve_video_icon(widget: &MasonryCanvas) -> gdk4::Paintable {
+    resolve_symbolic_icon(widget, "mimick-video-symbolic")
+}
+
+fn resolve_symbolic_icon(widget: &MasonryCanvas, icon_name: &str) -> gdk4::Paintable {
     let display = widget
         .native()
         .map(|n| n.display())
         .unwrap_or_else(|| gtk::gdk::Display::default().expect("default GDK display"));
     let theme = gtk::IconTheme::for_display(&display);
     let icon = theme.lookup_icon(
-        "mimick-video-symbolic",
+        icon_name,
         &[],
         48,
         1,

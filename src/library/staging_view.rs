@@ -62,7 +62,7 @@ pub fn build_staging_window(
         .css_classes(["mimick-pressable"])
         .build();
     let select_all_btn = gtk::Button::builder()
-        .label("All")
+        .icon_name("edit-select-all-symbolic")
         .tooltip_text("Select all / Deselect all")
         .css_classes(["mimick-pressable"])
         .build();
