@@ -387,32 +387,7 @@ impl ThumbnailCache {
         let log_path = path.clone();
         let cache_dir = self.cache_dir.clone();
         let texture = tokio::task::spawn_blocking(move || -> Result<Texture, String> {
-            let is_raw = crate::media_kinds::is_raw_path(&path);
-            // For RAW files, gdk_pixbuf never recognises the format, so skip
-            // straight to the custom decoder to avoid a wasted attempt + log noise.
-            let pixbuf = if is_raw {
-                // Try custom RAW decoder first (skips the pixbuf attempt that
-                // always fails for most camera RAW formats).
-                custom_decode_to_thumbnail(&path).or_else(|_| {
-                    // Some simple TIFF-based RAW files (DNG) can still be
-                    // decoded by glycin/pixbuf, so fall back to it.
-                    gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 256, 256, true)
-                        .map(|raw| raw.apply_embedded_orientation().unwrap_or(raw))
-                        .map_err(|e| e.to_string())
-                })?
-            } else {
-                match gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 256, 256, true) {
-                    Ok(raw) => raw.apply_embedded_orientation().unwrap_or(raw),
-                    Err(err) => {
-                        log::debug!(
-                            "gdk_pixbuf direct load failed for {}: {}; attempting custom decoder",
-                            path.display(),
-                            err
-                        );
-                        custom_decode_to_thumbnail(&path)?
-                    }
-                }
-            };
+            let pixbuf = decode_local_pixbuf(&path)?;
             std::fs::create_dir_all(&cache_dir).map_err(|err| err.to_string())?;
             let encoded = pixbuf_png_bytes(&pixbuf)?;
             std::fs::write(&cache_file, encoded).map_err(|err| err.to_string())?;
@@ -534,12 +509,98 @@ fn read_meminfo_total_bytes() -> Option<usize> {
     None
 }
 
-/// Decode a file through the custom pipeline (RAW / non-pixbuf formats) and
+/// Decode a local file to a 256x256 thumbnail pixbuf, routing through video,
+/// RAW, or standard image pipelines as appropriate.
+fn decode_local_pixbuf(path: &std::path::Path) -> Result<gtk::gdk_pixbuf::Pixbuf, String> {
+    if crate::media_kinds::is_video_path(path) {
+        return ffmpeg_extract_thumbnail(path);
+    }
+    if crate::media_kinds::is_raw_path(path) {
+        return custom_decode_to_thumbnail(path).or_else(|_| {
+            gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(path, 256, 256, true)
+                .map(|raw| raw.apply_embedded_orientation().unwrap_or(raw))
+                .map_err(|e| e.to_string())
+        });
+    }
+    match gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(path, 256, 256, true) {
+        Ok(raw) => Ok(raw.apply_embedded_orientation().unwrap_or(raw)),
+        Err(err) => {
+            log::debug!(
+                "gdk_pixbuf direct load failed for {}: {}; attempting custom decoder",
+                path.display(),
+                err
+            );
+            custom_decode_to_thumbnail(path)
+        }
+    }
+}
+
+/// Extract a thumbnail frame from a video file using `ffmpeg`.
+fn ffmpeg_extract_thumbnail(path: &std::path::Path) -> Result<gtk::gdk_pixbuf::Pixbuf, String> {
+    let tmp_file = tempfile::Builder::new()
+        .prefix("mimick_vthumb_")
+        .suffix(".png")
+        .tempfile()
+        .map_err(|e| format!("failed to create temp file: {}", e))?;
+    let tmp_path = tmp_file.path().to_path_buf();
+
+    // Try 1s seek first (avoids black intro), fall back to 0s.
+    if !run_ffmpeg_frame(path, "1", &tmp_path) {
+        run_ffmpeg_frame(path, "0", &tmp_path);
+    }
+
+    if !tmp_path.exists() {
+        return Err(format!(
+            "ffmpeg failed to extract frame from {}",
+            path.display()
+        ));
+    }
+    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_file(&tmp_path).map_err(|e| e.to_string())?;
+    scale_pixbuf_to_thumbnail(pixbuf)
+}
+
+/// Run ffmpeg to extract a single frame at the given seek position.
+fn run_ffmpeg_frame(input: &std::path::Path, seek_sec: &str, output: &std::path::Path) -> bool {
+    use std::process::Command;
+    Command::new("ffmpeg")
+        .args(["-y", "-ss", seek_sec, "-i"])
+        .arg(input)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=256:-1",
+            "-loglevel",
+            "error",
+        ])
+        .arg(output)
+        .output()
+        .map(|o| o.status.success() && output.exists())
+        .unwrap_or(false)
+}
+
+/// Scale a pixbuf down to fit within 256x256 if needed.
+fn scale_pixbuf_to_thumbnail(
+    pixbuf: gtk::gdk_pixbuf::Pixbuf,
+) -> Result<gtk::gdk_pixbuf::Pixbuf, String> {
+    let (w, h) = (pixbuf.width(), pixbuf.height());
+    if w <= 256 && h <= 256 {
+        return Ok(pixbuf);
+    }
+    let scale = (256.0 / w as f64).min(256.0 / h as f64);
+    let tw = ((w as f64 * scale).round() as i32).max(1);
+    let th = ((h as f64 * scale).round() as i32).max(1);
+    pixbuf
+        .scale_simple(tw, th, gtk::gdk_pixbuf::InterpType::Bilinear)
+        .ok_or_else(|| "Failed to scale video thumbnail".to_string())
+}
+
+/// Decodes an image file through the application's custom texture pipeline and
 /// scale the result down to a 256x256 thumbnail pixbuf.
 ///
 /// RAW paths use the thumbnail-specific decoder (embedded JPEG first, full
 /// demosaic only as last resort) so the global "Full RAW Decoding" toggle
-/// — which is meant for lightbox quality — never penalises grid loading.
+/// -- which is meant for lightbox quality -- never penalises grid loading.
 fn custom_decode_to_thumbnail(path: &std::path::Path) -> Result<gtk::gdk_pixbuf::Pixbuf, String> {
     let full_texture = if crate::media_kinds::is_raw_path(path) {
         super::decode_raw_thumbnail_texture(path)

@@ -61,6 +61,7 @@ mod download;
 mod filters;
 mod lightbox;
 mod server_stats_dialog;
+pub mod staging_view;
 mod upload_picker;
 
 const PAGE_SIZE: u32 = 50;
@@ -70,7 +71,7 @@ use texture_decode::{decode_raw_thumbnail_texture, load_texture_blocking};
 pub use texture_decode::{set_raw_cache_enabled, set_raw_full_decode};
 
 /// Register application custom icons with the Gtk icon theme system.
-fn register_app_icons() {
+pub(crate) fn register_app_icons() {
     if let Some(display) = gtk::gdk::Display::default() {
         let theme = gtk::IconTheme::for_display(&display);
         theme.add_resource_path("/dev/nicx/mimick/icons");
@@ -79,7 +80,7 @@ fn register_app_icons() {
 
 /// Load a local texture, preferring decoders that cover formats outside the
 /// GDK-Pixbuf runtime loader set before falling back to pixbuf and image-rs.
-async fn load_texture_oriented(path: &std::path::Path) -> Option<gdk4::Texture> {
+pub(crate) async fn load_texture_oriented(path: &std::path::Path) -> Option<gdk4::Texture> {
     let path_buf = path.to_path_buf();
     tokio::task::spawn_blocking(move || load_texture_blocking(&path_buf))
         .await

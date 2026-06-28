@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Context menu "Open With Mimick" upload flow. Right-clicking supported media files in a file manager and choosing Mimick opens a dedicated staging window with a masonry grid preview, select-all toggle, and Upload / Album buttons.
+- Video thumbnail extraction in the staging grid using ffmpeg, with secure temporary file handling via `tempfile::NamedTempFile`.
+- Selection checkboxes on grid tiles in both the staging view and library view. Unchecked tiles show a bordered square outline; checked tiles show an accent-coloured filled square with a checkmark icon.
+- Responsive narrow layout for the staging window via a 600sp libadwaita Breakpoint, matching the main library grid behaviour on small screens.
+- `.desktop` file now declares supported image and video MIME types so the system file manager offers "Open With Mimick" in its context menu.
+
+### Changed
+
+- Library view enable/disable toggle in Settings now auto-saves immediately on toggle, matching the behaviour of all other settings toggles. Previously it required clicking "Save Credentials".
+
+### Refactored
+
+- Split `paint_checkbox` into `paint_checked_box` and `paint_unchecked_box` helpers.
+- Split `build_staging_window` into `build_staging_ui`, `build_staging_header`, `setup_narrow_breakpoint`, `connect_select_all`, `connect_selection_tracking`, and `connect_upload_buttons`.
+- Split `present_album_list` into `present_album_list`, `handle_album_upload`, and `build_album_listbox`.
+- Split `spawn_enqueue_with_callback` by extracting `build_file_task` for per-path FileTask construction.
+- Split `ffmpeg_extract_thumbnail` into `run_ffmpeg_frame`, `scale_pixbuf_to_thumbnail`, and `decode_local_pixbuf`.
+- Extracted `status_text` and `simple_alert` shared helpers to reduce code duplication across the staging view.
+
 ## [9.7.0] - 2026-06-16
 
 ### Added

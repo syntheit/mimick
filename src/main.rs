@@ -603,6 +603,7 @@ async fn main() {
         let ctx_early = APP_CONTEXT.get().cloned();
         let want_settings = argv.contains(&"--settings".to_string());
         let want_library = argv.contains(&"--library".to_string());
+        let want_upload = argv.contains(&"--upload".to_string());
         let setup_required = ctx_early
             .as_ref()
             .map(|c| c.config.read().get_api_key().unwrap_or_default().is_empty())
@@ -616,7 +617,24 @@ async fn main() {
                 .expect("App context should be initialized before command-line activation")
         };
 
-        if want_settings || setup_required {
+        // Collect file path arguments (positional args that are not flags).
+        let file_args: Vec<std::path::PathBuf> = argv
+            .iter()
+            .skip(1) // skip binary name
+            .filter(|a| !a.starts_with("--"))
+            .map(std::path::PathBuf::from)
+            .filter(|p| crate::media_kinds::is_supported_path(p))
+            .collect();
+
+        if !file_args.is_empty() && !setup_required {
+            // Files were passed -- open the staging view.
+            crate::library::staging_view::build_staging_window(
+                app,
+                ctx_lookup(),
+                file_args,
+                want_upload,
+            );
+        } else if want_settings || setup_required {
             open_settings_window_now(app, ctx_lookup());
         } else if want_library {
             open_library_window_now(app, ctx_lookup());

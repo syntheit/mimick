@@ -97,6 +97,10 @@ mod imp {
         pub permission_warned: Cell<bool>,
         /// Cached video badge icon paintable, resolved lazily from the icon theme.
         pub video_icon: OnceCell<gdk4::Paintable>,
+        /// Cached checkbox icon (selected state).
+        pub check_icon: OnceCell<gdk4::Paintable>,
+        /// Cached checkbox icon (unselected state).
+        pub uncheck_icon: OnceCell<gdk4::Paintable>,
     }
 
     #[glib::object_subclass]
@@ -314,6 +318,11 @@ mod imp {
                 snapshot.append_color(&sctx.select_tint, &rect);
             }
 
+            // Checkbox badge in select mode.
+            if self.select_mode.get() {
+                self.paint_checkbox(snapshot, it.x, row.y, row.h, selected);
+            }
+
             // Video badge: paint a centred play icon over video asset cells.
             let is_video = asset
                 .property::<String>("asset-type")
@@ -371,6 +380,77 @@ mod imp {
                 icon_size as f64,
             );
             snapshot.restore();
+        }
+
+        /// Paint a checkbox indicator in the top-left corner of a tile.
+        fn paint_checkbox(
+            &self,
+            snapshot: &gtk::Snapshot,
+            cell_x: f32,
+            cell_y: f32,
+            cell_h: f32,
+            selected: bool,
+        ) {
+            let box_size = (cell_h * 0.14).clamp(16.0, 26.0);
+            let margin = 6.0_f32;
+            let bx = cell_x + margin;
+            let by = cell_y + margin;
+            if selected {
+                self.paint_checked_box(snapshot, bx, by, box_size);
+            } else {
+                Self::paint_unchecked_box(snapshot, bx, by, box_size);
+            }
+        }
+
+        /// Accent-filled square with a checkmark icon.
+        fn paint_checked_box(&self, snapshot: &gtk::Snapshot, bx: f32, by: f32, box_size: f32) {
+            let r = 4.0_f32;
+            let corner = Size::new(r, r);
+            let rect = Rect::new(bx, by, box_size, box_size);
+            let rounded = RoundedRect::new(rect, corner, corner, corner, corner);
+            snapshot.push_rounded_clip(&rounded);
+            snapshot.append_color(&accent_bg_color(), &rect);
+            snapshot.pop();
+
+            let icon = self
+                .check_icon
+                .get_or_init(|| resolve_symbolic_icon(&self.obj(), "object-select-symbolic"));
+            let inset = 3.0_f32;
+            let icon_size = box_size - inset * 2.0;
+            snapshot.save();
+            snapshot.translate(&gtk::graphene::Point::new(bx + inset, by + inset));
+            icon.snapshot(
+                snapshot.upcast_ref::<gdk4::Snapshot>(),
+                icon_size as f64,
+                icon_size as f64,
+            );
+            snapshot.restore();
+        }
+
+        /// Bordered empty square (outline only).
+        fn paint_unchecked_box(snapshot: &gtk::Snapshot, bx: f32, by: f32, box_size: f32) {
+            let r = 4.0_f32;
+            let border_w = 2.0_f32;
+            let corner = Size::new(r, r);
+            let outer_rect = Rect::new(bx, by, box_size, box_size);
+            let outer_round = RoundedRect::new(outer_rect, corner, corner, corner, corner);
+
+            snapshot.push_rounded_clip(&outer_round);
+            snapshot.append_color(&gdk4::RGBA::new(1.0, 1.0, 1.0, 0.8), &outer_rect);
+
+            let ir = (r - border_w).max(0.0);
+            let ic = Size::new(ir, ir);
+            let inner = Rect::new(
+                bx + border_w,
+                by + border_w,
+                box_size - border_w * 2.0,
+                box_size - border_w * 2.0,
+            );
+            let inner_round = RoundedRect::new(inner, ic, ic, ic, ic);
+            snapshot.push_rounded_clip(&inner_round);
+            snapshot.append_color(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.3), &inner);
+            snapshot.pop();
+            snapshot.pop();
         }
 
         fn queue_load_if_needed(
@@ -530,6 +610,12 @@ impl imp::SnapshotStats {
     }
 }
 
+/// Get the current theme accent background colour from libadwaita.
+fn accent_bg_color() -> gdk4::RGBA {
+    let accent = libadwaita::StyleManager::default().accent_color();
+    accent.to_rgba()
+}
+
 fn placeholder_color() -> gdk4::RGBA {
     if libadwaita::StyleManager::default().is_dark() {
         gdk4::RGBA::new(0.20, 0.20, 0.22, 1.0)
@@ -541,13 +627,17 @@ fn placeholder_color() -> gdk4::RGBA {
 /// Resolve the video badge icon from the icon theme. The result is cached
 /// per-canvas via a `OnceCell` so the theme lookup only happens once.
 fn resolve_video_icon(widget: &MasonryCanvas) -> gdk4::Paintable {
+    resolve_symbolic_icon(widget, "mimick-video-symbolic")
+}
+
+fn resolve_symbolic_icon(widget: &MasonryCanvas, icon_name: &str) -> gdk4::Paintable {
     let display = widget
         .native()
         .map(|n| n.display())
         .unwrap_or_else(|| gtk::gdk::Display::default().expect("default GDK display"));
     let theme = gtk::IconTheme::for_display(&display);
     let icon = theme.lookup_icon(
-        "mimick-video-symbolic",
+        icon_name,
         &[],
         48,
         1,
