@@ -383,9 +383,6 @@ mod imp {
         }
 
         /// Paint a checkbox indicator in the top-left corner of a tile.
-        ///
-        /// Unchecked: semi-transparent bordered square (outline only).
-        /// Checked: accent-coloured filled square with a checkmark icon.
         fn paint_checkbox(
             &self,
             snapshot: &gtk::Snapshot,
@@ -398,63 +395,62 @@ mod imp {
             let margin = 6.0_f32;
             let bx = cell_x + margin;
             let by = cell_y + margin;
+            if selected {
+                self.paint_checked_box(snapshot, bx, by, box_size);
+            } else {
+                Self::paint_unchecked_box(snapshot, bx, by, box_size);
+            }
+        }
 
+        /// Accent-filled square with a checkmark icon.
+        fn paint_checked_box(&self, snapshot: &gtk::Snapshot, bx: f32, by: f32, box_size: f32) {
             let r = 4.0_f32;
+            let corner = Size::new(r, r);
+            let rect = Rect::new(bx, by, box_size, box_size);
+            let rounded = RoundedRect::new(rect, corner, corner, corner, corner);
+            snapshot.push_rounded_clip(&rounded);
+            snapshot.append_color(&accent_bg_color(), &rect);
+            snapshot.pop();
+
+            let icon = self
+                .check_icon
+                .get_or_init(|| resolve_symbolic_icon(&self.obj(), "object-select-symbolic"));
+            let inset = 3.0_f32;
+            let icon_size = box_size - inset * 2.0;
+            snapshot.save();
+            snapshot.translate(&gtk::graphene::Point::new(bx + inset, by + inset));
+            icon.snapshot(
+                snapshot.upcast_ref::<gdk4::Snapshot>(),
+                icon_size as f64,
+                icon_size as f64,
+            );
+            snapshot.restore();
+        }
+
+        /// Bordered empty square (outline only).
+        fn paint_unchecked_box(snapshot: &gtk::Snapshot, bx: f32, by: f32, box_size: f32) {
+            let r = 4.0_f32;
+            let border_w = 2.0_f32;
             let corner = Size::new(r, r);
             let outer_rect = Rect::new(bx, by, box_size, box_size);
             let outer_round = RoundedRect::new(outer_rect, corner, corner, corner, corner);
 
-            if selected {
-                // Filled square with theme accent colour.
-                let accent = accent_bg_color();
-                snapshot.push_rounded_clip(&outer_round);
-                snapshot.append_color(&accent, &outer_rect);
-                snapshot.pop();
+            snapshot.push_rounded_clip(&outer_round);
+            snapshot.append_color(&gdk4::RGBA::new(1.0, 1.0, 1.0, 0.8), &outer_rect);
 
-                // Checkmark icon inside.
-                let icon = self
-                    .check_icon
-                    .get_or_init(|| resolve_symbolic_icon(&self.obj(), "object-select-symbolic"));
-                let icon_inset = 3.0_f32;
-                let icon_size = box_size - icon_inset * 2.0;
-                snapshot.save();
-                snapshot.translate(&gtk::graphene::Point::new(bx + icon_inset, by + icon_inset));
-                icon.snapshot(
-                    snapshot.upcast_ref::<gdk4::Snapshot>(),
-                    icon_size as f64,
-                    icon_size as f64,
-                );
-                snapshot.restore();
-            } else {
-                // Outlined square: draw outer bg then inner cutout for border effect.
-                let border_w = 2.0_f32;
-                let border_color = gdk4::RGBA::new(1.0, 1.0, 1.0, 0.8);
-                let inner_color = gdk4::RGBA::new(0.0, 0.0, 0.0, 0.3);
-
-                snapshot.push_rounded_clip(&outer_round);
-                snapshot.append_color(&border_color, &outer_rect);
-
-                let inner_rect = Rect::new(
-                    bx + border_w,
-                    by + border_w,
-                    box_size - border_w * 2.0,
-                    box_size - border_w * 2.0,
-                );
-                let ir = (r - border_w).max(0.0);
-                let inner_corner = Size::new(ir, ir);
-                let inner_round = RoundedRect::new(
-                    inner_rect,
-                    inner_corner,
-                    inner_corner,
-                    inner_corner,
-                    inner_corner,
-                );
-                snapshot.push_rounded_clip(&inner_round);
-                snapshot.append_color(&inner_color, &inner_rect);
-                snapshot.pop();
-
-                snapshot.pop();
-            }
+            let ir = (r - border_w).max(0.0);
+            let ic = Size::new(ir, ir);
+            let inner = Rect::new(
+                bx + border_w,
+                by + border_w,
+                box_size - border_w * 2.0,
+                box_size - border_w * 2.0,
+            );
+            let inner_round = RoundedRect::new(inner, ic, ic, ic, ic);
+            snapshot.push_rounded_clip(&inner_round);
+            snapshot.append_color(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.3), &inner);
+            snapshot.pop();
+            snapshot.pop();
         }
 
         fn queue_load_if_needed(

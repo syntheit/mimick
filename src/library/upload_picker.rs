@@ -78,49 +78,9 @@ pub(super) fn spawn_enqueue_with_callback<F>(
         let total = paths.len();
         let mut queued = 0usize;
         for path in paths {
-            let Some(path_str) = path.to_str().map(str::to_owned) else {
-                log::warn!("Skipping non-UTF8 upload path: {}", path.display());
-                continue;
-            };
-            let watch_path = path
-                .parent()
-                .and_then(|p| p.to_str())
-                .map(str::to_owned)
-                .unwrap_or_default();
-            let hash_target = path_str.clone();
-            let checksum =
-                match tokio::task::spawn_blocking(move || compute_sha1_chunked(&hash_target)).await
-                {
-                    Ok(Ok(c)) => c,
-                    Ok(Err(err)) => {
-                        log::warn!("Could not checksum upload '{}': {}", path_str, err);
-                        continue;
-                    }
-                    Err(err) => {
-                        log::warn!("Checksum task failed for '{}': {}", path_str, err);
-                        continue;
-                    }
-                };
-            let sidecar_path = if ctx.config.read().data.upload_xmp_sidecars {
-                crate::sidecar::find_sidecar(&path).map(|p| p.to_string_lossy().into_owned())
-            } else {
-                None
-            };
-            let task = FileTask {
-                path: path_str,
-                watch_path,
-                checksum,
-                album_id: album.as_ref().map(|(id, _)| id.clone()),
-                album_name: album.as_ref().map(|(_, name)| name.clone()),
-                reassociate_only: false,
-                // When the user uploads from the library / albums / explore
-                // view (album=None) the asset must land album-less; the
-                // queue's parent-dir-as-album fallback would otherwise create
-                // a junk album named after the user's file system layout.
-                skip_album: album.is_none(),
-                sidecar_path,
-            };
-            if ctx.queue_manager.add_to_queue(task).await {
+            if let Some(task) = build_file_task(&ctx, &album, &path).await
+                && ctx.queue_manager.add_to_queue(task).await
+            {
                 queued += 1;
             }
         }
@@ -132,4 +92,46 @@ pub(super) fn spawn_enqueue_with_callback<F>(
         );
         on_complete(queued, skipped);
     });
+}
+
+/// Build a `FileTask` for a single path, computing checksum and resolving sidecar.
+async fn build_file_task(
+    ctx: &AppContext,
+    album: &Option<(String, String)>,
+    path: &std::path::Path,
+) -> Option<FileTask> {
+    let path_str = path.to_str().map(str::to_owned)?;
+    let watch_path = path
+        .parent()
+        .and_then(|p| p.to_str())
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let hash_target = path_str.clone();
+    let checksum =
+        match tokio::task::spawn_blocking(move || compute_sha1_chunked(&hash_target)).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(err)) => {
+                log::warn!("Could not checksum upload '{}': {}", path_str, err);
+                return None;
+            }
+            Err(err) => {
+                log::warn!("Checksum task failed for '{}': {}", path_str, err);
+                return None;
+            }
+        };
+    let sidecar_path = if ctx.config.read().data.upload_xmp_sidecars {
+        crate::sidecar::find_sidecar(path).map(|p| p.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    Some(FileTask {
+        path: path_str,
+        watch_path,
+        checksum,
+        album_id: album.as_ref().map(|(id, _)| id.clone()),
+        album_name: album.as_ref().map(|(_, name)| name.clone()),
+        reassociate_only: false,
+        skip_album: album.is_none(),
+        sidecar_path,
+    })
 }

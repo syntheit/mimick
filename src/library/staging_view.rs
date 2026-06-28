@@ -45,169 +45,29 @@ pub fn build_staging_window(
         .height_request(400)
         .build();
 
-    // --- Header bar ---
-    let header = libadwaita::HeaderBar::builder()
-        .show_start_title_buttons(true)
-        .show_end_title_buttons(true)
-        .build();
+    let (upload_btn, upload_album_btn, select_all_btn, grid, status_label) =
+        build_staging_ui(&window, &ctx, &files);
+    setup_narrow_breakpoint(&window, &grid);
 
-    let upload_btn = gtk::Button::builder()
-        .label("Upload")
-        .tooltip_text("Upload selected files to library")
-        .css_classes(["suggested-action", "mimick-pressable"])
-        .build();
-    let upload_album_btn = gtk::Button::builder()
-        .label("Album")
-        .tooltip_text("Upload selected files to an album")
-        .css_classes(["mimick-pressable"])
-        .build();
-    let select_all_btn = gtk::Button::builder()
-        .icon_name("edit-select-all-symbolic")
-        .tooltip_text("Select all / Deselect all")
-        .css_classes(["mimick-pressable"])
-        .build();
-
-    header.pack_start(&upload_btn);
-    header.pack_start(&upload_album_btn);
-    header.pack_end(&select_all_btn);
-
-    let toolbar = libadwaita::ToolbarView::builder().build();
-    toolbar.add_top_bar(&header);
-
-    // --- Grid ---
-    let select_toggle = gtk::ToggleButton::builder()
-        .active(true) // staging view starts in select mode
-        .build();
-    let narrow = Rc::new(Cell::new(false));
-    let grid = build_grid_view(ctx.clone(), select_toggle.clone(), narrow.clone());
-    // Always show select checkboxes in staging view.
-    grid.canvas.set_select_mode(true);
-
-    // Populate model from file paths.
-    let assets = build_staging_assets(&files);
-    grid.model.reset_with_objects(assets);
-
-    // --- Status bar ---
-    let status_label = gtk::Label::builder()
-        .halign(gtk::Align::Start)
-        .hexpand(true)
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(4)
-        .margin_bottom(4)
-        .build();
     let file_count = grid.model.n_items();
-    status_label.set_text(&format!("{} file(s) staged", file_count));
-
-    toolbar.set_content(Some(&grid.scrolled));
-    toolbar.add_bottom_bar(&status_label);
-    window.set_content(Some(&toolbar));
-
-    // --- Responsive narrow breakpoint (matches main library window at 600sp) ---
-    {
-        let breakpoint = libadwaita::Breakpoint::new(
-            libadwaita::BreakpointCondition::parse("max-width: 600sp")
-                .expect("valid breakpoint condition"),
-        );
-        let narrow_flag = narrow.clone();
-        let canvas_for_apply = grid.canvas.clone();
-        breakpoint.connect_apply(move |_| {
-            narrow_flag.set(true);
-            canvas_for_apply.set_narrow(true);
-        });
-        let narrow_flag = narrow.clone();
-        let canvas_for_unapply = grid.canvas.clone();
-        breakpoint.connect_unapply(move |_| {
-            narrow_flag.set(false);
-            canvas_for_unapply.set_narrow(false);
-        });
-        window.add_breakpoint(breakpoint);
-    }
-
-    // --- Clone captures for closures ---
     let files_rc = Rc::new(files);
     let selection = grid.selection.clone();
 
-    // --- Select All / Deselect All ---
-    {
-        let sel = selection.clone();
-        let lbl = status_label.clone();
-        let n = file_count;
-        let all_selected = Rc::new(Cell::new(false));
-        select_all_btn.connect_clicked(move |btn| {
-            if all_selected.get() {
-                sel.unselect_all();
-                btn.set_icon_name("edit-select-all-symbolic");
-                btn.set_tooltip_text(Some("Select all"));
-                all_selected.set(false);
-                lbl.set_text(&format!("{} file(s) staged", n));
-            } else {
-                sel.select_all();
-                btn.set_icon_name("edit-clear-all-symbolic");
-                btn.set_tooltip_text(Some("Deselect all"));
-                all_selected.set(true);
-                lbl.set_text(&format!("{} of {} selected", n, n));
-            }
-        });
-    }
-
-    // --- Track selection count ---
-    {
-        let sel = selection.clone();
-        let lbl = status_label.clone();
-        sel.connect_selection_changed(move |sel, _, _| {
-            let total = sel.n_items();
-            let selected = count_selected(sel);
-            if selected == 0 {
-                lbl.set_text(&format!("{} file(s) staged", total));
-            } else {
-                lbl.set_text(&format!("{} of {} selected", selected, total));
-            }
-        });
-    }
-
-    // --- Upload (library, no album) ---
-    {
-        let ctx_c = ctx.clone();
-        let sel = selection.clone();
-        let files_c = files_rc.clone();
-        let win = window.clone();
-        upload_btn.connect_clicked(move |_| {
-            let paths = selected_paths(&sel, &files_c);
-            if paths.is_empty() {
-                return;
-            }
-            let win_c = win.clone();
-            upload_picker::spawn_enqueue_with_callback(
-                ctx_c.clone(),
-                None,
-                paths,
-                move |queued, skipped| show_upload_result(&win_c, queued, skipped),
-            );
-        });
-    }
-
-    // --- Upload to Album ---
-    {
-        let ctx_c = ctx.clone();
-        let sel = selection.clone();
-        let files_c = files_rc.clone();
-        let win = window.clone();
-        upload_album_btn.connect_clicked(move |_| {
-            let paths = selected_paths(&sel, &files_c);
-            if paths.is_empty() {
-                return;
-            }
-            show_album_picker(win.clone(), ctx_c.clone(), paths);
-        });
-    }
+    connect_select_all(&select_all_btn, &selection, &status_label, file_count);
+    connect_selection_tracking(&selection, &status_label);
+    connect_upload_buttons(
+        &upload_btn,
+        &upload_album_btn,
+        &ctx,
+        &selection,
+        &files_rc,
+        &window,
+    );
 
     window.present();
 
-    // Auto-upload mode: immediately trigger album picker.
     if auto_upload {
         let all_paths = files_rc.to_vec();
-        // Select all items first.
         selection.select_all();
         glib::idle_add_local_once(clone!(
             #[strong]
@@ -219,6 +79,185 @@ pub fn build_staging_window(
             }
         ));
     }
+}
+
+/// Build header, grid, toolbar, status bar and return the interactive widgets.
+#[allow(clippy::type_complexity)]
+fn build_staging_ui(
+    window: &libadwaita::ApplicationWindow,
+    ctx: &Arc<AppContext>,
+    files: &[PathBuf],
+) -> (
+    gtk::Button,
+    gtk::Button,
+    gtk::Button,
+    crate::library::masonry::grid_view::GridViewParts,
+    gtk::Label,
+) {
+    let (header, upload_btn, upload_album_btn, select_all_btn) = build_staging_header();
+    let toolbar = libadwaita::ToolbarView::builder().build();
+    toolbar.add_top_bar(&header);
+
+    let select_toggle = gtk::ToggleButton::builder().active(true).build();
+    let narrow = Rc::new(Cell::new(false));
+    let grid = build_grid_view(ctx.clone(), select_toggle.clone(), narrow.clone());
+    grid.canvas.set_select_mode(true);
+    grid.model.reset_with_objects(build_staging_assets(files));
+
+    let status_label = gtk::Label::builder()
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    status_label.set_text(&status_text(0, grid.model.n_items()));
+
+    toolbar.set_content(Some(&grid.scrolled));
+    toolbar.add_bottom_bar(&status_label);
+    window.set_content(Some(&toolbar));
+
+    (
+        upload_btn,
+        upload_album_btn,
+        select_all_btn,
+        grid,
+        status_label,
+    )
+}
+
+/// Build the staging header bar with upload, album, and select-all buttons.
+fn build_staging_header() -> (libadwaita::HeaderBar, gtk::Button, gtk::Button, gtk::Button) {
+    let header = libadwaita::HeaderBar::builder()
+        .show_start_title_buttons(true)
+        .show_end_title_buttons(true)
+        .build();
+    let upload_btn = gtk::Button::builder()
+        .label("Upload")
+        .tooltip_text("Upload selected files to library")
+        .css_classes(["suggested-action", "mimick-pressable"])
+        .build();
+    let album_btn = gtk::Button::builder()
+        .label("Album")
+        .tooltip_text("Upload selected files to an album")
+        .css_classes(["mimick-pressable"])
+        .build();
+    let select_btn = gtk::Button::builder()
+        .icon_name("edit-select-all-symbolic")
+        .tooltip_text("Select all / Deselect all")
+        .css_classes(["mimick-pressable"])
+        .build();
+    header.pack_start(&upload_btn);
+    header.pack_start(&album_btn);
+    header.pack_end(&select_btn);
+    (header, upload_btn, album_btn, select_btn)
+}
+
+/// Install a 600sp breakpoint to toggle narrow grid layout.
+fn setup_narrow_breakpoint(
+    window: &libadwaita::ApplicationWindow,
+    grid: &crate::library::masonry::grid_view::GridViewParts,
+) {
+    let bp = libadwaita::Breakpoint::new(
+        libadwaita::BreakpointCondition::parse("max-width: 600sp")
+            .expect("valid breakpoint condition"),
+    );
+    let c1 = grid.canvas.clone();
+    bp.connect_apply(move |_| c1.set_narrow(true));
+    let c2 = grid.canvas.clone();
+    bp.connect_unapply(move |_| c2.set_narrow(false));
+    window.add_breakpoint(bp);
+}
+
+fn connect_select_all(
+    btn: &gtk::Button,
+    selection: &gtk::MultiSelection,
+    status_label: &gtk::Label,
+    file_count: u32,
+) {
+    let sel = selection.clone();
+    let lbl = status_label.clone();
+    let n = file_count;
+    let all_selected = Rc::new(Cell::new(false));
+    btn.connect_clicked(move |btn| {
+        if all_selected.get() {
+            sel.unselect_all();
+            btn.set_icon_name("edit-select-all-symbolic");
+            btn.set_tooltip_text(Some("Select all"));
+            all_selected.set(false);
+            lbl.set_text(&status_text(0, n));
+        } else {
+            sel.select_all();
+            btn.set_icon_name("edit-clear-all-symbolic");
+            btn.set_tooltip_text(Some("Deselect all"));
+            all_selected.set(true);
+            lbl.set_text(&status_text(n, n));
+        }
+    });
+}
+
+fn connect_selection_tracking(selection: &gtk::MultiSelection, status_label: &gtk::Label) {
+    let sel = selection.clone();
+    let lbl = status_label.clone();
+    sel.connect_selection_changed(move |sel, _, _| {
+        let total = sel.n_items();
+        let selected = count_selected(sel);
+        lbl.set_text(&status_text(selected, total));
+    });
+}
+
+/// Format the status bar text for selected/total counts.
+fn status_text(selected: u32, total: u32) -> String {
+    if selected == 0 {
+        format!("{} file(s) staged", total)
+    } else {
+        format!("{} of {} selected", selected, total)
+    }
+}
+
+/// Wire both upload buttons; they share identical clone setup, differing only in action.
+fn connect_upload_buttons(
+    upload_btn: &gtk::Button,
+    album_btn: &gtk::Button,
+    ctx: &Arc<AppContext>,
+    selection: &gtk::MultiSelection,
+    files_rc: &Rc<Vec<PathBuf>>,
+    window: &libadwaita::ApplicationWindow,
+) {
+    let (sel1, files1, ctx1, win1) = (
+        selection.clone(),
+        files_rc.clone(),
+        ctx.clone(),
+        window.clone(),
+    );
+    upload_btn.connect_clicked(move |_| {
+        let paths = selected_paths(&sel1, &files1);
+        if paths.is_empty() {
+            return;
+        }
+        let w = win1.clone();
+        upload_picker::spawn_enqueue_with_callback(
+            ctx1.clone(),
+            None,
+            paths,
+            move |queued, skipped| show_upload_result(&w, queued, skipped),
+        );
+    });
+
+    let (sel2, files2, ctx2, win2) = (
+        selection.clone(),
+        files_rc.clone(),
+        ctx.clone(),
+        window.clone(),
+    );
+    album_btn.connect_clicked(move |_| {
+        let paths = selected_paths(&sel2, &files2);
+        if paths.is_empty() {
+            return;
+        }
+        show_album_picker(win2.clone(), ctx2.clone(), paths);
+    });
 }
 
 /// Build `AssetObject` entries from local file paths for the staging grid.
@@ -320,14 +359,9 @@ fn show_album_picker(
     ctx: Arc<AppContext>,
     paths: Vec<PathBuf>,
 ) {
-    let dialog = libadwaita::AlertDialog::builder()
-        .heading("Upload to Album")
-        .body("Loading albums...")
-        .build();
-    dialog.add_response("cancel", "Cancel");
+    let dialog = simple_alert("Upload to Album", "Loading albums...", "cancel", "Cancel");
     dialog.present(Some(&parent));
 
-    // Fetch albums asynchronously and present the list.
     let ctx_c = ctx.clone();
     let parent_c = parent.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -335,12 +369,7 @@ fn show_album_picker(
             Ok(a) => a,
             Err(err) => {
                 dialog.force_close();
-                let err_dialog = libadwaita::AlertDialog::builder()
-                    .heading("Failed to Load Albums")
-                    .body(&err)
-                    .build();
-                err_dialog.add_response("ok", "OK");
-                err_dialog.present(Some(&parent_c));
+                simple_alert("Failed to Load Albums", &err, "ok", "OK").present(Some(&parent_c));
                 return;
             }
         };
@@ -363,12 +392,56 @@ fn present_album_list(
         .build();
     dialog.add_response("cancel", "Cancel");
 
+    let (scroll, listbox) = build_album_listbox(&albums);
+    dialog.set_extra_child(Some(&scroll));
+
+    let albums_rc = Rc::new(albums);
+    let paths_rc = Rc::new(paths);
+    let ctx_c = ctx.clone();
+    dialog.connect_response(None, move |_dialog, response| {
+        if response == "cancel" {
+            return;
+        }
+        handle_album_upload(&listbox, &albums_rc, &ctx_c, &paths_rc, &parent_for_result);
+    });
+
+    dialog.add_response("upload", "Upload");
+    dialog.set_response_appearance("upload", libadwaita::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("upload"));
+    dialog.present(Some(&parent));
+}
+
+/// Handle the album upload response: look up selected row and enqueue.
+fn handle_album_upload(
+    listbox: &gtk::ListBox,
+    albums: &[LibraryAlbum],
+    ctx: &Arc<AppContext>,
+    paths: &Rc<Vec<PathBuf>>,
+    parent: &libadwaita::ApplicationWindow,
+) {
+    let Some(row) = listbox.selected_row() else {
+        return;
+    };
+    let idx = row.index() as usize;
+    if let Some(album) = albums.get(idx) {
+        let album_arg = Some((album.id.clone(), album.album_name.clone()));
+        let parent_c = parent.clone();
+        upload_picker::spawn_enqueue_with_callback(
+            ctx.clone(),
+            album_arg,
+            paths.to_vec(),
+            move |queued, skipped| show_upload_result(&parent_c, queued, skipped),
+        );
+    }
+}
+
+/// Build the scrollable album list for the picker dialog.
+fn build_album_listbox(albums: &[LibraryAlbum]) -> (gtk::ScrolledWindow, gtk::ListBox) {
     let listbox = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
         .css_classes(["boxed-list"])
         .build();
-
-    for album in &albums {
+    for album in albums {
         let row = libadwaita::ActionRow::builder()
             .title(&album.album_name)
             .subtitle(format!("{} assets", album.asset_count))
@@ -376,59 +449,13 @@ fn present_album_list(
             .build();
         listbox.append(&row);
     }
-
     let scroll = gtk::ScrolledWindow::builder()
         .child(&listbox)
         .min_content_height(200)
         .max_content_height(400)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
-    dialog.set_extra_child(Some(&scroll));
-
-    let albums_rc = Rc::new(albums);
-    let paths_rc = Rc::new(paths);
-    let ctx_c = ctx.clone();
-    let listbox_ref = listbox.clone();
-
-    dialog.connect_response(
-        None,
-        clone!(
-            #[strong]
-            albums_rc,
-            #[strong]
-            paths_rc,
-            #[strong]
-            ctx_c,
-            #[strong]
-            listbox_ref,
-            move |_dialog, response| {
-                if response == "cancel" {
-                    return;
-                }
-                let Some(row) = listbox_ref.selected_row() else {
-                    return;
-                };
-                let idx = row.index() as usize;
-                if let Some(album) = albums_rc.get(idx) {
-                    let album_arg = Some((album.id.clone(), album.album_name.clone()));
-                    let parent_c = parent_for_result.clone();
-                    upload_picker::spawn_enqueue_with_callback(
-                        ctx_c.clone(),
-                        album_arg,
-                        paths_rc.to_vec(),
-                        move |queued, skipped| show_upload_result(&parent_c, queued, skipped),
-                    );
-                }
-            }
-        ),
-    );
-
-    // Add an "Upload" response that the user clicks after selecting a row.
-    dialog.add_response("upload", "Upload");
-    dialog.set_response_appearance("upload", libadwaita::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("upload"));
-
-    dialog.present(Some(&parent));
+    (scroll, listbox)
 }
 
 /// Show a result dialog after upload enqueue completes.
@@ -459,12 +486,22 @@ fn show_upload_result(parent: &libadwaita::ApplicationWindow, queued: usize, ski
         )
     };
 
+    simple_alert(heading, &body, "ok", "OK").present(Some(parent));
+}
+
+/// Create a one-button `AlertDialog` (shared pattern used by multiple dialogs).
+fn simple_alert(
+    heading: &str,
+    body: &str,
+    response_id: &str,
+    response_label: &str,
+) -> libadwaita::AlertDialog {
     let dialog = libadwaita::AlertDialog::builder()
         .heading(heading)
-        .body(&body)
+        .body(body)
         .build();
-    dialog.add_response("ok", "OK");
-    dialog.present(Some(parent));
+    dialog.add_response(response_id, response_label);
+    dialog
 }
 
 #[cfg(test)]
