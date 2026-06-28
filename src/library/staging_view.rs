@@ -82,7 +82,6 @@ pub fn build_staging_window(
 }
 
 /// Build header, grid, toolbar, status bar and return the interactive widgets.
-#[allow(clippy::type_complexity)]
 fn build_staging_ui(
     window: &libadwaita::ApplicationWindow,
     ctx: &Arc<AppContext>,
