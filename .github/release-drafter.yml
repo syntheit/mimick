@@ -10,8 +10,31 @@ template: |
 
   $CONTRIBUTORS
 
-exclude-labels:
-  - 'skip-changelog'
+categories:
+  - type: "pre-exclude"
+    when:
+      label: 'skip-changelog'
+  - type: "version-resolver"
+    semver-increment: "major"
+    when:
+      label: 'major'
+  - type: "version-resolver"
+    semver-increment: "minor"
+    when:
+      labels:
+        - 'enhancement'
+        - 'feature'
+  - type: "version-resolver"
+    semver-increment: "patch"
+    when:
+      labels:
+        - 'bug'
+        - 'dependencies'
+        - 'documentation'
+        - 'rust'
+        - 'github-actions'
+  - type: "version-resolver"
+    semver-increment: "patch"
 
 autolabeler:
   - label: 'documentation'
@@ -27,20 +50,3 @@ autolabeler:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'src/**'
-
-version-resolver:
-  major:
-    labels:
-      - 'major'
-  minor:
-    labels:
-      - 'enhancement'
-      - 'feature'
-  patch:
-    labels:
-      - 'bug'
-      - 'dependencies'
-      - 'documentation'
-      - 'rust'
-      - 'github-actions'
-  default: patch
