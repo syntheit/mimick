@@ -368,11 +368,18 @@ pub fn build_settings_window_with_parent(
         download_clear_btn,
     } = library::build_library_group(&settings_page);
 
+    let ctx_for_library = ctx.clone();
     library_view_row.connect_active_notify(glib::clone!(
         #[weak]
         library_group,
         move |row| {
-            library_group.set_visible(row.is_active());
+            let active = row.is_active();
+            library_group.set_visible(active);
+            let mut cfg = ctx_for_library.config.write();
+            if cfg.data.library_view_enabled != active {
+                cfg.data.library_view_enabled = active;
+                cfg.save();
+            }
         }
     ));
 
