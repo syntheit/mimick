@@ -178,18 +178,8 @@ fn build_asset_objects(assets: &[LibraryAsset], ctx: &AppContext) -> Vec<AssetOb
                 .as_ref()
                 .map(|e| (e.exif_image_width, e.exif_image_height))
                 .unwrap_or((None, None));
-            let width = asset
-                .width
-                .map(|v| v.max(0.0) as u32)
-                .filter(|v| *v > 0)
-                .or(exif_w)
-                .unwrap_or(0);
-            let height = asset
-                .height
-                .map(|v| v.max(0.0) as u32)
-                .filter(|v| *v > 0)
-                .or(exif_h)
-                .unwrap_or(0);
+            let width = asset.width.filter(|v| *v > 0).or(exif_w).unwrap_or(0);
+            let height = asset.height.filter(|v| *v > 0).or(exif_h).unwrap_or(0);
             let object = AssetObject::new(AssetInit {
                 id: &asset.id,
                 filename: &asset.filename,

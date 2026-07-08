@@ -171,12 +171,12 @@ pub(crate) fn project_albums<'a>(
     let owned: Vec<&LibraryAlbum> = sorted
         .iter()
         .copied()
-        .filter(|a| !current_user.is_empty() && a.owner_id == current_user)
+        .filter(|a| !current_user.is_empty() && a.owner_id() == current_user)
         .collect();
     let shared: Vec<&LibraryAlbum> = sorted
         .iter()
         .copied()
-        .filter(|a| !current_user.is_empty() && a.owner_id != current_user)
+        .filter(|a| !current_user.is_empty() && a.owner_id() != current_user)
         .collect();
 
     (recent, owned, shared)
@@ -346,6 +346,8 @@ fn clear(flow: &gtk::FlowBox) {
 mod tests {
     use super::*;
 
+    use crate::api_client::{AlbumUser, AlbumUserInfo};
+
     fn album(id: &str, name: &str, owner: &str, count: u32, created: &str) -> LibraryAlbum {
         LibraryAlbum {
             id: id.into(),
@@ -355,8 +357,10 @@ mod tests {
             created_at: created.into(),
             updated_at: created.into(),
             description: String::new(),
-            owner_id: owner.into(),
-            shared: false,
+            album_users: vec![AlbumUser {
+                user: AlbumUserInfo { id: owner.into() },
+                role: "owner".into(),
+            }],
         }
     }
 

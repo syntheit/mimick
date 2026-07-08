@@ -327,8 +327,8 @@ mod tests {
             created_at: format!("2024-01-0{}T00:00:00.000Z", id),
             asset_type: "IMAGE".into(),
             thumbhash: None,
-            width: Some(10.0),
-            height: Some(10.0),
+            width: Some(10),
+            height: Some(10),
             checksum: None,
             exif_info: None,
         }

@@ -25,5 +25,11 @@ if ! command -v cargo-audit &>/dev/null; then
 fi
 cargo audit --deny warnings
 
+step "Validating desktop file..."
+desktop-file-validate setup/dev.nicx.mimick.desktop
+
+step "Validating metainfo..."
+appstreamcli validate --explain setup/metainfo/dev.nicx.mimick.metainfo.xml
+
 echo ""
 echo "All checks passed successfully!"

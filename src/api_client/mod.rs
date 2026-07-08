@@ -81,12 +81,44 @@ pub struct LibraryAlbum {
     /// User description of the album.
     #[serde(default)]
     pub description: String,
-    /// Owner identifier.
-    #[serde(rename = "ownerId", default)]
-    pub owner_id: String,
-    /// True if the album is shared.
-    #[serde(default)]
-    pub shared: bool,
+    /// Users associated with this album (owner + editors + viewers).
+    /// In Immich v3 the top-level `ownerId` was removed; ownership is now
+    /// represented as an entry in this list with `role == "owner"`.
+    #[serde(rename = "albumUsers", default)]
+    pub album_users: Vec<AlbumUser>,
+}
+
+impl LibraryAlbum {
+    /// Extract the owner's user ID from the `albumUsers` list.
+    /// Returns an empty string when no owner entry is present.
+    pub fn owner_id(&self) -> &str {
+        self.album_users
+            .iter()
+            .find(|u| u.role == "owner")
+            .map(|u| u.user.id.as_str())
+            .unwrap_or("")
+    }
+
+    /// Whether the album is shared (has more than one user).
+    pub fn is_shared(&self) -> bool {
+        self.album_users.len() > 1
+    }
+}
+
+/// A user entry within an album's user list.
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct AlbumUser {
+    /// User details.
+    pub user: AlbumUserInfo,
+    /// Role in the album ("owner", "editor", or "viewer").
+    pub role: String,
+}
+
+/// Minimal user identity nested inside an `AlbumUser`.
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct AlbumUserInfo {
+    /// Unique user identifier.
+    pub id: String,
 }
 
 /// Detailed Immich library asset representation.
@@ -109,9 +141,9 @@ pub struct LibraryAsset {
     /// Thumbhash representation for preview blur effects.
     pub thumbhash: Option<String>,
     /// Display width in pixels.
-    pub width: Option<f64>,
+    pub width: Option<u32>,
     /// Display height in pixels.
-    pub height: Option<f64>,
+    pub height: Option<u32>,
     /// Canonical lowercase SHA-1 checksum.
     #[serde(default, deserialize_with = "deserialize_checksum_to_hex")]
     pub checksum: Option<String>,
@@ -846,8 +878,8 @@ mod tests {
             "fileCreatedAt": "2024-01-01T12:00:00.000Z",
             "type": "IMAGE",
             "thumbhash": "abcd",
-            "width": 4032.0,
-            "height": 3024.0
+            "width": 4032,
+            "height": 3024
         }))
         .unwrap();
 
@@ -856,8 +888,8 @@ mod tests {
         assert_eq!(asset.mime_type, "image/jpeg");
         assert_eq!(asset.asset_type, "IMAGE");
         assert_eq!(asset.thumbhash.as_deref(), Some("abcd"));
-        assert_eq!(asset.width, Some(4032.0));
-        assert_eq!(asset.height, Some(3024.0));
+        assert_eq!(asset.width, Some(4032));
+        assert_eq!(asset.height, Some(3024));
         assert!(asset.checksum.is_none());
     }
 
@@ -873,8 +905,8 @@ mod tests {
                         "fileCreatedAt": "2024-01-01T12:00:00.000Z",
                         "type": "IMAGE",
                         "thumbhash": null,
-                        "width": 12.0,
-                        "height": 10.0
+                        "width": 12,
+                        "height": 10
                     }
                 ]
             }
