@@ -113,7 +113,7 @@
   <releases>
     <release version="9.8.0" date="2026-07-08">
       <description>
-        <p>This release updates Mimick for the Immich v3 API. Immich v3.0 or later is now required.</p>
+        <p>This release updates Mimick for the Immich v3 API. Immich v3.0.0 or later is now required.</p>
         <ul>
           <li>Updated upload flow for Immich v3 API compatibility.</li>
           <li>Context menu upload flow. Right-clicking supported media files in a file manager and choosing Mimick opens a staging window with a masonry preview grid and album picker.</li>
