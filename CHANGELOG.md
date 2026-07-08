@@ -17,7 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Minimum supported Immich version is now v3.0+. The v1.x API is no longer supported.
+- Upload requests no longer send `deviceAssetId` or `deviceId` multipart fields, which were removed from the Immich v3 `AssetMediaCreateDto`. Deduplication continues to work via the existing SHA-1 checksum-based `bulk-upload-check`.
+- Album ownership is now derived from the Immich v3 `albumUsers` array (role-based) instead of the removed top-level `ownerId` field. The Owned/Shared album sections in the Library view continue to work as before.
+- Asset `width`/`height` fields are now deserialized as integers (`u32`) to match the Immich v3 schema change from `number` to `integer`.
 - Library view enable/disable toggle in Settings now auto-saves immediately on toggle, matching the behaviour of all other settings toggles. Previously it required clicking "Save Credentials".
+- Bumped `taiki-e/install-action` from v2.82.3 to v2.82.7 in CI.
+- Bumped `release-drafter/release-drafter` from v7.4.0 to v7.5.1 in CI.
+- Suppressed `RUSTSEC-2026-0192` (`ttf-parser` unmaintained) in `cargo audit`. This is a transitive dependency via `resvg` with no upstream fix available yet.
 
 ### Refactored
 

@@ -1,8 +1,8 @@
 //! Asset upload flow including duplicate detection, checksum computation, and retry logic.
 //!
-//! Builds a multipart request with the file payload, EXIF-derived timestamps,
-//! and a device-unique asset ID. After a successful upload, the asset is
-//! assigned to the target album and a timezone fixup is scheduled.
+//! Builds a multipart request with the file payload and EXIF-derived timestamps.
+//! After a successful upload, the asset is assigned to the target album and a
+//! timezone fixup is scheduled.
 
 use std::path::Path;
 use std::time::Duration;
@@ -47,16 +47,10 @@ impl ImmichApiClient {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "upload".to_string());
-        let device_asset_id = format!("mimick-rust-{}", checksum);
-        let device_id = "mimick-rust-client".to_string();
         let mime = mime_for_path(path);
 
         log::info!("Uploading: {} ({} bytes)", file_path, meta.len());
-        log::debug!(
-            "  device_asset_id={}, created={}",
-            device_asset_id,
-            created_at
-        );
+        log::debug!("  checksum={}, created={}", checksum, created_at);
         let file_len = meta.len();
 
         // Stream the file body so large videos do not get buffered into memory.
@@ -80,8 +74,6 @@ impl ImmichApiClient {
 
         let form = reqwest::multipart::Form::new()
             .part("assetData", file_part)
-            .text("deviceAssetId", device_asset_id)
-            .text("deviceId", device_id)
             .text("fileCreatedAt", created_at)
             .text("fileModifiedAt", modified_at)
             .text("isFavorite", "false");

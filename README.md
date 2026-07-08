@@ -51,7 +51,7 @@ Mimick is an unofficial Immich desktop client for Linux. It provides a GTK4/liba
 
 </div>
 
-**Status:** Supports Immich v1.118+.
+**Status:** Supports Immich v3.0.0+.
 
 ## Screenshots
 
@@ -90,6 +90,7 @@ Mimick is an unofficial Immich desktop client for Linux. It provides a GTK4/liba
 - **Sandbox Security**: Employs Flatpak desktop portal file-choosers to grant the application isolated, per-directory access without requesting system-wide filesystem permissons.
 - **Encrypted Keystore**: API keys are stored securely via the [oo7](https://github.com/linux-credentials/oo7) keyring library. Inside Flatpak, credentials are kept in a portal-encrypted file within the sandbox. On native installs, the desktop's Secret Service (GNOME Keyring, KWallet) is used.
 - **Quiet Hours**: Configurable chronological barriers to globally suspend daemon uploads.
+- **Open With Mimick**: Right-click supported media files in your file manager and choose Mimick to open a staging window where you can preview, select, and upload files to your library or a specific album.
 
 ### Directory Scoping & Filtering
 
