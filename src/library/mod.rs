@@ -676,87 +676,102 @@ fn connect_drop_target(ui: Rc<LibraryWindowUi>) {
             return false;
         }
 
-        let file_list = match value.get::<gtk::gdk::FileList>() {
-            Ok(fl) => fl,
-            Err(_) => return false,
-        };
-        let paths: Vec<std::path::PathBuf> = file_list
-            .files()
-            .iter()
-            .filter_map(|f| f.path())
-            .filter(|p| crate::media_kinds::is_supported_path(p))
-            .collect();
-
-        if paths.is_empty() {
-            let toast = libadwaita::Toast::new("No supported media files in drop");
-            if let Some(overlay) = ui_drop
-                .window
-                .content()
-                .and_then(|w| w.first_child())
-                .and_downcast::<libadwaita::ToastOverlay>()
-            {
-                overlay.add_toast(toast);
-            } else {
-                log::info!("No supported media files in drop");
-            }
-            return true;
-        }
-
-        // Determine the current album context.
-        let album = match ui_drop.ctx.library_state.lock().source.clone() {
-            LibrarySource::Album { id, name }
-            | LibrarySource::AlbumLocal { id, name }
-            | LibrarySource::AlbumUnified { id, name } => Some((id, name)),
-            _ => None,
-        };
-
-        if let Some(album) = album {
-            // Album is in view -- upload directly to that album.
-            let count = paths.len();
-            upload_picker::spawn_enqueue_with_callback(
-                ui_drop.ctx.clone(),
-                Some(album.clone()),
-                paths,
-                move |queued, _skipped| {
-                    log::info!(
-                        "Drop upload to album '{}': queued {}/{} file(s)",
-                        album.1,
-                        queued,
-                        count
-                    );
-                },
-            );
-        } else {
-            // No album -- upload to library, offer album picker via log.
-            let count = paths.len();
-            let ctx_for_album = ui_drop.ctx.clone();
-            let window_for_album = ui_drop.window.clone();
-            let paths_for_album = paths.clone();
-            upload_picker::spawn_enqueue_with_callback(
-                ui_drop.ctx.clone(),
-                None,
-                paths,
-                move |queued, _skipped| {
-                    log::info!(
-                        "Drop upload to library: queued {}/{} file(s)",
-                        queued,
-                        count
-                    );
-                    if queued > 0 {
-                        staging_view::show_album_picker(
-                            window_for_album,
-                            ctx_for_album,
-                            paths_for_album,
-                        );
-                    }
-                },
-            );
-        }
-
-        true
+        handle_drop(&ui_drop, value)
     });
 
     ui.window.add_controller(drop_target);
+}
+
+fn handle_drop(ui: &LibraryWindowUi, value: &gtk::glib::Value) -> bool {
+    let file_list = match value.get::<gtk::gdk::FileList>() {
+        Ok(fl) => fl,
+        Err(_) => return false,
+    };
+
+    let paths: Vec<std::path::PathBuf> = file_list
+        .files()
+        .iter()
+        .filter_map(|f| f.path())
+        .filter(|p| crate::media_kinds::is_supported_path(p))
+        .collect();
+
+    if paths.is_empty() {
+        show_unsupported_drop_toast(ui);
+        return true;
+    }
+
+    let album = match ui.ctx.library_state.lock().source.clone() {
+        LibrarySource::Album { id, name }
+        | LibrarySource::AlbumLocal { id, name }
+        | LibrarySource::AlbumUnified { id, name } => Some((id, name)),
+        _ => None,
+    };
+
+    if let Some(album) = album {
+        handle_album_drop_upload(ui, album, paths);
+    } else {
+        handle_library_drop_upload(ui, paths);
+    }
+
+    true
+}
+
+fn show_unsupported_drop_toast(ui: &LibraryWindowUi) {
+    let toast = libadwaita::Toast::new("No supported media files in drop");
+    if let Some(overlay) = ui
+        .window
+        .content()
+        .and_then(|w| w.first_child())
+        .and_downcast::<libadwaita::ToastOverlay>()
+    {
+        overlay.add_toast(toast);
+    } else {
+        log::info!("No supported media files in drop");
+    }
+}
+
+fn handle_album_drop_upload(
+    ui: &LibraryWindowUi,
+    album: (String, String),
+    paths: Vec<std::path::PathBuf>,
+) {
+    let count = paths.len();
+    upload_picker::spawn_enqueue_with_callback(
+        ui.ctx.clone(),
+        Some(album.clone()),
+        paths,
+        move |queued, _skipped| {
+            log::info!(
+                "Drop upload to album '{}': queued {}/{} file(s)",
+                album.1,
+                queued,
+                count
+            );
+        },
+    );
+}
+
+fn handle_library_drop_upload(ui: &LibraryWindowUi, paths: Vec<std::path::PathBuf>) {
+    let count = paths.len();
+    let ctx_for_album = ui.ctx.clone();
+    let window_for_album = ui.window.clone();
+    let paths_for_album = paths.clone();
+
+    upload_picker::spawn_enqueue_with_callback(
+        ui.ctx.clone(),
+        None,
+        paths,
+        move |queued, _skipped| {
+            log::info!(
+                "Drop upload to library: queued {}/{} file(s)",
+                queued,
+                count
+            );
+            if queued > 0 {
+                staging_view::show_album_picker(window_for_album, ctx_for_album, paths_for_album);
+            }
+        },
+    );
 }
 
 fn spawn_server_ping_loop(ui: Rc<LibraryWindowUi>) {

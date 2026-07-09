@@ -141,42 +141,8 @@ impl MasonryCanvas {
         let ctx_prepare = ctx.clone();
         drag_source.connect_prepare(move |_source, x, y| {
             let canvas = weak.upgrade()?;
-            let imp = canvas.imp();
-            let sel = imp.selection.get()?;
-            let model = imp.model.get()?;
-
-            // Determine which files to drag.
-            let mut files: Vec<gtk::gio::File> = Vec::new();
-
-            if imp.select_mode.get() {
-                // Multi-select: collect all selected assets.
-                let n = sel.n_items();
-                for i in 0..n {
-                    if sel.is_selected(i)
-                        && let Some(path) = resolve_drag_path(model, i, &ctx_prepare)
-                    {
-                        files.push(gtk::gio::File::for_path(&path));
-                    }
-                }
-            }
-
-            if files.is_empty() {
-                // Single asset under cursor.
-                let pos = canvas.hit_test(x, y)?;
-                let path = resolve_drag_path(model, pos, &ctx_prepare)?;
-                files.push(gtk::gio::File::for_path(&path));
-            }
-
-            if files.is_empty() {
-                return None;
-            }
-
-            if files.len() == 1 {
-                Some(gtk::gdk::ContentProvider::for_value(&files[0].to_value()))
-            } else {
-                let file_list = gtk::gdk::FileList::from_array(&files);
-                Some(gtk::gdk::ContentProvider::for_value(&file_list.to_value()))
-            }
+            let files = collect_drag_files(&canvas, x, y, &ctx_prepare)?;
+            Some(files_to_content_provider(files))
         });
 
         let weak2 = self.downgrade();
@@ -184,40 +150,10 @@ impl MasonryCanvas {
             let Some(canvas) = weak2.upgrade() else {
                 return;
             };
-            let imp = canvas.imp();
-            // Suppress click-to-activate while dragging.
-            imp.drag_active.set(true);
-            let sel = imp.selection.get();
-
-            // Count how many items are being dragged.
-            let count = if imp.select_mode.get() {
-                sel.map(|s| {
-                    let mut c = 0u32;
-                    for i in 0..s.n_items() {
-                        if s.is_selected(i) {
-                            c += 1;
-                        }
-                    }
-                    c
-                })
-                .unwrap_or(1)
-            } else {
-                1
-            };
-
+            canvas.imp().drag_active.set(true);
+            let count = selected_count(&canvas);
             if count > 1 {
-                // Multi-drag: render a badge with count.
-                let badge_label = gtk::Label::builder()
-                    .label(format!("{count} files"))
-                    .css_classes(["mimick-drag-badge"])
-                    .build();
-                let badge_box = gtk::Box::builder()
-                    .orientation(gtk::Orientation::Horizontal)
-                    .css_classes(["mimick-drag-badge"])
-                    .build();
-                badge_box.append(&badge_label);
-                let paintable = gtk::WidgetPaintable::new(Some(&badge_box));
-                source.set_icon(Some(&paintable), 0, 0);
+                source.set_icon(Some(&build_drag_badge(count)), 0, 0);
             }
         });
 
@@ -230,6 +166,72 @@ impl MasonryCanvas {
 
         self.add_controller(drag_source);
     }
+}
+
+/// Collect gio::Files for the current drag operation (multi-select or single).
+fn collect_drag_files(
+    canvas: &MasonryCanvas,
+    x: f64,
+    y: f64,
+    ctx: &AppContext,
+) -> Option<Vec<gtk::gio::File>> {
+    let imp = canvas.imp();
+    let sel = imp.selection.get()?;
+    let model = imp.model.get()?;
+    let mut files = Vec::new();
+
+    if imp.select_mode.get() {
+        for i in 0..sel.n_items() {
+            if sel.is_selected(i)
+                && let Some(path) = resolve_drag_path(model, i, ctx)
+            {
+                files.push(gtk::gio::File::for_path(&path));
+            }
+        }
+    }
+
+    if files.is_empty() {
+        let pos = canvas.hit_test(x, y)?;
+        let path = resolve_drag_path(model, pos, ctx)?;
+        files.push(gtk::gio::File::for_path(&path));
+    }
+
+    if files.is_empty() { None } else { Some(files) }
+}
+
+fn files_to_content_provider(files: Vec<gtk::gio::File>) -> gtk::gdk::ContentProvider {
+    if files.len() == 1 {
+        gtk::gdk::ContentProvider::for_value(&files[0].to_value())
+    } else {
+        let file_list = gtk::gdk::FileList::from_array(&files);
+        gtk::gdk::ContentProvider::for_value(&file_list.to_value())
+    }
+}
+
+/// Count selected items, or 1 if not in select mode.
+fn selected_count(canvas: &MasonryCanvas) -> u32 {
+    let imp = canvas.imp();
+    if !imp.select_mode.get() {
+        return 1;
+    }
+    imp.selection
+        .get()
+        .map(|s| (0..s.n_items()).filter(|i| s.is_selected(*i)).count() as u32)
+        .unwrap_or(1)
+}
+
+/// Build a badge paintable showing the drag count.
+fn build_drag_badge(count: u32) -> gtk::WidgetPaintable {
+    let label = gtk::Label::builder()
+        .label(format!("{count} files"))
+        .css_classes(["mimick-drag-badge"])
+        .build();
+    let container = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .css_classes(["mimick-drag-badge"])
+        .build();
+    container.append(&label);
+    gtk::WidgetPaintable::new(Some(&container))
 }
 
 fn connect_model_changes(canvas: &MasonryCanvas, model: &LibraryAssetModel) {
