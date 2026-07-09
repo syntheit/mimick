@@ -101,6 +101,8 @@ mod imp {
         pub check_icon: OnceCell<gdk4::Paintable>,
         /// Cached checkbox icon (unselected state).
         pub uncheck_icon: OnceCell<gdk4::Paintable>,
+        /// True while a drag-out operation is in progress; suppresses click-to-activate.
+        pub drag_active: Cell<bool>,
     }
 
     #[glib::object_subclass]

@@ -40,6 +40,7 @@ pub fn build_grid_view(
     canvas.set_context_menu_handler(context_menu_handler.clone());
     let initial_quality = GridQuality::parse(&ctx.config.read().data.library_grid_quality);
     canvas.set_quality(initial_quality);
+    canvas.install_drag_source(ctx.clone());
 
     {
         let canvas = canvas.clone();
