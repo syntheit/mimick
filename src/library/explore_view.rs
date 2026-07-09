@@ -1,8 +1,8 @@
 //! Sectioned landing page mirroring Immich web's Explore tab.
 //!
-//! Three rows: People (round avatars), Places (city tiles), Things (tag
-//! tiles). Tile clicks invoke caller-provided closures so dispatch lives in
-//! `mod.rs` and this module stays UI-only.
+//! Four rows: People (round avatars), Recently Added (date tiles),
+//! Places (city tiles), Things (tag tiles). Tile clicks invoke
+//! caller-provided closures so dispatch lives in `mod.rs`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -23,12 +23,15 @@ pub struct ExploreViewParts {
     pub root: gtk::ScrolledWindow,
     pub populated: Rc<Cell<bool>>,
     people_row: gtk::Box,
+    recents_grid: gtk::FlowBox,
     places_grid: gtk::FlowBox,
     things_grid: gtk::FlowBox,
     people_section: gtk::Box,
+    recents_section: gtk::Box,
     places_section: gtk::Box,
     things_section: gtk::Box,
     people_spinner: gtk::Spinner,
+    recents_spinner: gtk::Spinner,
     places_spinner: gtk::Spinner,
     things_spinner: gtk::Spinner,
     pub people_filter_button: gtk::MenuButton,
@@ -50,11 +53,13 @@ pub fn build_explore_view() -> ExploreViewParts {
         .build();
 
     let (people_section, people_row, people_spinner, people_filter_button) = build_people_section();
+    let (recents_section, recents_grid, recents_spinner) = build_tile_section("Recently Added");
     let (places_section, places_grid, places_spinner) = build_tile_section("Places");
     let (things_section, things_grid, things_spinner) = build_tile_section("Things");
 
     outer.append(&people_section);
     outer.append(&places_section);
+    outer.append(&recents_section);
     outer.append(&things_section);
 
     let root = gtk::ScrolledWindow::builder()
@@ -68,12 +73,15 @@ pub fn build_explore_view() -> ExploreViewParts {
         root,
         populated: Rc::new(Cell::new(false)),
         people_row,
+        recents_grid,
         places_grid,
         things_grid,
         people_section,
+        recents_section,
         places_section,
         things_section,
         people_spinner,
+        recents_spinner,
         places_spinner,
         things_spinner,
         people_filter_button,
@@ -90,6 +98,7 @@ pub fn build_explore_view() -> ExploreViewParts {
 pub fn show_loading(parts: &ExploreViewParts) {
     for (section, spinner) in [
         (&parts.people_section, &parts.people_spinner),
+        (&parts.recents_section, &parts.recents_spinner),
         (&parts.places_section, &parts.places_spinner),
         (&parts.things_section, &parts.things_spinner),
     ] {
@@ -334,12 +343,15 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         root: parts.root.clone(),
         populated: parts.populated.clone(),
         people_row: parts.people_row.clone(),
+        recents_grid: parts.recents_grid.clone(),
         places_grid: parts.places_grid.clone(),
         things_grid: parts.things_grid.clone(),
         people_section: parts.people_section.clone(),
+        recents_section: parts.recents_section.clone(),
         places_section: parts.places_section.clone(),
         things_section: parts.things_section.clone(),
         people_spinner: parts.people_spinner.clone(),
+        recents_spinner: parts.recents_spinner.clone(),
         places_spinner: parts.places_spinner.clone(),
         things_spinner: parts.things_spinner.clone(),
         people_filter_button: parts.people_filter_button.clone(),
@@ -377,7 +389,12 @@ pub fn populate_places<F>(
     }
 }
 
-/// Populate general objects, scenes, and tags in the things dashboard section.
+/// Populate explore sections: Things tiles + Recently Added tiles.
+///
+/// Sections by `field_name`:
+///   - `exifInfo.city`          -- skipped (populated by `populate_places`)
+///   - `createdAt`              -- rendered as "Recently Added" tiles
+///   - `smartInfo.objects/tags` -- rendered as "Things" tiles
 pub fn populate_explore<F>(
     parts: &ExploreViewParts,
     ctx: Arc<AppContext>,
@@ -387,17 +404,57 @@ pub fn populate_explore<F>(
     F: Fn(&str, String) + 'static,
 {
     stop_spinner(&parts.things_spinner);
+    stop_spinner(&parts.recents_spinner);
     while let Some(child) = parts.things_grid.first_child() {
         parts.things_grid.remove(&child);
     }
+    while let Some(child) = parts.recents_grid.first_child() {
+        parts.recents_grid.remove(&child);
+    }
     let mut had_things = false;
+    let mut had_recents = false;
+
+    log::debug!(
+        "Explore sections: [{}]",
+        sections
+            .iter()
+            .map(|s| format!("{}({})", s.field_name, s.items.len()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     let on_click = Rc::new(on_click);
     for section in sections {
         if section.field_name.contains("city") {
-            // Places are populated separately via populate_places.
             continue;
         }
+
+        // Immich v3 recently-added section.
+        if section.field_name == "createdAt" || section.field_name == "updatedAt" {
+            had_recents = true;
+            let mut items: Vec<_> = section.items.into_iter().take(12).collect();
+            // Sort newest first by value (ISO timestamp).
+            items.sort_by(|a, b| b.value.cmp(&a.value));
+            for item in items {
+                let label = format_relative_date(&item.value);
+                let tile = explore_tile(
+                    ctx.clone(),
+                    "recent",
+                    &label,
+                    &item.data.id,
+                    on_click.clone(),
+                );
+                parts.recents_grid.append(&tile);
+            }
+            continue;
+        }
+
+        // Only render smartInfo sections as Things tiles.
+        if !section.field_name.starts_with("smartInfo") {
+            log::debug!("Skipping unknown section '{}'", section.field_name);
+            continue;
+        }
+
         had_things = true;
         for item in section.items.into_iter().take(24) {
             let tile = explore_tile(
@@ -412,6 +469,79 @@ pub fn populate_explore<F>(
     }
 
     parts.things_section.set_visible(had_things);
+    parts.recents_section.set_visible(had_recents);
+}
+
+/// Format an ISO 8601 timestamp into a human-readable relative label.
+fn format_relative_date(iso: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Parse ISO 8601 (e.g. "2026-07-09T11:30:32.000Z") via chrono-free approach.
+    let parsed = iso
+        .replace('T', " ")
+        .replace('Z', "")
+        .chars()
+        .take(19)
+        .collect::<String>();
+
+    // Try to parse "YYYY-MM-DD HH:MM:SS" manually.
+    let parts: Vec<&str> = parsed.split(&['-', ' ', ':'][..]).collect();
+    if parts.len() < 6 {
+        return iso.chars().take(10).collect();
+    }
+    let (year, month, day, hour, min, sec) = match (
+        parts[0].parse::<i64>(),
+        parts[1].parse::<u32>(),
+        parts[2].parse::<u32>(),
+        parts[3].parse::<u32>(),
+        parts[4].parse::<u32>(),
+        parts[5].parse::<u32>(),
+    ) {
+        (Ok(y), Ok(mo), Ok(d), Ok(h), Ok(mi), Ok(s)) => (y, mo, d, h, mi, s),
+        _ => return iso.chars().take(10).collect(),
+    };
+
+    // Days since epoch (simplified, no leap-second accuracy needed).
+    let days_in_month = [0u32, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut total_days: i64 = 0;
+    for y in 1970..year {
+        total_days += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+    }
+    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    for m in 1..month {
+        total_days += days_in_month[m as usize] as i64;
+        if m == 2 && is_leap {
+            total_days += 1;
+        }
+    }
+    total_days += (day - 1) as i64;
+    let ts = total_days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let diff = now_secs - ts;
+
+    if diff < 60 {
+        "Just now".to_string()
+    } else if diff < 3600 {
+        let m = diff / 60;
+        format!("{m} min ago")
+    } else if diff < 86400 {
+        let h = diff / 3600;
+        format!("{h}h ago")
+    } else if diff < 86400 * 7 {
+        let d = diff / 86400;
+        format!("{d}d ago")
+    } else {
+        // Fall back to YYYY-MM-DD.
+        format!("{year:04}-{month:02}-{day:02}")
+    }
 }
 
 /// Construct an individual circular avatar widget representing a recognized person face.
