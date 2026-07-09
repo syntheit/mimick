@@ -362,41 +362,58 @@ fn resolve_drag_path(
         return None;
     }
 
-    // Use drag_export/ cache with original filenames (prefixed by asset ID
-    // to avoid collisions between assets with the same name).
-    let export_dir = crate::profile::cache_dir()?.join("drag_export");
-    let _ = std::fs::create_dir_all(&export_dir);
-    let safe_name = format!("{}_{}", &remote_id[..8.min(remote_id.len())], filename);
-    let export_path = export_dir.join(&safe_name);
-
+    let export_path = export_cache_path(&remote_id, &filename)?;
     if export_path.exists() {
         return Some(export_path);
     }
 
-    // Check lightbox preview cache and hardlink with proper name.
-    let ext = std::path::Path::new(&filename)
+    if try_link_from_preview(&remote_id, &filename, &export_path) {
+        return Some(export_path);
+    }
+
+    if download_for_export(ctx, &remote_id, &filename, &export_path) {
+        Some(export_path)
+    } else {
+        None
+    }
+}
+
+fn export_cache_path(remote_id: &str, filename: &str) -> Option<std::path::PathBuf> {
+    let export_dir = crate::profile::cache_dir()?.join("drag_export");
+    let _ = std::fs::create_dir_all(&export_dir);
+    let safe_name = format!("{}_{}", &remote_id[..8.min(remote_id.len())], filename);
+    Some(export_dir.join(&safe_name))
+}
+
+fn try_link_from_preview(remote_id: &str, filename: &str, export_path: &std::path::Path) -> bool {
+    let ext = std::path::Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
         .filter(|e| !e.is_empty())
         .unwrap_or("bin");
-    let preview_dir = crate::profile::cache_dir().map(|p| p.join("preview"));
-    if let Some(ref pd) = preview_dir {
-        let cached = pd.join(format!("{remote_id}.{ext}"));
-        if cached.exists()
-            && (std::fs::hard_link(&cached, &export_path).is_ok()
-                || std::fs::copy(&cached, &export_path).is_ok())
-        {
-            return Some(export_path);
-        }
-    }
+    let preview_dir = match crate::profile::cache_dir() {
+        Some(p) => p.join("preview"),
+        None => return false,
+    };
+    let cached = preview_dir.join(format!("{remote_id}.{ext}"));
 
-    // On-demand download: block briefly while the original is fetched.
+    cached.exists()
+        && (std::fs::hard_link(&cached, export_path).is_ok()
+            || std::fs::copy(&cached, export_path).is_ok())
+}
+
+fn download_for_export(
+    ctx: &AppContext,
+    remote_id: &str,
+    filename: &str,
+    export_path: &std::path::Path,
+) -> bool {
     log::debug!("Drag export: downloading {} ({})", remote_id, filename);
     let api = ctx.api_client.clone();
-    let id = remote_id.clone();
-    let dest = export_path.clone();
+    let id = remote_id.to_string();
+    let dest = export_path.to_path_buf();
+
     let downloaded = std::thread::spawn(move || {
-        // Create a one-shot tokio runtime for the blocking download.
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
@@ -416,9 +433,5 @@ fn resolve_drag_path(
     .join()
     .unwrap_or(false);
 
-    if downloaded && export_path.exists() {
-        Some(export_path)
-    } else {
-        None
-    }
+    downloaded && export_path.exists()
 }
