@@ -64,6 +64,9 @@ pub fn build_staging_window(
         &window,
     );
 
+    // Accept additional file drops onto the staging window.
+    connect_staging_drop_target(&window, &grid.model, &status_label);
+
     window.present();
 
     if auto_upload {
@@ -353,7 +356,7 @@ fn selected_paths(sel: &gtk::MultiSelection, files: &[PathBuf]) -> Vec<PathBuf> 
 }
 
 /// Present an album picker dialog and upload files to the chosen album.
-fn show_album_picker(
+pub(crate) fn show_album_picker(
     parent: libadwaita::ApplicationWindow,
     ctx: Arc<AppContext>,
     paths: Vec<PathBuf>,
@@ -501,6 +504,61 @@ fn simple_alert(
         .build();
     dialog.add_response(response_id, response_label);
     dialog
+}
+
+/// Attach a `DropTarget` to the staging window for appending additional files.
+fn connect_staging_drop_target(
+    window: &libadwaita::ApplicationWindow,
+    model: &crate::library::asset_model::LibraryAssetModel,
+    status_label: &gtk::Label,
+) {
+    use std::collections::HashSet;
+
+    let drop_target = gtk::DropTarget::new(
+        gtk::gdk::FileList::static_type(),
+        gtk::gdk::DragAction::COPY,
+    );
+
+    let model = model.clone();
+    let label = status_label.clone();
+    drop_target.connect_drop(move |_target, value, _x, _y| {
+        let file_list = match value.get::<gtk::gdk::FileList>() {
+            Ok(fl) => fl,
+            Err(_) => return false,
+        };
+
+        // Collect existing paths to deduplicate.
+        let mut existing: HashSet<String> = HashSet::new();
+        for i in 0..model.n_items() {
+            if let Some(obj) = model.item(i).and_downcast::<AssetObject>() {
+                let lp = obj.property::<String>("local-path");
+                if !lp.is_empty() {
+                    existing.insert(lp);
+                }
+            }
+        }
+
+        let new_paths: Vec<PathBuf> = file_list
+            .files()
+            .iter()
+            .filter_map(|f| f.path())
+            .filter(|p| media_kinds::is_supported_path(p))
+            .filter(|p| !existing.contains(&p.to_string_lossy().to_string()))
+            .collect();
+
+        if new_paths.is_empty() {
+            return true;
+        }
+
+        let new_assets = build_staging_assets(&new_paths);
+        model.append_objects(&new_assets);
+
+        let total = model.n_items();
+        label.set_text(&status_text(0, total));
+        true
+    });
+
+    window.add_controller(drop_target);
 }
 
 #[cfg(test)]

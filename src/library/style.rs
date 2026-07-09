@@ -288,6 +288,41 @@ box.mimick-preview-unavailable {
     background-color: alpha(@window_bg_color, 0.92);
     border: 1px solid alpha(@view_fg_color, 0.16);
 }
+
+/* ── Drag-and-drop overlay ───────────────────────────────────────
+   Shown when files are dragged over the window.  */
+
+box.mimick-drop-overlay {
+    background: alpha(@accent_bg_color, 0.12);
+    border: 2px dashed @accent_color;
+    border-radius: 12px;
+    margin: 24px;
+    transition: opacity 200ms ease-in-out;
+}
+
+box.mimick-drop-overlay image {
+    -gtk-icon-size: 48px;
+    opacity: 0.7;
+}
+
+box.mimick-drop-overlay label {
+    font-size: 1.1em;
+    font-weight: 600;
+    opacity: 0.8;
+}
+
+/* ── Drag badge (multi-file count) ─────────────────────────────── */
+
+box.mimick-drag-badge {
+    background: @accent_bg_color;
+    color: @accent_fg_color;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-weight: bold;
+    font-size: 11px;
+    min-width: 20px;
+    min-height: 20px;
+}
 "#;
 
 static REGISTERED: OnceLock<()> = OnceLock::new();
