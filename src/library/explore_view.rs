@@ -472,11 +472,7 @@ pub fn populate_explore<F>(
     parts.recents_section.set_visible(had_recents);
 }
 
-/// Format an ISO 8601 timestamp into a human-readable relative label.
-fn format_relative_date(iso: &str) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Parse ISO 8601 (e.g. "2026-07-09T11:30:32.000Z") via chrono-free approach.
+fn parse_iso_date(iso: &str) -> Option<(i64, u32, u32, u32, u32, u32)> {
     let parsed = iso
         .replace('T', " ")
         .replace('Z', "")
@@ -484,12 +480,11 @@ fn format_relative_date(iso: &str) -> String {
         .take(19)
         .collect::<String>();
 
-    // Try to parse "YYYY-MM-DD HH:MM:SS" manually.
     let parts: Vec<&str> = parsed.split(&['-', ' ', ':'][..]).collect();
     if parts.len() < 6 {
-        return iso.chars().take(10).collect();
+        return None;
     }
-    let (year, month, day, hour, min, sec) = match (
+    match (
         parts[0].parse::<i64>(),
         parts[1].parse::<u32>(),
         parts[2].parse::<u32>(),
@@ -497,11 +492,12 @@ fn format_relative_date(iso: &str) -> String {
         parts[4].parse::<u32>(),
         parts[5].parse::<u32>(),
     ) {
-        (Ok(y), Ok(mo), Ok(d), Ok(h), Ok(mi), Ok(s)) => (y, mo, d, h, mi, s),
-        _ => return iso.chars().take(10).collect(),
-    };
+        (Ok(y), Ok(mo), Ok(d), Ok(h), Ok(mi), Ok(s)) => Some((y, mo, d, h, mi, s)),
+        _ => None,
+    }
+}
 
-    // Days since epoch (simplified, no leap-second accuracy needed).
+fn compute_epoch_seconds(year: i64, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> i64 {
     let days_in_month = [0u32, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut total_days: i64 = 0;
     for y in 1970..year {
@@ -519,8 +515,18 @@ fn format_relative_date(iso: &str) -> String {
         }
     }
     total_days += (day - 1) as i64;
-    let ts = total_days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
+    total_days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64
+}
 
+/// Format an ISO 8601 timestamp into a human-readable relative label.
+fn format_relative_date(iso: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let Some((year, month, day, hour, min, sec)) = parse_iso_date(iso) else {
+        return iso.chars().take(10).collect();
+    };
+
+    let ts = compute_epoch_seconds(year, month, day, hour, min, sec);
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -539,7 +545,6 @@ fn format_relative_date(iso: &str) -> String {
         let d = diff / 86400;
         format!("{d}d ago")
     } else {
-        // Fall back to YYYY-MM-DD.
         format!("{year:04}-{month:02}-{day:02}")
     }
 }
