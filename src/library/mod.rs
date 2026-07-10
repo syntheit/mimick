@@ -5,7 +5,7 @@
 //! explore dashboard, album grids, lightbox, sidebar, and thumbnail
 //! caching independently.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -1140,8 +1140,7 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
             });
         }
     ));
-
-    // Only fetch places if not already cached from a previous visit.
+    // Fetch places (slow paginated scan) only if not cached.
     if !explore_view::has_cached_places(&ui.explore) {
         mctx.spawn_local(clone!(
             #[strong]
@@ -1200,8 +1199,6 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                 sections,
                 move |kind, value, asset_id| {
                     if kind == "recent" {
-                        // Open the specific asset in lightbox by loading it
-                        // as a single-asset search result.
                         open_asset_in_lightbox(click_ui.clone(), asset_id);
                         return;
                     }
@@ -1218,7 +1215,10 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     ));
 }
 
-/// Fetch a single asset by ID, load it into the grid model, and open lightbox.
+/// Fetch a single asset by ID and open it in lightbox without leaving explore.
+///
+/// Temporarily loads the asset into the grid model so the lightbox can display
+/// it, then restores the previous library state when the lightbox page is popped.
 fn open_asset_in_lightbox(ui: Rc<LibraryWindowUi>, asset_id: String) {
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
@@ -1231,6 +1231,11 @@ fn open_asset_in_lightbox(ui: Rc<LibraryWindowUi>, asset_id: String) {
                     return;
                 }
             };
+
+            // Snapshot the current state so we can restore it after lightbox.
+            let prev_source = ui.ctx.library_state.lock().source.clone();
+
+            // Temporarily load just this asset so open_lightbox can read it.
             {
                 let mut state = ui.ctx.library_state.lock();
                 let generation = state.generation;
@@ -1239,8 +1244,27 @@ fn open_asset_in_lightbox(ui: Rc<LibraryWindowUi>, asset_id: String) {
                     .model
                     .reset(&ui.ctx, &state.assets, &state.sort_mode);
             }
-            sync_content_state(&ui);
+
+            // Open lightbox at position 0 (the single asset).
             open_lightbox(ui.clone(), 0);
+
+            // After the lightbox page is popped, restore the explore state.
+            let restore_ui = ui.clone();
+            let handler_id = Rc::new(RefCell::new(None::<glib::SignalHandlerId>));
+            let handler_id_clone = handler_id.clone();
+            let id = ui.nav.connect_popped(move |nav, _page| {
+                let request = restore_ui
+                    .ctx
+                    .library_state
+                    .lock()
+                    .switch_source(prev_source.clone());
+                load_source_page(restore_ui.clone(), request, false);
+                // Disconnect this handler so it only fires once.
+                if let Some(id) = handler_id_clone.borrow_mut().take() {
+                    nav.disconnect(id);
+                }
+            });
+            *handler_id.borrow_mut() = Some(id);
         }
     ));
 }
