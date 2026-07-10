@@ -1447,6 +1447,79 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
     ));
 }
 
+fn setup_album_drop_target(
+    ui: &Rc<LibraryWindowUi>,
+    row: &gtk::ListBoxRow,
+    album_id: String,
+    album_name: String,
+) {
+    let row_drop = gtk::DropTarget::new(
+        gtk::gdk::FileList::static_type(),
+        gtk::gdk::DragAction::COPY,
+    );
+    let row_ref_enter = row.clone();
+    row_drop.connect_enter(move |target, _x, _y| {
+        if target.current_drop().is_some_and(|d| d.drag().is_some()) {
+            return gtk::gdk::DragAction::empty();
+        }
+        row_ref_enter.add_css_class("mimick-album-drop-hover");
+        gtk::gdk::DragAction::COPY
+    });
+    let row_ref_leave = row.clone();
+    row_drop.connect_leave(move |_target| {
+        row_ref_leave.remove_css_class("mimick-album-drop-hover");
+    });
+    let row_ref_drop = row.clone();
+    let ui_drop = ui.clone();
+    row_drop.connect_drop(move |target, value, _x, _y| {
+        row_ref_drop.remove_css_class("mimick-album-drop-hover");
+
+        if target.current_drop().is_some_and(|d| d.drag().is_some()) {
+            return false;
+        }
+        let file_list = match value.get::<gtk::gdk::FileList>() {
+            Ok(fl) => fl,
+            Err(_) => return false,
+        };
+        let paths: Vec<std::path::PathBuf> = file_list
+            .files()
+            .iter()
+            .filter_map(|f| f.path())
+            .filter(|p| crate::media_kinds::is_supported_path(p))
+            .collect();
+        if paths.is_empty() {
+            show_unsupported_drop_toast(&ui_drop);
+            return true;
+        }
+        handle_album_drop_upload(&ui_drop, (album_id.clone(), album_name.clone()), paths);
+        true
+    });
+    row.add_controller(row_drop);
+}
+
+fn build_album_sidebar_row(
+    ui: &Rc<LibraryWindowUi>,
+    album: &crate::api_client::LibraryAlbum,
+) -> gtk::ListBoxRow {
+    let subtitle = format!("{} asset(s)", album.asset_count);
+    let action = libadwaita::ActionRow::builder()
+        .title(&album.album_name)
+        .subtitle(&subtitle)
+        .title_lines(1)
+        .subtitle_lines(1)
+        .build();
+    let row = gtk::ListBoxRow::builder()
+        .tooltip_text(format!("{}:{}", album.id, album.album_name))
+        .child(&action)
+        .build();
+
+    // Per-row drop target: dragging files onto an album row uploads
+    // them directly into that album.
+    setup_album_drop_target(ui, &row, album.id.clone(), album.album_name.clone());
+
+    row
+}
+
 /// Repopulate and select the active album or fixed row in the side navigation sidebar.
 fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
     while let Some(row) = ui.sidebar.albums_list.first_child() {
@@ -1456,65 +1529,7 @@ fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
     let selected_source = ui.ctx.library_state.lock().source.clone();
     let albums = ui.ctx.library_state.lock().albums.clone();
     for album in albums {
-        let subtitle = format!("{} asset(s)", album.asset_count);
-        let action = libadwaita::ActionRow::builder()
-            .title(&album.album_name)
-            .subtitle(&subtitle)
-            .title_lines(1)
-            .subtitle_lines(1)
-            .build();
-        let row = gtk::ListBoxRow::builder()
-            .tooltip_text(format!("{}:{}", album.id, album.album_name))
-            .child(&action)
-            .build();
-
-        // Per-row drop target: dragging files onto an album row uploads
-        // them directly into that album.
-        let row_drop = gtk::DropTarget::new(
-            gtk::gdk::FileList::static_type(),
-            gtk::gdk::DragAction::COPY,
-        );
-        let row_ref_enter = row.clone();
-        row_drop.connect_enter(move |target, _x, _y| {
-            if target.current_drop().is_some_and(|d| d.drag().is_some()) {
-                return gtk::gdk::DragAction::empty();
-            }
-            row_ref_enter.add_css_class("mimick-album-drop-hover");
-            gtk::gdk::DragAction::COPY
-        });
-        let row_ref_leave = row.clone();
-        row_drop.connect_leave(move |_target| {
-            row_ref_leave.remove_css_class("mimick-album-drop-hover");
-        });
-        let album_id = album.id.clone();
-        let album_name = album.album_name.clone();
-        let row_ref_drop = row.clone();
-        let ui_drop = ui.clone();
-        row_drop.connect_drop(move |target, value, _x, _y| {
-            row_ref_drop.remove_css_class("mimick-album-drop-hover");
-
-            if target.current_drop().is_some_and(|d| d.drag().is_some()) {
-                return false;
-            }
-            let file_list = match value.get::<gtk::gdk::FileList>() {
-                Ok(fl) => fl,
-                Err(_) => return false,
-            };
-            let paths: Vec<std::path::PathBuf> = file_list
-                .files()
-                .iter()
-                .filter_map(|f| f.path())
-                .filter(|p| crate::media_kinds::is_supported_path(p))
-                .collect();
-            if paths.is_empty() {
-                show_unsupported_drop_toast(&ui_drop);
-                return true;
-            }
-            handle_album_drop_upload(&ui_drop, (album_id.clone(), album_name.clone()), paths);
-            true
-        });
-        row.add_controller(row_drop);
-
+        let row = build_album_sidebar_row(ui, &album);
         ui.sidebar.albums_list.append(&row);
     }
 

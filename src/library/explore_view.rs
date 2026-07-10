@@ -553,18 +553,19 @@ fn render_recents_tiles(
     }
 }
 
-/// Append a card-sized "See More" tile to a FlowBox grid.
-///
-/// Matches the dimensions of adjacent explore tiles so the button fills a
-/// full card slot rather than appearing as a small inline text link.
-fn append_see_more_button<F: Fn() + 'static>(grid: &gtk::FlowBox, remaining: usize, on_expand: F) {
+fn append_action_button<F: Fn() + 'static>(
+    grid: &gtk::FlowBox,
+    icon_name: &str,
+    label_text: &str,
+    on_click: F,
+) {
     let icon = gtk::Image::builder()
-        .icon_name("view-more-symbolic")
+        .icon_name(icon_name)
         .pixel_size(24)
         .halign(gtk::Align::Center)
         .build();
     let label = gtk::Label::builder()
-        .label(format!("See {remaining} more"))
+        .label(label_text)
         .css_classes(["caption-heading"])
         .halign(gtk::Align::Center)
         .build();
@@ -598,53 +599,27 @@ fn append_see_more_button<F: Fn() + 'static>(grid: &gtk::FlowBox, remaining: usi
         if let Some(parent) = button.parent() {
             grid_ref.remove(&parent);
         }
-        on_expand();
+        on_click();
     });
     grid.append(&btn);
 }
 
+/// Append a card-sized "See More" tile to a FlowBox grid.
+///
+/// Matches the dimensions of adjacent explore tiles so the button fills a
+/// full card slot rather than appearing as a small inline text link.
+fn append_see_more_button<F: Fn() + 'static>(grid: &gtk::FlowBox, remaining: usize, on_expand: F) {
+    append_action_button(
+        grid,
+        "view-more-symbolic",
+        &format!("See {remaining} more"),
+        on_expand,
+    );
+}
+
 /// Append a card-sized "Show Less" tile to collapse an expanded section.
 fn append_show_less_button<F: Fn() + 'static>(grid: &gtk::FlowBox, on_collapse: F) {
-    let icon = gtk::Image::builder()
-        .icon_name("go-up-symbolic")
-        .pixel_size(24)
-        .halign(gtk::Align::Center)
-        .build();
-    let label = gtk::Label::builder()
-        .label("Show Less")
-        .css_classes(["caption-heading"])
-        .halign(gtk::Align::Center)
-        .build();
-    let spacer = gtk::Box::builder()
-        .css_classes(["mimick-explore-spacer"])
-        .build();
-    let content = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(6)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .build();
-    content.append(&icon);
-    content.append(&label);
-    let overlay = gtk::Overlay::builder()
-        .overflow(gtk::Overflow::Hidden)
-        .css_classes(["mimick-see-more-tile"])
-        .build();
-    overlay.set_child(Some(&spacer));
-    overlay.add_overlay(&content);
-
-    let btn = gtk::Button::builder()
-        .child(&overlay)
-        .css_classes(["flat"])
-        .build();
-    let grid_ref = grid.clone();
-    btn.connect_clicked(move |button| {
-        if let Some(parent) = button.parent() {
-            grid_ref.remove(&parent);
-        }
-        on_collapse();
-    });
-    grid.append(&btn);
+    append_action_button(grid, "go-up-symbolic", "Show Less", on_collapse);
 }
 fn parse_iso_date(iso: &str) -> Option<(i64, u32, u32, u32, u32, u32)> {
     let parsed = iso
