@@ -170,6 +170,32 @@ impl ImmichApiClient {
         }
     }
 
+    /// Fetch a single asset as a `LibraryAsset` by its ID.
+    pub async fn fetch_asset_by_id(&self, asset_id: &str) -> Result<LibraryAsset, String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/assets/{}", base_url, asset_id);
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp
+                .json::<LibraryAsset>()
+                .await
+                .map_err(|err| err.to_string()),
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
     /// Download original source file of a given asset ID and save it locally.
     pub async fn download_original_to_file(
         &self,

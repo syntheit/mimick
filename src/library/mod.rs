@@ -1141,34 +1141,44 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
         }
     ));
 
-    mctx.spawn_local(clone!(
-        #[strong]
-        ui,
-        #[strong]
-        ctx,
-        async move {
-            let places_res = ctx.api_client.fetch_all_places().await;
-            if let Err(e) = &places_res
-                && (e.contains("HTTP 401") || e.contains("HTTP 403"))
-            {
-                show_library_permission_error(&ui.window);
+    // Only fetch places if not already cached from a previous visit.
+    if !explore_view::has_cached_places(&ui.explore) {
+        mctx.spawn_local(clone!(
+            #[strong]
+            ui,
+            #[strong]
+            ctx,
+            async move {
+                let places_res = ctx.api_client.fetch_all_places().await;
+                if let Err(e) = &places_res
+                    && (e.contains("HTTP 401") || e.contains("HTTP 403"))
+                {
+                    show_library_permission_error(&ui.window);
+                }
+                let places = places_res.unwrap_or_default();
+                let click_ui = ui.clone();
+                explore_view::populate_places(
+                    &ui.explore,
+                    ctx.clone(),
+                    places,
+                    move |_kind, value, _asset_id| {
+                        let next = LibrarySource::AdvancedSearch {
+                            filters: Box::new(MetadataSearchFilters {
+                                city: Some(value.clone()),
+                                ..Default::default()
+                            }),
+                        };
+                        let request = click_ui.ctx.library_state.lock().switch_source(next);
+                        click_ui.search_entry.set_text(&value);
+                        apply_timeline_ui_state(&click_ui, &request.1);
+                        load_source_page(click_ui.clone(), request, false);
+                    },
+                );
             }
-            let places = places_res.unwrap_or_default();
-            let click_ui = ui.clone();
-            explore_view::populate_places(&ui.explore, ctx.clone(), places, move |_kind, value| {
-                let next = LibrarySource::AdvancedSearch {
-                    filters: Box::new(MetadataSearchFilters {
-                        city: Some(value.clone()),
-                        ..Default::default()
-                    }),
-                };
-                let request = click_ui.ctx.library_state.lock().switch_source(next);
-                click_ui.search_entry.set_text(&value);
-                apply_timeline_ui_state(&click_ui, &request.1);
-                load_source_page(click_ui.clone(), request, false);
-            });
-        }
-    ));
+        ));
+    } else {
+        explore_view::render_cached_places(&ui.explore, ctx.clone());
+    }
 
     mctx.spawn_local(clone!(
         #[strong]
@@ -1188,23 +1198,49 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                 &ui.explore,
                 ctx.clone(),
                 sections,
-                move |kind, value| {
-                    // For recents, value is a relative date label -- search
-                    // for "recently added" instead.
-                    let query = if kind == "recent" {
-                        "recently added".to_string()
-                    } else {
-                        value.clone()
-                    };
+                move |kind, value, asset_id| {
+                    if kind == "recent" {
+                        // Open the specific asset in lightbox by loading it
+                        // as a single-asset search result.
+                        open_asset_in_lightbox(click_ui.clone(), asset_id);
+                        return;
+                    }
                     let next = LibrarySource::SmartSearch {
-                        query: query.clone(),
+                        query: value.clone(),
                     };
                     let request = click_ui.ctx.library_state.lock().switch_source(next);
-                    click_ui.search_entry.set_text(&query);
+                    click_ui.search_entry.set_text(&value);
                     apply_timeline_ui_state(&click_ui, &request.1);
                     load_source_page(click_ui.clone(), request, false);
                 },
             );
+        }
+    ));
+}
+
+/// Fetch a single asset by ID, load it into the grid model, and open lightbox.
+fn open_asset_in_lightbox(ui: Rc<LibraryWindowUi>, asset_id: String) {
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        ui,
+        async move {
+            let asset = match ui.ctx.api_client.fetch_asset_by_id(&asset_id).await {
+                Ok(a) => a,
+                Err(e) => {
+                    log::warn!("Failed to fetch asset {} for lightbox: {}", asset_id, e);
+                    return;
+                }
+            };
+            {
+                let mut state = ui.ctx.library_state.lock();
+                let generation = state.generation;
+                state.replace_assets_with_more(generation, vec![asset], false);
+                ui.grid
+                    .model
+                    .reset(&ui.ctx, &state.assets, &state.sort_mode);
+            }
+            sync_content_state(&ui);
+            open_lightbox(ui.clone(), 0);
         }
     ));
 }

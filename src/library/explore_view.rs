@@ -15,8 +15,11 @@ use gtk::prelude::*;
 use crate::api_client::{ExploreSection, Person, PlaceItem, ThumbnailSize};
 use crate::app_context::AppContext;
 
-type ExploreClick = Rc<dyn Fn(&str, String)>;
+type ExploreClick = Rc<dyn Fn(&str, String, String)>;
 type PersonClick = Rc<dyn Fn(String, String)>;
+
+const INITIAL_TILE_COUNT: usize = 16;
+const RECENTS_EXPANDED_COUNT: usize = 30;
 
 /// Contains references to individual grid widgets of the explore tab dashboard display.
 pub struct ExploreViewParts {
@@ -37,6 +40,8 @@ pub struct ExploreViewParts {
     pub people_filter_button: gtk::MenuButton,
     cached_people: Rc<RefCell<Vec<Person>>>,
     cached_people_click: Rc<RefCell<Option<PersonClick>>>,
+    cached_places: Rc<RefCell<Vec<PlaceItem>>>,
+    cached_places_click: Rc<RefCell<Option<ExploreClick>>>,
     pub search_query: Rc<RefCell<String>>,
     cached_ctx: Rc<RefCell<Option<Arc<AppContext>>>>,
 }
@@ -87,6 +92,8 @@ pub fn build_explore_view() -> ExploreViewParts {
         people_filter_button,
         cached_people: Rc::new(RefCell::new(Vec::new())),
         cached_people_click: Rc::new(RefCell::new(None)),
+        cached_places: Rc::new(RefCell::new(Vec::new())),
+        cached_places_click: Rc::new(RefCell::new(None)),
         search_query: Rc::new(RefCell::new(String::new())),
         cached_ctx: Rc::new(RefCell::new(None)),
     }
@@ -357,27 +364,58 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         people_filter_button: parts.people_filter_button.clone(),
         cached_people: parts.cached_people.clone(),
         cached_people_click: parts.cached_people_click.clone(),
+        cached_places: parts.cached_places.clone(),
+        cached_places_click: parts.cached_places_click.clone(),
         search_query: parts.search_query.clone(),
         cached_ctx: parts.cached_ctx.clone(),
     }
 }
 
 /// Populate the city tiles representing locations in the places dashboard section.
+///
+/// Caches places data so subsequent visits don't re-fetch from the server.
+/// Shows the first 16 tiles with a "See More" button to expand.
 pub fn populate_places<F>(
     parts: &ExploreViewParts,
     ctx: Arc<AppContext>,
     places: Vec<PlaceItem>,
     on_click: F,
 ) where
-    F: Fn(&str, String) + 'static,
+    F: Fn(&str, String, String) + 'static,
 {
     stop_spinner(&parts.places_spinner);
+    *parts.cached_places.borrow_mut() = places;
+    *parts.cached_places_click.borrow_mut() = Some(Rc::new(on_click));
+    render_places(parts, ctx, false);
+}
+
+/// Check if places are already cached and render them without fetching.
+pub fn has_cached_places(parts: &ExploreViewParts) -> bool {
+    !parts.cached_places.borrow().is_empty()
+}
+
+/// Re-render places from cache (used when navigating back to explore).
+pub fn render_cached_places(parts: &ExploreViewParts, ctx: Arc<AppContext>) {
+    stop_spinner(&parts.places_spinner);
+    render_places(parts, ctx, false);
+}
+
+fn render_places(parts: &ExploreViewParts, ctx: Arc<AppContext>, expanded: bool) {
     while let Some(child) = parts.places_grid.first_child() {
         parts.places_grid.remove(&child);
     }
+    let places = parts.cached_places.borrow();
     parts.places_section.set_visible(!places.is_empty());
-    let on_click = Rc::new(on_click);
-    for place in places {
+    let on_click = match parts.cached_places_click.borrow().clone() {
+        Some(cb) => cb,
+        None => return,
+    };
+    let limit = if expanded {
+        places.len()
+    } else {
+        INITIAL_TILE_COUNT
+    };
+    for place in places.iter().take(limit) {
         let tile = explore_tile(
             ctx.clone(),
             "place",
@@ -386,6 +424,15 @@ pub fn populate_places<F>(
             on_click.clone(),
         );
         parts.places_grid.append(&tile);
+    }
+    if !expanded && places.len() > INITIAL_TILE_COUNT {
+        let remaining = places.len() - INITIAL_TILE_COUNT;
+        drop(places);
+        append_see_more_button(&parts.places_grid, remaining, {
+            let parts = clone_parts_handles(parts);
+            let ctx = ctx.clone();
+            move || render_places(&parts, ctx.clone(), true)
+        });
     }
 }
 
@@ -401,7 +448,7 @@ pub fn populate_explore<F>(
     sections: Vec<ExploreSection>,
     on_click: F,
 ) where
-    F: Fn(&str, String) + 'static,
+    F: Fn(&str, String, String) + 'static,
 {
     stop_spinner(&parts.things_spinner);
     stop_spinner(&parts.recents_spinner);
@@ -423,7 +470,7 @@ pub fn populate_explore<F>(
             .join(", ")
     );
 
-    let on_click = Rc::new(on_click);
+    let on_click: ExploreClick = Rc::new(on_click);
     for section in sections {
         if section.field_name.contains("city") {
             continue;
@@ -432,19 +479,17 @@ pub fn populate_explore<F>(
         // Immich v3 recently-added section.
         if section.field_name == "createdAt" || section.field_name == "updatedAt" {
             had_recents = true;
-            let mut items: Vec<_> = section.items.into_iter().take(12).collect();
-            // Sort newest first by value (ISO timestamp).
+            let mut items: Vec<_> = section.items.into_iter().collect();
             items.sort_by(|a, b| b.value.cmp(&a.value));
-            for item in items {
-                let label = format_relative_date(&item.value);
-                let tile = explore_tile(
-                    ctx.clone(),
-                    "recent",
-                    &label,
-                    &item.data.id,
-                    on_click.clone(),
-                );
-                parts.recents_grid.append(&tile);
+            render_recents_tiles(parts, &ctx, &items, &on_click, false);
+            if items.len() > INITIAL_TILE_COUNT {
+                let remaining = items.len().min(RECENTS_EXPANDED_COUNT) - INITIAL_TILE_COUNT;
+                let parts_clone = clone_parts_handles(parts);
+                let ctx_clone = ctx.clone();
+                let on_click_clone = on_click.clone();
+                append_see_more_button(&parts.recents_grid, remaining, move || {
+                    render_recents_tiles(&parts_clone, &ctx_clone, &items, &on_click_clone, true);
+                });
             }
             continue;
         }
@@ -470,6 +515,54 @@ pub fn populate_explore<F>(
 
     parts.things_section.set_visible(had_things);
     parts.recents_section.set_visible(had_recents);
+}
+
+/// Render recently-added tiles into the recents grid.
+fn render_recents_tiles(
+    parts: &ExploreViewParts,
+    ctx: &Arc<AppContext>,
+    items: &[crate::api_client::ExploreItem],
+    on_click: &ExploreClick,
+    expanded: bool,
+) {
+    while let Some(child) = parts.recents_grid.first_child() {
+        parts.recents_grid.remove(&child);
+    }
+    let limit = if expanded {
+        RECENTS_EXPANDED_COUNT
+    } else {
+        INITIAL_TILE_COUNT
+    };
+    for item in items.iter().take(limit) {
+        let label = format_relative_date(&item.value);
+        let tile = explore_tile(
+            ctx.clone(),
+            "recent",
+            &label,
+            &item.data.id,
+            on_click.clone(),
+        );
+        parts.recents_grid.append(&tile);
+    }
+}
+
+/// Append a "See More" button to a FlowBox grid.
+fn append_see_more_button<F: Fn() + 'static>(grid: &gtk::FlowBox, remaining: usize, on_expand: F) {
+    let btn = gtk::Button::builder()
+        .label(format!("See {remaining} more"))
+        .css_classes(["flat", "caption-heading"])
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    let grid_ref = grid.clone();
+    btn.connect_clicked(move |button| {
+        // Remove the button, then re-render expanded.
+        if let Some(parent) = button.parent() {
+            grid_ref.remove(&parent);
+        }
+        on_expand();
+    });
+    grid.append(&btn);
 }
 
 fn parse_iso_date(iso: &str) -> Option<(i64, u32, u32, u32, u32, u32)> {
@@ -642,7 +735,8 @@ fn explore_tile(
         .build();
 
     let value_owned = value.to_string();
-    button.connect_clicked(move |_| on_click(kind, value_owned.clone()));
+    let asset_id_owned = asset_id.to_string();
+    button.connect_clicked(move |_| on_click(kind, value_owned.clone(), asset_id_owned.clone()));
 
     spawn_asset_thumbnail(ctx, asset_id.to_string(), picture);
     button
