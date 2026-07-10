@@ -616,17 +616,26 @@ fn build_drop_overlay(content: gtk::Box) -> (gtk::Overlay, gtk::Revealer) {
         .label("Drop files to upload")
         .halign(gtk::Align::Center)
         .build();
-    let drop_box = gtk::Box::builder()
+    // Inner box centers the icon+label; outer box provides the full-window tint.
+    let inner = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Center)
         .vexpand(true)
+        .build();
+    inner.append(&drop_icon);
+    inner.append(&drop_label);
+
+    let drop_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .halign(gtk::Align::Fill)
+        .valign(gtk::Align::Fill)
+        .vexpand(true)
         .hexpand(true)
         .css_classes(["mimick-drop-overlay"])
         .build();
-    drop_box.append(&drop_icon);
-    drop_box.append(&drop_label);
+    drop_box.append(&inner);
 
     let revealer = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::Crossfade)
@@ -1099,6 +1108,7 @@ fn load_status(ui: Rc<LibraryWindowUi>) {
 /// fastest section returns.
 fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     if ui.explore.populated.get() {
+        log::debug!("Explore: populated=true, reusing cached widgets");
         ui.content_stack.set_visible_child_name("explore");
         return;
     }
@@ -1142,6 +1152,7 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     ));
     // Fetch places (slow paginated scan) only if not cached.
     if !explore_view::has_cached_places(&ui.explore) {
+        log::debug!("Explore: places cache empty, fetching from server");
         mctx.spawn_local(clone!(
             #[strong]
             ui,
@@ -1176,6 +1187,7 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
             }
         ));
     } else {
+        log::debug!("Explore: rendering places from cache");
         explore_view::render_cached_places(&ui.explore, ctx.clone());
     }
 
@@ -1455,6 +1467,54 @@ fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
             .tooltip_text(format!("{}:{}", album.id, album.album_name))
             .child(&action)
             .build();
+
+        // Per-row drop target: dragging files onto an album row uploads
+        // them directly into that album.
+        let row_drop = gtk::DropTarget::new(
+            gtk::gdk::FileList::static_type(),
+            gtk::gdk::DragAction::COPY,
+        );
+        let row_ref_enter = row.clone();
+        row_drop.connect_enter(move |target, _x, _y| {
+            if target.current_drop().is_some_and(|d| d.drag().is_some()) {
+                return gtk::gdk::DragAction::empty();
+            }
+            row_ref_enter.add_css_class("mimick-album-drop-hover");
+            gtk::gdk::DragAction::COPY
+        });
+        let row_ref_leave = row.clone();
+        row_drop.connect_leave(move |_target| {
+            row_ref_leave.remove_css_class("mimick-album-drop-hover");
+        });
+        let album_id = album.id.clone();
+        let album_name = album.album_name.clone();
+        let row_ref_drop = row.clone();
+        let ui_drop = ui.clone();
+        row_drop.connect_drop(move |target, value, _x, _y| {
+            row_ref_drop.remove_css_class("mimick-album-drop-hover");
+
+            if target.current_drop().is_some_and(|d| d.drag().is_some()) {
+                return false;
+            }
+            let file_list = match value.get::<gtk::gdk::FileList>() {
+                Ok(fl) => fl,
+                Err(_) => return false,
+            };
+            let paths: Vec<std::path::PathBuf> = file_list
+                .files()
+                .iter()
+                .filter_map(|f| f.path())
+                .filter(|p| crate::media_kinds::is_supported_path(p))
+                .collect();
+            if paths.is_empty() {
+                show_unsupported_drop_toast(&ui_drop);
+                return true;
+            }
+            handle_album_drop_upload(&ui_drop, (album_id.clone(), album_name.clone()), paths);
+            true
+        });
+        row.add_controller(row_drop);
+
         ui.sidebar.albums_list.append(&row);
     }
 

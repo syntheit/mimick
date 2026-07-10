@@ -433,6 +433,13 @@ fn render_places(parts: &ExploreViewParts, ctx: Arc<AppContext>, expanded: bool)
             let ctx = ctx.clone();
             move || render_places(&parts, ctx.clone(), true)
         });
+    } else if expanded && places.len() > INITIAL_TILE_COUNT {
+        drop(places);
+        append_show_less_button(&parts.places_grid, {
+            let parts = clone_parts_handles(parts);
+            let ctx = ctx.clone();
+            move || render_places(&parts, ctx.clone(), false)
+        });
     }
 }
 
@@ -546,17 +553,48 @@ fn render_recents_tiles(
     }
 }
 
-/// Append a "See More" button to a FlowBox grid.
+/// Append a card-sized "See More" tile to a FlowBox grid.
+///
+/// Matches the dimensions of adjacent explore tiles so the button fills a
+/// full card slot rather than appearing as a small inline text link.
 fn append_see_more_button<F: Fn() + 'static>(grid: &gtk::FlowBox, remaining: usize, on_expand: F) {
-    let btn = gtk::Button::builder()
+    let icon = gtk::Image::builder()
+        .icon_name("view-more-symbolic")
+        .pixel_size(24)
+        .halign(gtk::Align::Center)
+        .build();
+    let label = gtk::Label::builder()
         .label(format!("See {remaining} more"))
-        .css_classes(["flat", "caption-heading"])
+        .css_classes(["caption-heading"])
+        .halign(gtk::Align::Center)
+        .build();
+    // Spacer forces the same min-height as explore tiles.
+    let spacer = gtk::Box::builder()
+        .css_classes(["mimick-explore-spacer"])
+        .build();
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Center)
         .build();
+    content.append(&icon);
+    content.append(&label);
+    // Overlay the centered label on top of the spacer so the button
+    // has the same footprint as a regular tile.
+    let overlay = gtk::Overlay::builder()
+        .overflow(gtk::Overflow::Hidden)
+        .css_classes(["mimick-see-more-tile"])
+        .build();
+    overlay.set_child(Some(&spacer));
+    overlay.add_overlay(&content);
+
+    let btn = gtk::Button::builder()
+        .child(&overlay)
+        .css_classes(["flat"])
+        .build();
     let grid_ref = grid.clone();
     btn.connect_clicked(move |button| {
-        // Remove the button, then re-render expanded.
         if let Some(parent) = button.parent() {
             grid_ref.remove(&parent);
         }
@@ -565,6 +603,49 @@ fn append_see_more_button<F: Fn() + 'static>(grid: &gtk::FlowBox, remaining: usi
     grid.append(&btn);
 }
 
+/// Append a card-sized "Show Less" tile to collapse an expanded section.
+fn append_show_less_button<F: Fn() + 'static>(grid: &gtk::FlowBox, on_collapse: F) {
+    let icon = gtk::Image::builder()
+        .icon_name("go-up-symbolic")
+        .pixel_size(24)
+        .halign(gtk::Align::Center)
+        .build();
+    let label = gtk::Label::builder()
+        .label("Show Less")
+        .css_classes(["caption-heading"])
+        .halign(gtk::Align::Center)
+        .build();
+    let spacer = gtk::Box::builder()
+        .css_classes(["mimick-explore-spacer"])
+        .build();
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    content.append(&icon);
+    content.append(&label);
+    let overlay = gtk::Overlay::builder()
+        .overflow(gtk::Overflow::Hidden)
+        .css_classes(["mimick-see-more-tile"])
+        .build();
+    overlay.set_child(Some(&spacer));
+    overlay.add_overlay(&content);
+
+    let btn = gtk::Button::builder()
+        .child(&overlay)
+        .css_classes(["flat"])
+        .build();
+    let grid_ref = grid.clone();
+    btn.connect_clicked(move |button| {
+        if let Some(parent) = button.parent() {
+            grid_ref.remove(&parent);
+        }
+        on_collapse();
+    });
+    grid.append(&btn);
+}
 fn parse_iso_date(iso: &str) -> Option<(i64, u32, u32, u32, u32, u32)> {
     let parsed = iso
         .replace('T', " ")

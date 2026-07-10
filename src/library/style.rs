@@ -85,6 +85,12 @@ window.mimick-wide box.mimick-explore-spacer {
     min-height: 150px;
 }
 
+overlay.mimick-see-more-tile {
+    border-radius: 6px;
+    background-color: alpha(@view_fg_color, 0.06);
+    border: 1px dashed alpha(@view_fg_color, 0.2);
+}
+
 box.mimick-stat-card {
     border-radius: 12px;
     padding: 14px;
@@ -293,22 +299,24 @@ box.mimick-preview-unavailable {
    Shown when files are dragged over the window.  */
 
 box.mimick-drop-overlay {
-    background: alpha(@accent_bg_color, 0.12);
-    border: 2px dashed @accent_color;
-    border-radius: 12px;
-    margin: 24px;
+    background: alpha(@accent_bg_color, 0.50);
+    border: none;
+    border-radius: 0;
+    margin: 0;
     transition: opacity 200ms ease-in-out;
 }
 
 box.mimick-drop-overlay image {
     -gtk-icon-size: 48px;
-    opacity: 0.7;
+    opacity: 0.85;
+    color: @accent_fg_color;
 }
 
 box.mimick-drop-overlay label {
     font-size: 1.1em;
     font-weight: 600;
-    opacity: 0.8;
+    opacity: 0.9;
+    color: @accent_fg_color;
 }
 
 /* ── Drag badge (multi-file count) ─────────────────────────────── */
@@ -322,6 +330,15 @@ box.mimick-drag-badge {
     font-size: 11px;
     min-width: 20px;
     min-height: 20px;
+}
+
+/* ── Album sidebar row drop-hover ──────────────────────────────── */
+
+row.mimick-album-drop-hover {
+    background: alpha(@accent_bg_color, 0.25);
+    border-radius: 6px;
+    transition: background 150ms ease-in-out, transform 150ms ease-in-out;
+    transform: scale(1.03);
 }
 "#;
 
