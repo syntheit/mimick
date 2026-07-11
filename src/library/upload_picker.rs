@@ -56,7 +56,7 @@ pub fn pick_and_upload(
     });
 }
 
-pub(super) fn spawn_enqueue(
+pub(crate) fn spawn_enqueue(
     ctx: Arc<AppContext>,
     album: Option<(String, String)>,
     paths: Vec<PathBuf>,
@@ -66,7 +66,7 @@ pub(super) fn spawn_enqueue(
 
 /// Enqueue files for upload and invoke `on_complete(queued, skipped)` on the
 /// main context when all files have been hashed and enqueued.
-pub(super) fn spawn_enqueue_with_callback<F>(
+pub(crate) fn spawn_enqueue_with_callback<F>(
     ctx: Arc<AppContext>,
     album: Option<(String, String)>,
     paths: Vec<PathBuf>,

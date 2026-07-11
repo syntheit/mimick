@@ -116,6 +116,23 @@ impl LibraryAssetModel {
         *self.imp().items.borrow_mut() = objects;
         self.items_changed(0, prev_n, new_n);
     }
+
+    /// Append additional `AssetObject`s to the end of the model.
+    ///
+    /// Emits a tail-only `items_changed` so the existing viewport is unaffected.
+    /// Used by the staging view drop handler to add newly-dropped files.
+    pub fn append_objects(&self, objects: &[AssetObject]) {
+        if objects.is_empty() {
+            return;
+        }
+        let prev_n = {
+            let mut items = self.imp().items.borrow_mut();
+            let prev = items.len() as u32;
+            items.extend_from_slice(objects);
+            prev
+        };
+        self.items_changed(prev_n, 0, objects.len() as u32);
+    }
 }
 
 fn build_sorted_asset_objects(

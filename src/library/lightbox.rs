@@ -79,6 +79,29 @@ fn original_preview_cache_path(
     cache_dir.join(format!("{asset_id}.{ext}"))
 }
 
+/// Create a properly-named export copy of a cached file for drag-out.
+///
+/// Returns `Some(path)` with the original filename visible to file managers.
+/// Falls back to `source` if the export directory isn't available.
+fn drag_export_path(
+    asset_id: &str,
+    filename: &str,
+    source: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let export_dir = crate::profile::cache_dir()?.join("drag_export");
+    let _ = std::fs::create_dir_all(&export_dir);
+    let prefix = &asset_id[..8.min(asset_id.len())];
+    let export = export_dir.join(format!("{prefix}_{filename}"));
+    if export.exists() {
+        return Some(export);
+    }
+    if std::fs::hard_link(source, &export).is_ok() || std::fs::copy(source, &export).is_ok() {
+        Some(export)
+    } else {
+        Some(source.to_path_buf())
+    }
+}
+
 /// Populate the details sidebar with sectioned EXIF metadata.
 ///
 /// Groups fall into three categories — Camera, Image, Location — each rendered
@@ -559,6 +582,27 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     });
     picture_overlay.add_overlay(&video_badge_button);
 
+    // Drag source for exporting the current asset's original file.
+    // `lightbox_drag_path` is updated by the load logic whenever an asset
+    // is displayed (from local path or preview cache).
+    let lightbox_drag_path: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::new(RefCell::new(None));
+    {
+        let drag_source = gtk::DragSource::new();
+        drag_source.set_actions(gtk::gdk::DragAction::COPY);
+
+        let drag_path = lightbox_drag_path.clone();
+        drag_source.connect_prepare(move |_source, _x, _y| {
+            let path = drag_path.borrow().clone()?;
+            if !path.exists() {
+                return None;
+            }
+            let file = gtk::gio::File::for_path(&path);
+            Some(gtk::gdk::ContentProvider::for_value(&file.to_value()))
+        });
+
+        picture_overlay.add_controller(drag_source);
+    }
+
     let active_a = Rc::new(Cell::new(true));
     let zoom_level = Rc::new(Cell::new(1.0_f64));
     let initial_full = ui.ctx.config.read().data.library_preview_full_resolution;
@@ -720,11 +764,14 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let active_a = active_a.clone();
             let video_badge_button = video_badge_button.clone();
             let video_badge_target = video_badge_target.clone();
+            let lightbox_drag_path = lightbox_drag_path.clone();
             let our_gen = load_gen.get().wrapping_add(1);
             load_gen.set(our_gen);
             unavailable_overlay.set_reveal_child(false);
             unavailable_overlay.set_can_target(false);
             *unavailable_path.borrow_mut() = None;
+            // Clear drag path while loading; updated once resolved.
+            *lightbox_drag_path.borrow_mut() = None;
             // Videos use the still thumbnail as a poster + play badge; image
             // decoders would all fail and fall through to "unavailable".
             let is_video =
@@ -815,6 +862,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     {
                         if is_current() {
                             target.set_paintable(Some(&texture));
+                            *lightbox_drag_path.borrow_mut() =
+                                Some(std::path::PathBuf::from(&local_path));
                             commit_visible();
                             cancel_loader.set(true);
                             loader.set_reveal_child(false);
@@ -885,6 +934,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         }
                         if let Some(texture) = decoded {
                             target.set_paintable(Some(&texture));
+                            *lightbox_drag_path.borrow_mut() =
+                                drag_export_path(&asset_id, &filename, &temp);
                         } else {
                             show_unavailable(Some(temp.display().to_string()));
                         }

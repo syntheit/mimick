@@ -9,6 +9,7 @@ use super::{
     AssetContextMenuHandler, GridQuality, LibraryAssetModel, MasonryCanvas, ThumbnailCache, imp,
     item_at_x, row_at_y,
 };
+use crate::app_context::AppContext;
 use crate::library::asset_object::AssetObject;
 
 impl Default for MasonryCanvas {
@@ -125,6 +126,112 @@ impl MasonryCanvas {
         self.add_controller(primary_click_controller(self));
         self.add_controller(secondary_click_controller(self));
     }
+
+    /// Install a `DragSource` for exporting original asset files via drag.
+    ///
+    /// Must be called after `new()` once the thumbnail cache is set up.
+    /// The drag source resolves the original file from either the local path
+    /// (for local/synced assets) or the lightbox preview cache (for remote assets
+    /// that have been viewed in full resolution).
+    pub fn install_drag_source(&self, ctx: Arc<AppContext>) {
+        let drag_source = gtk::DragSource::new();
+        drag_source.set_actions(gtk::gdk::DragAction::COPY);
+
+        let weak = self.downgrade();
+        let ctx_prepare = ctx.clone();
+        drag_source.connect_prepare(move |_source, x, y| {
+            let canvas = weak.upgrade()?;
+            let files = collect_drag_files(&canvas, x, y, &ctx_prepare)?;
+            Some(files_to_content_provider(files))
+        });
+
+        let weak2 = self.downgrade();
+        drag_source.connect_drag_begin(move |source, _drag| {
+            let Some(canvas) = weak2.upgrade() else {
+                return;
+            };
+            canvas.imp().drag_active.set(true);
+            let count = selected_count(&canvas);
+            if count > 1 {
+                source.set_icon(Some(&build_drag_badge(count)), 0, 0);
+            }
+        });
+
+        let weak3 = self.downgrade();
+        drag_source.connect_drag_end(move |_, _, _| {
+            if let Some(canvas) = weak3.upgrade() {
+                canvas.imp().drag_active.set(false);
+            }
+        });
+
+        self.add_controller(drag_source);
+    }
+}
+
+/// Collect gio::Files for the current drag operation (multi-select or single).
+fn collect_drag_files(
+    canvas: &MasonryCanvas,
+    x: f64,
+    y: f64,
+    ctx: &AppContext,
+) -> Option<Vec<gtk::gio::File>> {
+    let imp = canvas.imp();
+    let sel = imp.selection.get()?;
+    let model = imp.model.get()?;
+    let mut files = Vec::new();
+
+    if imp.select_mode.get() {
+        for i in 0..sel.n_items() {
+            if sel.is_selected(i)
+                && let Some(path) = resolve_drag_path(model, i, ctx)
+            {
+                files.push(gtk::gio::File::for_path(&path));
+            }
+        }
+    }
+
+    if files.is_empty() {
+        let pos = canvas.hit_test(x, y)?;
+        let path = resolve_drag_path(model, pos, ctx)?;
+        files.push(gtk::gio::File::for_path(&path));
+    }
+
+    if files.is_empty() { None } else { Some(files) }
+}
+
+fn files_to_content_provider(files: Vec<gtk::gio::File>) -> gtk::gdk::ContentProvider {
+    if files.len() == 1 {
+        gtk::gdk::ContentProvider::for_value(&files[0].to_value())
+    } else {
+        let file_list = gtk::gdk::FileList::from_array(&files);
+        gtk::gdk::ContentProvider::for_value(&file_list.to_value())
+    }
+}
+
+/// Count selected items, or 1 if not in select mode.
+fn selected_count(canvas: &MasonryCanvas) -> u32 {
+    let imp = canvas.imp();
+    if !imp.select_mode.get() {
+        return 1;
+    }
+    imp.selection
+        .get()
+        .map(|s| (0..s.n_items()).filter(|i| s.is_selected(*i)).count() as u32)
+        .unwrap_or(1)
+}
+
+/// Build a badge paintable showing the drag count.
+fn build_drag_badge(count: u32) -> gtk::WidgetPaintable {
+    let label = gtk::Label::builder()
+        .label(format!("{count} files"))
+        .css_classes(["mimick-drag-badge"])
+        .build();
+    let container = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .css_classes(["mimick-drag-badge"])
+        .build();
+    container.append(&label);
+    gtk::WidgetPaintable::new(Some(&container))
 }
 
 fn connect_model_changes(canvas: &MasonryCanvas, model: &LibraryAssetModel) {
@@ -192,8 +299,13 @@ fn primary_click_controller(canvas: &MasonryCanvas) -> gtk::GestureClick {
     let primary = gtk::GestureClick::new();
     primary.set_button(gtk::gdk::BUTTON_PRIMARY);
     let weak = canvas.downgrade();
-    primary.connect_pressed(move |gesture, _, x, y| {
+    // Use `released` instead of `pressed` so a drag gesture that starts
+    // from the same press doesn't also trigger lightbox activation.
+    primary.connect_released(move |gesture, _, x, y| {
         if let Some(canvas) = weak.upgrade() {
+            if canvas.imp().drag_active.get() {
+                return;
+            }
             canvas.handle_primary_click(gesture, x, y);
         }
     });
@@ -223,4 +335,103 @@ fn toggle_selection(sel: &gtk::MultiSelection, pos: u32) {
 fn select_range(sel: &gtk::MultiSelection, lo: u32, hi: u32) {
     let count = hi - lo + 1;
     sel.select_range(lo, count, false);
+}
+
+/// Resolve the drag-export path for the asset at `pos`.
+///
+/// Priority: local path > drag export cache (with original filename)
+///         > lightbox preview cache (hardlinked to proper name)
+///         > on-demand download.
+fn resolve_drag_path(
+    model: &LibraryAssetModel,
+    pos: u32,
+    ctx: &AppContext,
+) -> Option<std::path::PathBuf> {
+    let obj = model.item(pos).and_downcast::<AssetObject>()?;
+    let local_path = obj.property::<String>("local-path");
+    if !local_path.is_empty() {
+        let p = std::path::PathBuf::from(&local_path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    let remote_id = obj.property::<String>("remote-id");
+    let filename = obj.property::<String>("filename");
+    if remote_id.is_empty() || filename.is_empty() {
+        return None;
+    }
+
+    let export_path = export_cache_path(&remote_id, &filename)?;
+    if export_path.exists() {
+        return Some(export_path);
+    }
+
+    if try_link_from_preview(&remote_id, &filename, &export_path) {
+        return Some(export_path);
+    }
+
+    if download_for_export(ctx, &remote_id, &filename, &export_path) {
+        Some(export_path)
+    } else {
+        None
+    }
+}
+
+fn export_cache_path(remote_id: &str, filename: &str) -> Option<std::path::PathBuf> {
+    let export_dir = crate::profile::cache_dir()?.join("drag_export");
+    let _ = std::fs::create_dir_all(&export_dir);
+    let safe_name = format!("{}_{}", &remote_id[..8.min(remote_id.len())], filename);
+    Some(export_dir.join(&safe_name))
+}
+
+fn try_link_from_preview(remote_id: &str, filename: &str, export_path: &std::path::Path) -> bool {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty())
+        .unwrap_or("bin");
+    let preview_dir = match crate::profile::cache_dir() {
+        Some(p) => p.join("preview"),
+        None => return false,
+    };
+    let cached = preview_dir.join(format!("{remote_id}.{ext}"));
+
+    cached.exists()
+        && (std::fs::hard_link(&cached, export_path).is_ok()
+            || std::fs::copy(&cached, export_path).is_ok())
+}
+
+fn download_for_export(
+    ctx: &AppContext,
+    remote_id: &str,
+    filename: &str,
+    export_path: &std::path::Path,
+) -> bool {
+    log::debug!("Drag export: downloading {} ({})", remote_id, filename);
+    let api = ctx.api_client.clone();
+    let id = remote_id.to_string();
+    let dest = export_path.to_path_buf();
+
+    let downloaded = std::thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                log::error!("Failed to create tokio runtime for drag download: {}", e);
+                return false;
+            }
+        };
+        match rt.block_on(api.download_original_to_file(&id, &dest, None)) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("Drag export download failed for {}: {}", id, e);
+                let _ = std::fs::remove_file(&dest);
+                false
+            }
+        }
+    })
+    .join()
+    .unwrap_or(false);
+
+    downloaded && export_path.exists()
 }

@@ -93,6 +93,7 @@ impl ImmichApiClient {
         let mut page: u32 = 1;
         const PAGE_SIZE: u32 = 250;
         const MAX_PAGES: u32 = 500;
+        let start = std::time::Instant::now();
 
         loop {
             let body = serde_json::json!({
@@ -136,6 +137,12 @@ impl ImmichApiClient {
             .map(|(city, asset_id)| PlaceItem { city, asset_id })
             .collect();
         places.sort_by(|a, b| a.city.cmp(&b.city));
+        log::debug!(
+            "fetch_all_places: {} cities from {} pages in {:.1}s",
+            places.len(),
+            page,
+            start.elapsed().as_secs_f64()
+        );
         Ok(places)
     }
 

@@ -144,8 +144,11 @@ impl ImmichApiClient {
         }
     }
 
-    /// Retrieve full EXIF metadata and details for a given asset ID.
-    pub async fn fetch_asset_details(&self, asset_id: &str) -> Result<AssetDetails, String> {
+    /// Generic helper to fetch asset JSON details.
+    async fn fetch_asset_generic<T: serde::de::DeserializeOwned>(
+        &self,
+        asset_id: &str,
+    ) -> Result<T, String> {
         let base_url = self
             .get_active_url()
             .await
@@ -161,13 +164,22 @@ impl ImmichApiClient {
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => resp
-                .json::<AssetDetails>()
-                .await
-                .map_err(|err| err.to_string()),
+            Ok(resp) if resp.status().is_success() => {
+                resp.json::<T>().await.map_err(|err| err.to_string())
+            }
             Ok(resp) => Err(format!("HTTP {}", resp.status())),
             Err(err) => Err(err.to_string()),
         }
+    }
+
+    /// Retrieve full EXIF metadata and details for a given asset ID.
+    pub async fn fetch_asset_details(&self, asset_id: &str) -> Result<AssetDetails, String> {
+        self.fetch_asset_generic(asset_id).await
+    }
+
+    /// Fetch a single asset as a `LibraryAsset` by its ID.
+    pub async fn fetch_asset_by_id(&self, asset_id: &str) -> Result<LibraryAsset, String> {
+        self.fetch_asset_generic(asset_id).await
     }
 
     /// Download original source file of a given asset ID and save it locally.

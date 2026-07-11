@@ -5,7 +5,7 @@
 //! explore dashboard, album grids, lightbox, sidebar, and thumbnail
 //! caching independently.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -125,6 +125,7 @@ struct LibraryWindowUi {
     last_seen_upload_batch: Cell<u64>,
     narrow: Rc<Cell<bool>>,
     split: libadwaita::OverlaySplitView,
+    drop_overlay: gtk::Revealer,
 }
 
 /// Build and display the main library window application layout.
@@ -422,9 +423,12 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     content.append(&bulk_bar);
     content.append(&transfer_bar);
 
+    // Drop overlay: shown when files are dragged over the window.
+    let (content_with_drop, drop_overlay) = build_drop_overlay(content);
+
     let split = libadwaita::OverlaySplitView::builder()
         .sidebar(&sidebar.root)
-        .content(&content)
+        .content(&content_with_drop)
         .show_sidebar(true)
         .enable_show_gesture(true)
         .enable_hide_gesture(true)
@@ -550,6 +554,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         last_seen_upload_batch: Cell::new(0),
         narrow: narrow_flag.clone(),
         split: split.clone(),
+        drop_overlay: drop_overlay.clone(),
     });
     *ui.grid.context_menu_handler.borrow_mut() = Some(Box::new(clone!(
         #[strong]
@@ -568,6 +573,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     connect_controls(ui.clone());
     connect_grid_handlers(ui.clone());
     connect_filters_button(ui.clone(), filters_button);
+    connect_drop_target(ui.clone());
 
     let close_ctx = ui.ctx.clone();
     window.connect_close_request(move |_| {
@@ -594,6 +600,187 @@ fn bootstrap_window(ui: Rc<LibraryWindowUi>) {
     spawn_server_ping_loop(ui.clone());
     spawn_transfer_poll_loop(ui.clone());
     load_source_page(ui, initial_request, false);
+}
+
+/// Build a drop overlay widget and wrap `content` in a `gtk::Overlay`.
+///
+/// Returns the overlay wrapper (to be used as the content widget) and the
+/// revealer handle for toggling visibility from the `DropTarget` handlers.
+fn build_drop_overlay(content: gtk::Box) -> (gtk::Overlay, gtk::Revealer) {
+    let drop_icon = gtk::Image::builder()
+        .icon_name("document-send-symbolic")
+        .pixel_size(48)
+        .halign(gtk::Align::Center)
+        .build();
+    let drop_label = gtk::Label::builder()
+        .label("Drop files to upload")
+        .halign(gtk::Align::Center)
+        .build();
+    // Inner box centers the icon+label; outer box provides the full-window tint.
+    let inner = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .vexpand(true)
+        .build();
+    inner.append(&drop_icon);
+    inner.append(&drop_label);
+
+    let drop_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .halign(gtk::Align::Fill)
+        .valign(gtk::Align::Fill)
+        .vexpand(true)
+        .hexpand(true)
+        .css_classes(["mimick-drop-overlay"])
+        .build();
+    drop_box.append(&inner);
+
+    let revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::Crossfade)
+        .transition_duration(180)
+        .reveal_child(false)
+        .can_target(false)
+        .vexpand(true)
+        .hexpand(true)
+        .child(&drop_box)
+        .build();
+
+    let overlay = gtk::Overlay::builder().build();
+    overlay.set_child(Some(&content));
+    overlay.add_overlay(&revealer);
+
+    (overlay, revealer)
+}
+
+/// Attach a `DropTarget` to the library window for drag-and-drop file uploads.
+fn connect_drop_target(ui: Rc<LibraryWindowUi>) {
+    let drop_target = gtk::DropTarget::new(
+        gtk::gdk::FileList::static_type(),
+        gtk::gdk::DragAction::COPY,
+    );
+
+    let ui_enter = ui.clone();
+    drop_target.connect_enter(move |target, _x, _y| {
+        // Reject internal drags (from our own DragSource).
+        if target.current_drop().is_some_and(|d| d.drag().is_some()) {
+            return gtk::gdk::DragAction::empty();
+        }
+        ui_enter.drop_overlay.set_reveal_child(true);
+        gtk::gdk::DragAction::COPY
+    });
+
+    let ui_leave = ui.clone();
+    drop_target.connect_leave(move |_target| {
+        ui_leave.drop_overlay.set_reveal_child(false);
+    });
+
+    let ui_drop = ui.clone();
+    drop_target.connect_drop(move |target, value, _x, _y| {
+        ui_drop.drop_overlay.set_reveal_child(false);
+
+        // Reject internal drags.
+        if target.current_drop().is_some_and(|d| d.drag().is_some()) {
+            return false;
+        }
+
+        handle_drop(&ui_drop, value)
+    });
+
+    ui.window.add_controller(drop_target);
+}
+
+fn handle_drop(ui: &LibraryWindowUi, value: &gtk::glib::Value) -> bool {
+    let file_list = match value.get::<gtk::gdk::FileList>() {
+        Ok(fl) => fl,
+        Err(_) => return false,
+    };
+
+    let paths: Vec<std::path::PathBuf> = file_list
+        .files()
+        .iter()
+        .filter_map(|f| f.path())
+        .filter(|p| crate::media_kinds::is_supported_path(p))
+        .collect();
+
+    if paths.is_empty() {
+        show_unsupported_drop_toast(ui);
+        return true;
+    }
+
+    let album = match ui.ctx.library_state.lock().source.clone() {
+        LibrarySource::Album { id, name }
+        | LibrarySource::AlbumLocal { id, name }
+        | LibrarySource::AlbumUnified { id, name } => Some((id, name)),
+        _ => None,
+    };
+
+    if let Some(album) = album {
+        handle_album_drop_upload(ui, album, paths);
+    } else {
+        handle_library_drop_upload(ui, paths);
+    }
+
+    true
+}
+
+fn show_unsupported_drop_toast(ui: &LibraryWindowUi) {
+    let toast = libadwaita::Toast::new("No supported media files in drop");
+    if let Some(overlay) = ui
+        .window
+        .content()
+        .and_then(|w| w.first_child())
+        .and_downcast::<libadwaita::ToastOverlay>()
+    {
+        overlay.add_toast(toast);
+    } else {
+        log::info!("No supported media files in drop");
+    }
+}
+
+fn handle_album_drop_upload(
+    ui: &LibraryWindowUi,
+    album: (String, String),
+    paths: Vec<std::path::PathBuf>,
+) {
+    let count = paths.len();
+    upload_picker::spawn_enqueue_with_callback(
+        ui.ctx.clone(),
+        Some(album.clone()),
+        paths,
+        move |queued, _skipped| {
+            log::info!(
+                "Drop upload to album '{}': queued {}/{} file(s)",
+                album.1,
+                queued,
+                count
+            );
+        },
+    );
+}
+
+fn handle_library_drop_upload(ui: &LibraryWindowUi, paths: Vec<std::path::PathBuf>) {
+    let count = paths.len();
+    let ctx_for_album = ui.ctx.clone();
+    let window_for_album = ui.window.clone();
+    let paths_for_album = paths.clone();
+
+    upload_picker::spawn_enqueue_with_callback(
+        ui.ctx.clone(),
+        None,
+        paths,
+        move |queued, _skipped| {
+            log::info!(
+                "Drop upload to library: queued {}/{} file(s)",
+                queued,
+                count
+            );
+            if queued > 0 {
+                staging_view::show_album_picker(window_for_album, ctx_for_album, paths_for_album);
+            }
+        },
+    );
 }
 
 fn spawn_server_ping_loop(ui: Rc<LibraryWindowUi>) {
@@ -921,6 +1108,7 @@ fn load_status(ui: Rc<LibraryWindowUi>) {
 /// fastest section returns.
 fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     if ui.explore.populated.get() {
+        log::debug!("Explore: populated=true, reusing cached widgets");
         ui.content_stack.set_visible_child_name("explore");
         return;
     }
@@ -962,35 +1150,46 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
             });
         }
     ));
-
-    mctx.spawn_local(clone!(
-        #[strong]
-        ui,
-        #[strong]
-        ctx,
-        async move {
-            let places_res = ctx.api_client.fetch_all_places().await;
-            if let Err(e) = &places_res
-                && (e.contains("HTTP 401") || e.contains("HTTP 403"))
-            {
-                show_library_permission_error(&ui.window);
+    // Fetch places (slow paginated scan) only if not cached.
+    if !explore_view::has_cached_places(&ui.explore) {
+        log::debug!("Explore: places cache empty, fetching from server");
+        mctx.spawn_local(clone!(
+            #[strong]
+            ui,
+            #[strong]
+            ctx,
+            async move {
+                let places_res = ctx.api_client.fetch_all_places().await;
+                if let Err(e) = &places_res
+                    && (e.contains("HTTP 401") || e.contains("HTTP 403"))
+                {
+                    show_library_permission_error(&ui.window);
+                }
+                let places = places_res.unwrap_or_default();
+                let click_ui = ui.clone();
+                explore_view::populate_places(
+                    &ui.explore,
+                    ctx.clone(),
+                    places,
+                    move |_kind, value, _asset_id| {
+                        let next = LibrarySource::AdvancedSearch {
+                            filters: Box::new(MetadataSearchFilters {
+                                city: Some(value.clone()),
+                                ..Default::default()
+                            }),
+                        };
+                        let request = click_ui.ctx.library_state.lock().switch_source(next);
+                        click_ui.search_entry.set_text(&value);
+                        apply_timeline_ui_state(&click_ui, &request.1);
+                        load_source_page(click_ui.clone(), request, false);
+                    },
+                );
             }
-            let places = places_res.unwrap_or_default();
-            let click_ui = ui.clone();
-            explore_view::populate_places(&ui.explore, ctx.clone(), places, move |_kind, value| {
-                let next = LibrarySource::AdvancedSearch {
-                    filters: Box::new(MetadataSearchFilters {
-                        city: Some(value.clone()),
-                        ..Default::default()
-                    }),
-                };
-                let request = click_ui.ctx.library_state.lock().switch_source(next);
-                click_ui.search_entry.set_text(&value);
-                apply_timeline_ui_state(&click_ui, &request.1);
-                load_source_page(click_ui.clone(), request, false);
-            });
-        }
-    ));
+        ));
+    } else {
+        log::debug!("Explore: rendering places from cache");
+        explore_view::render_cached_places(&ui.explore, ctx.clone());
+    }
 
     mctx.spawn_local(clone!(
         #[strong]
@@ -1010,7 +1209,11 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                 &ui.explore,
                 ctx.clone(),
                 sections,
-                move |_kind, value| {
+                move |kind, value, asset_id| {
+                    if kind == "recent" {
+                        open_asset_in_lightbox(click_ui.clone(), asset_id);
+                        return;
+                    }
                     let next = LibrarySource::SmartSearch {
                         query: value.clone(),
                     };
@@ -1020,6 +1223,60 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                     load_source_page(click_ui.clone(), request, false);
                 },
             );
+        }
+    ));
+}
+
+/// Fetch a single asset by ID and open it in lightbox without leaving explore.
+///
+/// Temporarily loads the asset into the grid model so the lightbox can display
+/// it, then restores the previous library state when the lightbox page is popped.
+fn open_asset_in_lightbox(ui: Rc<LibraryWindowUi>, asset_id: String) {
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        ui,
+        async move {
+            let asset = match ui.ctx.api_client.fetch_asset_by_id(&asset_id).await {
+                Ok(a) => a,
+                Err(e) => {
+                    log::warn!("Failed to fetch asset {} for lightbox: {}", asset_id, e);
+                    return;
+                }
+            };
+
+            // Snapshot the current state so we can restore it after lightbox.
+            let prev_source = ui.ctx.library_state.lock().source.clone();
+
+            // Temporarily load just this asset so open_lightbox can read it.
+            {
+                let mut state = ui.ctx.library_state.lock();
+                let generation = state.generation;
+                state.replace_assets_with_more(generation, vec![asset], false);
+                ui.grid
+                    .model
+                    .reset(&ui.ctx, &state.assets, &state.sort_mode);
+            }
+
+            // Open lightbox at position 0 (the single asset).
+            open_lightbox(ui.clone(), 0);
+
+            // After the lightbox page is popped, restore the explore state.
+            let restore_ui = ui.clone();
+            let handler_id = Rc::new(RefCell::new(None::<glib::SignalHandlerId>));
+            let handler_id_clone = handler_id.clone();
+            let id = ui.nav.connect_popped(move |nav, _page| {
+                let request = restore_ui
+                    .ctx
+                    .library_state
+                    .lock()
+                    .switch_source(prev_source.clone());
+                load_source_page(restore_ui.clone(), request, false);
+                // Disconnect this handler so it only fires once.
+                if let Some(id) = handler_id_clone.borrow_mut().take() {
+                    nav.disconnect(id);
+                }
+            });
+            *handler_id.borrow_mut() = Some(id);
         }
     ));
 }
@@ -1190,6 +1447,79 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
     ));
 }
 
+fn setup_album_drop_target(
+    ui: &Rc<LibraryWindowUi>,
+    row: &gtk::ListBoxRow,
+    album_id: String,
+    album_name: String,
+) {
+    let row_drop = gtk::DropTarget::new(
+        gtk::gdk::FileList::static_type(),
+        gtk::gdk::DragAction::COPY,
+    );
+    let row_ref_enter = row.clone();
+    row_drop.connect_enter(move |target, _x, _y| {
+        if target.current_drop().is_some_and(|d| d.drag().is_some()) {
+            return gtk::gdk::DragAction::empty();
+        }
+        row_ref_enter.add_css_class("mimick-album-drop-hover");
+        gtk::gdk::DragAction::COPY
+    });
+    let row_ref_leave = row.clone();
+    row_drop.connect_leave(move |_target| {
+        row_ref_leave.remove_css_class("mimick-album-drop-hover");
+    });
+    let row_ref_drop = row.clone();
+    let ui_drop = ui.clone();
+    row_drop.connect_drop(move |target, value, _x, _y| {
+        row_ref_drop.remove_css_class("mimick-album-drop-hover");
+
+        if target.current_drop().is_some_and(|d| d.drag().is_some()) {
+            return false;
+        }
+        let file_list = match value.get::<gtk::gdk::FileList>() {
+            Ok(fl) => fl,
+            Err(_) => return false,
+        };
+        let paths: Vec<std::path::PathBuf> = file_list
+            .files()
+            .iter()
+            .filter_map(|f| f.path())
+            .filter(|p| crate::media_kinds::is_supported_path(p))
+            .collect();
+        if paths.is_empty() {
+            show_unsupported_drop_toast(&ui_drop);
+            return true;
+        }
+        handle_album_drop_upload(&ui_drop, (album_id.clone(), album_name.clone()), paths);
+        true
+    });
+    row.add_controller(row_drop);
+}
+
+fn build_album_sidebar_row(
+    ui: &Rc<LibraryWindowUi>,
+    album: &crate::api_client::LibraryAlbum,
+) -> gtk::ListBoxRow {
+    let subtitle = format!("{} asset(s)", album.asset_count);
+    let action = libadwaita::ActionRow::builder()
+        .title(&album.album_name)
+        .subtitle(&subtitle)
+        .title_lines(1)
+        .subtitle_lines(1)
+        .build();
+    let row = gtk::ListBoxRow::builder()
+        .tooltip_text(format!("{}:{}", album.id, album.album_name))
+        .child(&action)
+        .build();
+
+    // Per-row drop target: dragging files onto an album row uploads
+    // them directly into that album.
+    setup_album_drop_target(ui, &row, album.id.clone(), album.album_name.clone());
+
+    row
+}
+
 /// Repopulate and select the active album or fixed row in the side navigation sidebar.
 fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
     while let Some(row) = ui.sidebar.albums_list.first_child() {
@@ -1199,17 +1529,7 @@ fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
     let selected_source = ui.ctx.library_state.lock().source.clone();
     let albums = ui.ctx.library_state.lock().albums.clone();
     for album in albums {
-        let subtitle = format!("{} asset(s)", album.asset_count);
-        let action = libadwaita::ActionRow::builder()
-            .title(&album.album_name)
-            .subtitle(&subtitle)
-            .title_lines(1)
-            .subtitle_lines(1)
-            .build();
-        let row = gtk::ListBoxRow::builder()
-            .tooltip_text(format!("{}:{}", album.id, album.album_name))
-            .child(&action)
-            .build();
+        let row = build_album_sidebar_row(ui, &album);
         ui.sidebar.albums_list.append(&row);
     }
 

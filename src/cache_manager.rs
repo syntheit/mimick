@@ -11,6 +11,7 @@ pub const CACHE_SUBDIRS: &[&str] = &[
     "video",
     "preview",
     "open-in",
+    "drag_export",
 ];
 
 /// Yield to the scheduler every N file ops during a prune sweep.
