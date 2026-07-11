@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Drag-and-drop file import support for the Library and Staging windows.
+- Ability to drag files directly onto Album rows in the sidebar to upload directly to that album.
+- Drag-and-drop export support to drag assets out of the masonry grid and lightbox to your system (auto-downloads originals).
+- "Recently Added" section on the Explore page showing timestamps as relative dates.
+- Expandable "See More" and "Show Less" buttons on Explore page sections.
+- Caching of Places data on the Explore page for instant revisits.
+- Proper fallback behavior for the lightbox when opened directly from the Explore view.
+
+### Changed
+
+- Bumped Rust toolchain to version 1.97.
+- Adjusted order of sections on Explore page: People, Places, Recently Added, Things.
+- Filtered `createdAt` attributes from the Things grid.
+- Upgraded the Explore view for Immich v3 API compatibility.
+
 ## [9.8.0] - 2026-07-08
 
 ### Added
