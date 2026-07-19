@@ -838,10 +838,9 @@ mod tests {
     #[test]
     fn test_memory_hit_after_insert() {
         let cache = cache(1024);
-        cache
-            .memory
-            .lock()
-            .insert("thumbnail:1".into(), texture_from_png());
+        // Insert under the same decode-dim-scoped key get_cached resolves to.
+        let key = mem_cache_key("1", ThumbnailSize::Thumbnail, grid_decode_dim(ThumbnailSize::Thumbnail));
+        cache.memory.lock().insert(key, texture_from_png());
 
         assert!(cache.get_cached("1", ThumbnailSize::Thumbnail).is_some());
     }
