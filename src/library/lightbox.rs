@@ -41,6 +41,7 @@ mod dismiss_bin {
 
         #[derive(Default)]
         pub struct DismissBin {
+            pub offset_x: Cell<f64>,
             pub offset_y: Cell<f64>,
             pub opacity: Cell<f64>,
         }
@@ -73,14 +74,17 @@ mod dismiss_bin {
             fn snapshot(&self, snapshot: &gtk::Snapshot) {
                 let widget = self.obj();
                 let opacity = self.opacity.get().clamp(0.0, 1.0);
+                let offset_x = self.offset_x.get();
                 let offset_y = self.offset_y.get();
                 let faded = opacity < 0.999;
                 if faded {
                     snapshot.push_opacity(opacity);
                 }
-                if offset_y.abs() > 0.01 {
-                    let transform = gsk::Transform::new()
-                        .translate(&graphene::Point::new(0.0, offset_y as f32));
+                if offset_x.abs() > 0.01 || offset_y.abs() > 0.01 {
+                    let transform = gsk::Transform::new().translate(&graphene::Point::new(
+                        offset_x as f32,
+                        offset_y as f32,
+                    ));
                     snapshot.transform(Some(&transform));
                 }
                 // Paint the (single) child at the transformed origin.
@@ -124,6 +128,7 @@ mod dismiss_bin {
         pub fn set_dismiss_offset(&self, offset_y: f64, viewport_h: f64) {
             let clamped = offset_y.max(0.0);
             let imp = self.imp();
+            imp.offset_x.set(0.0);
             imp.offset_y.set(clamped);
             let h = viewport_h.max(1.0);
             let fade = (clamped / h).min(0.6);
@@ -131,9 +136,22 @@ mod dismiss_bin {
             self.queue_draw();
         }
 
+        /// Store a live *horizontal* drag translation (px; +right / -left) used
+        /// for finger-following prev/next navigation. Keeps the image fully
+        /// opaque (no fade — that's reserved for the downward dismiss) and
+        /// clears any vertical offset. Paint-only invalidation, no relayout.
+        pub fn set_nav_offset(&self, offset_x: f64) {
+            let imp = self.imp();
+            imp.offset_x.set(offset_x);
+            imp.offset_y.set(0.0);
+            imp.opacity.set(1.0);
+            self.queue_draw();
+        }
+
         /// Reset translation + opacity (freshly rendered / dismissed photo).
         pub fn reset_dismiss(&self) {
             let imp = self.imp();
+            imp.offset_x.set(0.0);
             imp.offset_y.set(0.0);
             imp.opacity.set(1.0);
             self.queue_draw();
@@ -834,6 +852,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
 
     let active_a = Rc::new(Cell::new(true));
     let zoom_level = Rc::new(Cell::new(1.0_f64));
+    // Set for the lifetime of a single-finger directional nav/dismiss drag
+    // (see `nav_drag`). While set, the zoom/pan gestures on `scrolled_picture`
+    // (`double_click`, `pan_drag`) stand down so a swipe can never be
+    // reinterpreted as a zoom or a pan. Cleared on that drag's end.
+    let swipe_active = Rc::new(Cell::new(false));
     let resolution_full = ui.ctx.config.read().data.library_preview_full_resolution;
 
     let video_player = gtk::Video::builder()
@@ -1059,23 +1082,39 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             *lightbox_drag_path.borrow_mut() = None;
             let is_video =
                 crate::media_kinds::asset_kind(&mime) == crate::media_kinds::AssetKind::Video;
+            // Fast path: if the preview texture is already in memory, paint it
+            // AND flip the picture stack to it synchronously — right now, before
+            // any `await`. This is what makes navigation feel instant: the slide
+            // transition plays immediately with the cached image instead of
+            // waiting for the async `load_thumbnail` round-trip (the ~0.5s lag).
+            // The async block below still runs to (re)confirm the preview and,
+            // for remote stills, upgrade to the original — but it no longer
+            // gates when the new photo becomes visible.
+            let mut committed_early = false;
             if let Some(texture) = ui
                 .ctx
                 .thumbnail_cache
                 .get_cached(&asset_id, ThumbnailSize::Preview)
             {
                 target.set_paintable(Some(&texture));
+                pic_stack.set_visible_child_name(if target_is_a { "a" } else { "b" });
+                active_a.set(target_is_a);
+                committed_early = true;
             }
             let arm_delay_ms: u64 = if local_path.is_empty() { 120 } else { 250 };
             let loader_for_arm = loader.clone();
             let cancel_loader = Rc::new(Cell::new(false));
             let cancel_for_arm = cancel_loader.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(arm_delay_ms), move || {
-                if !cancel_for_arm.get() {
-                    loader_for_arm.set_reveal_child(true);
-                }
-                glib::ControlFlow::Break
-            });
+            // Skip the loader spinner entirely when we already committed a cached
+            // preview — there is nothing for the user to wait on.
+            if !committed_early {
+                glib::timeout_add_local(std::time::Duration::from_millis(arm_delay_ms), move || {
+                    if !cancel_for_arm.get() {
+                        loader_for_arm.set_reveal_child(true);
+                    }
+                    glib::ControlFlow::Break
+                });
+            }
             glib::MainContext::default().spawn_local(async move {
                 let is_current = || load_gen.get() == our_gen;
                 let commit_visible = || {
@@ -1184,6 +1223,18 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 // already showing, so a failed asset stays on the "unavailable"
                 // card rather than double-erroring.
                 if !have_image && !full_res {
+                    return;
+                }
+                // Debounce the ORIGINAL fetch so it never rides the swipe's
+                // critical path. The sharp 1440 preview is already on screen and
+                // interactive; the full-res original is a slow network download +
+                // large decode that also churns the shared download-session and
+                // transfer-bar UI. During rapid prev/next swiping we must NOT kick
+                // one of these per photo — that is exactly what janks navigation.
+                // Wait for the user to settle (~350 ms); if they swiped on, the
+                // load generation advanced and we bail before touching the network.
+                glib::timeout_future(std::time::Duration::from_millis(350)).await;
+                if !is_current() {
                     return;
                 }
                 if let Some(cache_dir) = crate::profile::cache_dir().map(|p| p.join("preview")) {
@@ -1534,12 +1585,42 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         }
     ));
 
-    // Exit the viewer (back button / swipe-down / Escape).
+    // Exit the viewer (back button / Escape / delete). Plays AdwNavigationView's
+    // normal (rightward) pop transition, which is what those entry points want.
     let exit_viewer = Rc::new(clone!(
         #[strong]
         ui,
         move || {
             ui.nav.pop();
+        }
+    ));
+
+    // Exit used at the end of the swipe-down dismiss animation. By that point
+    // the page is already translated fully off-screen-down at opacity 0, so we
+    // must NOT let the NavigationView play its horizontal pop slide on top of
+    // the downward motion. Suppress transitions across just this pop, then
+    // restore them once the pop has fully settled so subsequent pushes/pops
+    // animate normally.
+    //
+    // The restore uses a short *timeout*, not `idle_add`: an idle callback can
+    // run inside the same frame in which AdwNavigationView would otherwise
+    // schedule the pop's slide on the frame clock, re-enabling animation early
+    // enough for the horizontal slide to flash. A 250 ms timeout keeps the flag
+    // off across the entire pop frame(s) and only re-arms animation well after
+    // the page is gone.
+    let exit_viewer_dismiss = Rc::new(clone!(
+        #[strong]
+        ui,
+        move || {
+            let nav = ui.nav.clone();
+            let was_animating = nav.is_animate_transitions();
+            nav.set_animate_transitions(false);
+            nav.pop();
+            if was_animating {
+                glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                    nav.set_animate_transitions(true);
+                });
+            }
         }
     ));
 
@@ -1906,7 +1987,16 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         pinch_start,
         #[strong]
         set_zoom,
+        #[strong]
+        swipe_active,
         move |_, scale| {
+            // Never zoom while a single-finger directional swipe owns the
+            // sequence. `GestureZoom` needs 2 touch points so this should never
+            // fire on a 1-finger swipe, but guard anyway so a stray 2-point
+            // jitter mid-swipe can't hijack the gesture into a zoom.
+            if swipe_active.get() {
+                return;
+            }
             (*set_zoom)(pinch_start.get() * scale);
         }
     ));
@@ -1934,10 +2024,14 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         drag_start,
         #[strong]
         zoom_level,
+        #[strong]
+        swipe_active,
         move |_, off_x, off_y| {
-            // Only pan when zoomed in; otherwise leave scroll alone so the
-            // swipe navigation gesture can interpret the motion.
-            if (zoom_level.get() - 1.0).abs() < 0.01 {
+            // Pan ONLY when zoomed in; at fit (zoom == 1.0) leave scroll alone so
+            // the `nav_drag` swipe gesture owns the motion. Also stand down while
+            // a directional swipe/dismiss is in flight so a claimed swipe can
+            // never be reinterpreted as a pan.
+            if swipe_active.get() || (zoom_level.get() - 1.0).abs() < 0.01 {
                 return;
             }
             let (sx0, sy0) = drag_start.get();
@@ -1948,25 +2042,55 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     scrolled_picture.add_controller(pan_drag.clone());
     pan_drag.group_with(&pinch);
 
-    // Double-click: zoom in 2x toward the click position.
+    // Double-tap: zoom in 2x toward the tap position (or back out).
+    //
+    // This must fire only on a genuine double *tap* — never on a swipe. Two
+    // problems the naive `connect_pressed(n_press == 2)` had:
+    //   (1) two quick nav swipes land two presses inside GestureClick's
+    //       double-click window, so the second swipe's press reads as
+    //       `n_press == 2` and zooms mid-swipe;
+    //   (2) it fired on press, before we know whether the finger will travel.
+    // Fix: act on `released`, require the press→release displacement to be
+    // tiny (a real tap, not a drag), and refuse entirely while a directional
+    // swipe/dismiss is in flight (`swipe_active`). We remember the first
+    // press position so the zoom re-centres on where the user tapped.
     let double_click = gtk::GestureClick::new();
     double_click.set_button(gtk::gdk::BUTTON_PRIMARY);
+    let dbl_press_pos = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
     double_click.connect_pressed(clone!(
+        #[strong]
+        dbl_press_pos,
+        move |_, _, x, y| {
+            dbl_press_pos.set((x, y));
+        }
+    ));
+    double_click.connect_released(clone!(
         #[strong]
         cursor_pos,
         #[strong]
         zoom_level,
         #[strong]
         set_zoom,
+        #[strong]
+        swipe_active,
+        #[strong]
+        dbl_press_pos,
         move |_, n_press, x, y| {
-            if n_press == 2 {
-                cursor_pos.set(Some((x, y)));
-                let z = zoom_level.get();
-                if (z - 1.0).abs() < 0.01 {
-                    (*set_zoom)(2.0);
-                } else {
-                    (*set_zoom)(1.0);
-                }
+            if n_press != 2 || swipe_active.get() {
+                return;
+            }
+            // Reject if the finger moved appreciably between press and release
+            // — that's a drag/swipe, not a tap.
+            let (px, py) = dbl_press_pos.get();
+            if (x - px).hypot(y - py) > 12.0 {
+                return;
+            }
+            cursor_pos.set(Some((x, y)));
+            let z = zoom_level.get();
+            if (z - 1.0).abs() < 0.01 {
+                (*set_zoom)(2.0);
+            } else {
+                (*set_zoom)(1.0);
             }
         }
     ));
@@ -2001,6 +2125,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     // (downward-dominant): once set, `drag_update` translates the image with
     // the finger and `drag_end` decides dismiss-vs-snap-back.
     let drag_dismissing = Rc::new(Cell::new(false));
+    // Tracks whether the *current* drag is a live horizontal prev/next swipe
+    // (horizontal-dominant): once set, `drag_update` translates the image
+    // sideways with the finger (finger-following) and `drag_end` decides
+    // navigate-vs-snap-back.
+    let drag_horizontal = Rc::new(Cell::new(false));
     // Rolling velocity estimate (px/s, downward positive) for flick dismissal.
     // Sampled from `(offset, Instant)` deltas in `drag_update` so it's ready in
     // `drag_end` regardless of any parallel gesture's callback ordering.
@@ -2018,6 +2147,15 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             dismiss_bin.set_dismiss_offset(off_y, h);
         }
     ));
+    // Applies a live horizontal translation to the image for finger-following
+    // prev/next navigation (queue_draw only — GPU transform, no relayout).
+    let apply_nav_offset = Rc::new(clone!(
+        #[strong]
+        dismiss_bin,
+        move |off_x: f64| {
+            dismiss_bin.set_nav_offset(off_x);
+        }
+    ));
     // Resets the translation/opacity so a freshly loaded photo is centered.
     let reset_dismiss_offset = Rc::new(clone!(
         #[strong]
@@ -2031,9 +2169,21 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         drag_velocity_y,
         #[strong]
         drag_last_sample,
+        #[strong]
+        drag_claimed,
+        #[strong]
+        drag_dismissing,
+        #[strong]
+        drag_horizontal,
+        #[strong]
+        swipe_active,
         move |_, _, _| {
             drag_velocity_y.set(0.0);
             drag_last_sample.set(Some((0.0, std::time::Instant::now())));
+            drag_claimed.set(false);
+            drag_dismissing.set(false);
+            drag_horizontal.set(false);
+            swipe_active.set(false);
         }
     ));
     nav_drag.connect_drag_update(clone!(
@@ -2044,11 +2194,17 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         drag_dismissing,
         #[strong]
+        drag_horizontal,
+        #[strong]
+        swipe_active,
+        #[strong]
         drag_velocity_y,
         #[strong]
         drag_last_sample,
         #[strong]
         apply_dismiss_offset,
+        #[strong]
+        apply_nav_offset,
         move |gesture, off_x, off_y| {
             // When zoomed in the pan gesture owns the motion.
             if (zoom_level.get() - 1.0).abs() > 0.01 {
@@ -2070,18 +2226,42 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 drag_last_sample.set(Some((off_y, now)));
             }
             if !drag_claimed.get() {
-                // Claim once the motion is clearly a directional swipe so we
-                // pre-empt the NavigationView edge-swipe on horizontal drags.
-                if off_x.abs() > 24.0 || off_y.abs() > 24.0 {
+                // Claim as soon as the motion is unambiguously a directional
+                // drag. Claiming early (small threshold) is what makes the swipe
+                // WIN the gesture negotiation: `set_state(Claimed)` denies the
+                // same sequence to the bubble-phase zoom/pan gestures on the
+                // ScrolledWindow (`pinch`/`pan_drag`/`double_click`), and setting
+                // `swipe_active` makes them stand down defensively too. A lower
+                // threshold than the double-tap slop (12px) guarantees a swipe is
+                // owned by nav before any tap/zoom can act on it.
+                if off_x.abs() > 16.0 || off_y.abs() > 16.0 {
                     drag_claimed.set(true);
-                    // A downward-dominant drag becomes an interactive dismiss.
-                    drag_dismissing.set(off_y > off_x.abs());
+                    swipe_active.set(true);
+                    // Classify the drag once, at claim time: a downward-dominant
+                    // drag is an interactive dismiss; an otherwise horizontal
+                    // drag is a live prev/next swipe. Ties (diagonal) resolve to
+                    // dismiss so an ambiguous down-ish drag never navigates.
+                    if off_y.abs() >= off_x.abs() {
+                        // Only treat as dismiss when actually heading DOWN; an
+                        // upward drag falls through to the sheet-open branch in
+                        // drag_end (no live translation needed for that).
+                        if off_y > 0.0 {
+                            drag_dismissing.set(true);
+                        }
+                    } else {
+                        drag_horizontal.set(true);
+                    }
                     gesture.set_state(gtk::EventSequenceState::Claimed);
                 }
             }
             // While dismissing, move the image down with the finger and fade.
             if drag_dismissing.get() {
                 apply_dismiss_offset(off_y);
+            } else if drag_horizontal.get() {
+                // Finger-following horizontal translation. Dampen slightly so it
+                // reads as elastic and doesn't run fully off-screen before the
+                // snap animation takes over.
+                apply_nav_offset(off_x * 0.9);
             }
         }
     ));
@@ -2091,7 +2271,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         goto_next,
         #[strong]
-        exit_viewer,
+        exit_viewer_dismiss,
         #[strong]
         sheet,
         #[strong]
@@ -2100,6 +2280,10 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         drag_claimed,
         #[strong]
         drag_dismissing,
+        #[strong]
+        drag_horizontal,
+        #[strong]
+        swipe_active,
         #[strong]
         drag_velocity_y,
         #[strong]
@@ -2111,12 +2295,17 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         apply_dismiss_offset,
         #[strong]
+        apply_nav_offset,
+        #[strong]
         reset_dismiss_offset,
         move |_, off_x, off_y| {
             let _ = drag_claimed.replace(false);
             let was_dismissing = drag_dismissing.replace(false);
+            let was_horizontal = drag_horizontal.replace(false);
             let velocity_y = drag_velocity_y.replace(0.0);
             drag_last_sample.set(None);
+            // The directional swipe is over; let the zoom/pan gestures resume.
+            swipe_active.set(false);
             if (zoom_level.get() - 1.0).abs() > 0.01 {
                 return;
             }
@@ -2145,12 +2334,21 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     anim.set_easing(libadwaita::Easing::EaseInCubic);
                     anim.connect_done(clone!(
                         #[strong]
-                        exit_viewer,
+                        exit_viewer_dismiss,
                         #[strong]
                         reset_dismiss_offset,
                         move |_| {
-                            (*exit_viewer)();
-                            reset_dismiss_offset();
+                            // Pop while the page is still fully off-screen-down at
+                            // opacity 0 and with NavigationView transitions
+                            // suppressed, so the only motion the user sees is the
+                            // downward dismiss — no rightward pop slide. Reset the
+                            // GPU offset only AFTER the pop (next idle), never
+                            // before, so the page can't flash back to centre.
+                            (*exit_viewer_dismiss)();
+                            let reset_dismiss_offset = reset_dismiss_offset.clone();
+                            glib::idle_add_local_once(move || {
+                                reset_dismiss_offset();
+                            });
                         }
                     ));
                     anim.play();
@@ -2174,11 +2372,45 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 return;
             }
 
+            if was_horizontal {
+                // Live finger-following horizontal swipe. Navigate past the
+                // threshold, else spring the image back to centre. `goto_*`
+                // re-renders the stack with a SlideLeft/SlideRight transition,
+                // and `render` zeroes the offset, so the incoming photo slides
+                // in from the drag position — no visible snap-to-centre first.
+                const NAV_THRESH: f64 = 60.0;
+                if ax > NAV_THRESH {
+                    if off_x > 0.0 {
+                        (*goto_prev)();
+                    } else {
+                        (*goto_next)();
+                    }
+                } else {
+                    // Snap back to centre.
+                    let target = CallbackAnimationTarget::new(clone!(
+                        #[strong]
+                        apply_nav_offset,
+                        move |v| apply_nav_offset(v)
+                    ));
+                    let anim =
+                        TimedAnimation::new(&dismiss_bin, off_x * 0.9, 0.0, 180, target);
+                    anim.set_easing(libadwaita::Easing::EaseOutCubic);
+                    anim.connect_done(clone!(
+                        #[strong]
+                        reset_dismiss_offset,
+                        move |_| reset_dismiss_offset()
+                    ));
+                    anim.play();
+                }
+                return;
+            }
+
             if ax < THRESH && ay < THRESH {
                 return;
             }
             if ax > ay {
-                // Horizontal: right drag → prev, left drag → next.
+                // Horizontal (fallback when the drag wasn't classified live,
+                // e.g. a quick flick): right drag → prev, left drag → next.
                 if off_x > 0.0 {
                     (*goto_prev)();
                 } else {
