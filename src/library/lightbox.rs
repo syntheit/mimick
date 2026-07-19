@@ -169,6 +169,36 @@ mod dismiss_bin {
 
 use dismiss_bin::DismissBin;
 
+/// Format a `gst::ClockTime` (or a raw seconds count) as `mm:ss` (or `h:mm:ss`
+/// past an hour) for the video scrubber's time labels.
+fn format_time(seconds: u64) -> String {
+    let h = seconds / 3600;
+    let m = (seconds % 3600) / 60;
+    let s = seconds % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// The Immich-mobile-style playback controls that ride in the bottom chrome for
+/// videos: a play/pause toggle, a scrub bar, and current/duration time labels.
+/// Shared by value (all fields are `Rc`/GObject clones) so the `LightboxVideo`
+/// bus watch can update them and the lightbox can reset them across navigation.
+#[derive(Clone)]
+struct VideoControls {
+    play_pause: gtk::Button,
+    scale: gtk::Scale,
+    position_label: gtk::Label,
+    duration_label: gtk::Label,
+    /// Set while the user is dragging the scrubber, so incoming
+    /// `PositionUpdated` messages don't yank the thumb out from under them.
+    seeking: Rc<Cell<bool>>,
+    /// Last known duration (nanoseconds); the scale runs 0..duration_ns.
+    duration_ns: Rc<Cell<u64>>,
+}
+
 /// Inline video playback backed by a GStreamer `gtk4paintablesink` pipeline
 /// (the approach Delfin uses), replacing `gtk::Video`/`gtk::MediaFile` which
 /// fail silently for Immich's transcoded streams.
@@ -180,18 +210,20 @@ use dismiss_bin::DismissBin;
 struct LightboxVideo {
     play: gstplay::Play,
     picture: gtk::Picture,
+    controls: VideoControls,
     /// Keeps the message-bus watch alive: the `BusWatchGuard` removes the watch
     /// on drop, so it must outlive the pipeline.
     _bus_watch: gst::bus::BusWatchGuard,
 }
 
 impl LightboxVideo {
-    /// Build the pipeline. `on_error` fires on the main thread when the play
-    /// pipeline posts a fatal error, so the caller can fall the media stack
-    /// back to the still poster. Returns `None` (with a log line) if GStreamer
-    /// or the `gtk4paintablesink` plugin is unavailable, so callers degrade
-    /// gracefully rather than showing a black frame.
-    fn new(on_error: impl Fn() + 'static) -> Option<Self> {
+    /// Build the pipeline and wire the playback `controls` to it. `on_error`
+    /// fires on the main thread when the play pipeline posts a fatal error, so
+    /// the caller can fall the media stack back to the still poster. Returns
+    /// `None` (with a log line) if GStreamer or the `gtk4paintablesink` plugin
+    /// is unavailable, so callers degrade gracefully rather than showing a black
+    /// frame.
+    fn new(controls: VideoControls, on_error: impl Fn() + 'static) -> Option<Self> {
         let sink = match gst::ElementFactory::make("gtk4paintablesink").build() {
             Ok(sink) => sink,
             Err(err) => {
@@ -216,6 +248,12 @@ impl LightboxVideo {
         let renderer = gstplay::PlayVideoOverlayVideoRenderer::with_sink(&video_sink);
         let play = gstplay::Play::new(Some(renderer));
 
+        // Post position updates ~4×/second so the scrubber tracks playback
+        // smoothly without flooding the main loop.
+        let mut config = play.config();
+        config.set_position_update_interval(250);
+        let _ = play.set_config(config);
+
         let picture = gtk::Picture::builder()
             .paintable(&paintable)
             .content_fit(gtk::ContentFit::Contain)
@@ -223,21 +261,109 @@ impl LightboxVideo {
             .hexpand(true)
             .build();
 
-        // Watch the play message bus for fatal errors so a failed stream is
-        // visible/graceful (fall back to the poster) rather than a silent black
-        // frame. The `Play` posts its own application messages, so we detect
-        // errors via `PlayMessage::parse` rather than the raw `MessageView`.
+        // ── Wire the controls to this pipeline ──────────────────────────
+        // Play/pause toggle: flip the pipeline state based on the icon the last
+        // StateChanged message left showing (pause icon ⇒ currently playing).
+        // The icon is then corrected authoritatively by StateChanged below.
+        {
+            let play = play.clone();
+            let btn = controls.play_pause.clone();
+            controls.play_pause.connect_clicked(move |_| {
+                let is_playing =
+                    btn.icon_name().as_deref() == Some("media-playback-pause-symbolic");
+                if is_playing {
+                    play.pause();
+                } else {
+                    play.play();
+                }
+            });
+        }
+        // Scrubber → seek. `connect_change_value` fires for both drags and
+        // keyboard/step changes; we map the slider value (nanoseconds) to a
+        // `ClockTime` and seek. The `seeking` guard (set on drag begin, cleared
+        // on drag end) keeps `PositionUpdated` from fighting the thumb.
+        {
+            // `connect_change_value` fires for BOTH user drags and our own
+            // programmatic `set_value` (from PositionUpdated). Only seek while the
+            // user is actively dragging (`seeking` set by the press gesture);
+            // otherwise this is a playback-driven update and seeking would fight
+            // the pipeline. The bus watch already skips `set_value` while seeking,
+            // so the two never form a feedback loop.
+            let play_change = play.clone();
+            let seeking_change = controls.seeking.clone();
+            controls
+                .scale
+                .connect_change_value(move |_scale, _scroll, value| {
+                    if seeking_change.get() {
+                        let ns = value.max(0.0) as u64;
+                        play_change.seek(gst::ClockTime::from_nseconds(ns));
+                    }
+                    glib::Propagation::Proceed
+                });
+            // Track drag begin/end via a click gesture so position updates stand
+            // down only for the duration of the drag.
+            let press = gtk::GestureClick::new();
+            let seeking_press = controls.seeking.clone();
+            press.connect_pressed(move |_, _, _, _| seeking_press.set(true));
+            let seeking_release = controls.seeking.clone();
+            let play_release = play.clone();
+            let scale_release = controls.scale.clone();
+            press.connect_released(move |_, _, _, _| {
+                // Final seek to the released position, then release the guard.
+                let ns = scale_release.value().max(0.0) as u64;
+                play_release.seek(gst::ClockTime::from_nseconds(ns));
+                seeking_release.set(false);
+            });
+            controls.scale.add_controller(press);
+        }
+
+        // Watch the play message bus for fatal errors (fall back to the poster,
+        // not a silent black frame) and for the playback state we surface in the
+        // controls (position → scrubber/label, duration → range/label, state →
+        // play/pause icon). The `Play` posts its own application messages, so we
+        // detect them via `PlayMessage::parse` rather than the raw `MessageView`.
         // The bus starts flushing; enable delivery, then attach a local
         // (main-thread) watch and keep its guard alive in the struct.
         let bus = play.message_bus();
         bus.set_flushing(false);
+        let controls_watch = controls.clone();
         let bus_watch = bus
             .add_watch_local(move |_, msg| {
-                if gstplay::Play::is_play_message(msg)
-                    && let Ok(gstplay::PlayMessage::Error(err)) = gstplay::PlayMessage::parse(msg)
-                {
-                    log::warn!("Inline video playback error: {}", err.error());
-                    on_error();
+                if !gstplay::Play::is_play_message(msg) {
+                    return glib::ControlFlow::Continue;
+                }
+                match gstplay::PlayMessage::parse(msg) {
+                    Ok(gstplay::PlayMessage::Error(err)) => {
+                        log::warn!("Inline video playback error: {}", err.error());
+                        on_error();
+                    }
+                    Ok(gstplay::PlayMessage::DurationChanged(dc)) => {
+                        let ns = dc.duration().map(|d| d.nseconds()).unwrap_or(0);
+                        controls_watch.duration_ns.set(ns);
+                        controls_watch.scale.set_range(0.0, ns.max(1) as f64);
+                        controls_watch
+                            .duration_label
+                            .set_label(&format_time(ns / 1_000_000_000));
+                    }
+                    Ok(gstplay::PlayMessage::PositionUpdated(pu)) => {
+                        if !controls_watch.seeking.get() {
+                            let ns = pu.position().map(|p| p.nseconds()).unwrap_or(0);
+                            controls_watch.scale.set_value(ns as f64);
+                            controls_watch
+                                .position_label
+                                .set_label(&format_time(ns / 1_000_000_000));
+                        }
+                    }
+                    Ok(gstplay::PlayMessage::StateChanged(sc)) => {
+                        // Reflect the real pipeline state on the toggle icon.
+                        let playing = sc.state() == gstplay::PlayState::Playing;
+                        controls_watch.play_pause.set_icon_name(if playing {
+                            "media-playback-pause-symbolic"
+                        } else {
+                            "media-playback-start-symbolic"
+                        });
+                    }
+                    _ => {}
                 }
                 glib::ControlFlow::Continue
             })
@@ -246,6 +372,7 @@ impl LightboxVideo {
         Some(Self {
             play,
             picture,
+            controls,
             _bus_watch: bus_watch,
         })
     }
@@ -261,6 +388,7 @@ impl LightboxVideo {
     fn stop(&self) {
         self.play.stop();
         self.play.set_uri(None);
+        self.controls.seeking.set(false);
     }
 }
 
@@ -964,6 +1092,93 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     media_stack.add_named(&picture_overlay, Some("image"));
     media_stack.set_visible_child_name("image");
 
+    // Transparent full-area input layer for VIDEO ONLY (overlaid on
+    // `chrome_overlay` below, above `viewer`/`media_stack`).
+    //
+    // While a `gtk4paintablesink` video is actively PLAYING, GTK promotes the
+    // sink's paintable to a GL/dmabuf (graphics-offload) subsurface. That
+    // subsurface owns pointer input at the compositor level and swallows events
+    // before they reach the tap/`nav_drag` controllers on `media_stack` (an
+    // *ancestor* of the video picture) — which is why gestures were dead over a
+    // playing video but fine when paused (no active subsurface). Events still
+    // work over a still image because there is no such subsurface.
+    //
+    // Fix: a sibling layer that sits ABOVE `viewer`/`media_stack` in the overlay
+    // stack. In a GtkOverlay only the *topmost pickable* widget under the
+    // pointer becomes the event target, so this layer — when pickable — reliably
+    // receives tap + swipe regardless of the video's rendering path. It carries
+    // its own tap + `nav_drag` controllers (wired further down) that drive the
+    // SAME chrome/navigation helpers as the image-side ones.
+    //
+    // It must NOT steal input from images (their pinch/pan/double-tap live on
+    // `scrolled_picture`, and only the topmost pickable widget is the target).
+    // So the layer is `can_target(false)` by default and only flipped to `true`
+    // while the video child is visible (`set_video_input_active`). Video has no
+    // zoom/pan/double-tap, so nothing is lost when it intercepts.
+    let video_input_layer = gtk::Box::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .can_target(false)
+        .build();
+    let set_video_input_active = {
+        let video_input_layer = video_input_layer.clone();
+        Rc::new(move |active: bool| {
+            video_input_layer.set_can_target(active);
+        })
+    };
+
+    // ── Video playback controls (Immich-mobile style) ───────────────────
+    // Built here so the (lazily-constructed) `LightboxVideo` can bind them; they
+    // are placed into the bottom chrome further down and revealed only when the
+    // current asset is a video. Icon starts on "start" and is corrected by the
+    // pipeline's StateChanged messages once playback begins.
+    let video_play_pause = gtk::Button::builder()
+        .icon_name("media-playback-start-symbolic")
+        .tooltip_text("Play/Pause")
+        .css_classes(["flat", "circular"])
+        .valign(gtk::Align::Center)
+        .build();
+    let video_position_label = gtk::Label::builder()
+        .label("0:00")
+        .css_classes(["mimick-lightbox-video-time"])
+        .build();
+    let video_duration_label = gtk::Label::builder()
+        .label("0:00")
+        .css_classes(["mimick-lightbox-video-time"])
+        .build();
+    let video_scale = gtk::Scale::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .hexpand(true)
+        .draw_value(false)
+        .valign(gtk::Align::Center)
+        .css_classes(["mimick-lightbox-video-scale"])
+        .build();
+    video_scale.set_range(0.0, 1.0);
+    let video_controls = VideoControls {
+        play_pause: video_play_pause.clone(),
+        scale: video_scale.clone(),
+        position_label: video_position_label.clone(),
+        duration_label: video_duration_label.clone(),
+        seeking: Rc::new(Cell::new(false)),
+        duration_ns: Rc::new(Cell::new(0)),
+    };
+    // Reset the controls to a fresh "starting playback" state (used whenever a
+    // video (re)starts and whenever we navigate away from one).
+    let video_reset_controls = {
+        let controls = video_controls.clone();
+        Rc::new(move || {
+            controls.seeking.set(false);
+            controls.duration_ns.set(0);
+            controls.scale.set_range(0.0, 1.0);
+            controls.scale.set_value(0.0);
+            controls.position_label.set_label("0:00");
+            controls.duration_label.set_label("0:00");
+            controls
+                .play_pause
+                .set_icon_name("media-playback-start-symbolic");
+        })
+    };
+
     // Inline video playback via a GStreamer `gtk4paintablesink` pipeline (built
     // lazily, once, and reused across navigation). `None` when the plugin is
     // missing — in that case videos fall back to the still poster. On a fatal
@@ -972,13 +1187,18 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let ensure_video = {
         let video = video.clone();
         let media_stack = media_stack.clone();
+        let set_video_input_active = set_video_input_active.clone();
+        let video_controls = video_controls.clone();
         Rc::new(move || -> Option<gtk::Picture> {
             if video.borrow().is_none() {
                 let media_stack_err = media_stack.clone();
-                let Some(vp) = LightboxVideo::new(move || {
+                let set_video_input_active_err = set_video_input_active.clone();
+                let Some(vp) = LightboxVideo::new(video_controls.clone(), move || {
                     // Fatal playback error: reveal the poster instead of a black
-                    // frame so the failure is visible, not silent.
+                    // frame so the failure is visible, not silent. Also release
+                    // the video input layer so the still poster's gestures work.
                     media_stack_err.set_visible_child_name("image");
+                    set_video_input_active_err(false);
                 }) else {
                     return None;
                 };
@@ -1078,12 +1298,38 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     bottombar.append(&share_btn);
     bottombar.append(&addalbum_btn);
     bottombar.append(&delete_btn);
+
+    // Video playback controls row (play/pause · position · scrubber · duration),
+    // stacked ABOVE the share/album/delete actions. Its own revealer toggles by
+    // media kind so it shows only for videos, while the whole bottom chrome
+    // appears/disappears with the tap via `bottom_revealer`.
+    let video_controls_bar = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .css_classes(["mimick-lightbox-videobar"])
+        .build();
+    video_controls_bar.append(&video_play_pause);
+    video_controls_bar.append(&video_position_label);
+    video_controls_bar.append(&video_scale);
+    video_controls_bar.append(&video_duration_label);
+    let video_controls_revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideUp)
+        .transition_duration(140)
+        .reveal_child(false)
+        .child(&video_controls_bar)
+        .build();
+
+    let bottom_stack = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .build();
+    bottom_stack.append(&video_controls_revealer);
+    bottom_stack.append(&bottombar);
     let bottom_revealer = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideUp)
         .transition_duration(160)
         .reveal_child(false)
         .valign(gtk::Align::End)
-        .child(&bottombar)
+        .child(&bottom_stack)
         .build();
 
     // Wrap the whole media stack (image OR video) in an outer DismissBin so a
@@ -1101,6 +1347,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     // Overlay the chrome bars on top of the viewer.
     let chrome_overlay = gtk::Overlay::builder().build();
     chrome_overlay.set_child(Some(&viewer));
+    // Add the transparent VIDEO input layer (created earlier) FIRST so the
+    // chrome revealers, added next, stack ABOVE it and stay clickable
+    // (back/favorite/⋮/share/album/delete + video controls). The layer only
+    // needs to be above `viewer`.
+    chrome_overlay.add_overlay(&video_input_layer);
     chrome_overlay.add_overlay(&top_revealer);
     chrome_overlay.add_overlay(&bottom_revealer);
 
@@ -1190,6 +1441,9 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let video = video.clone();
         let ensure_video = ensure_video.clone();
         let media_stack = media_stack.clone();
+        let set_video_input_active = set_video_input_active.clone();
+        let video_controls_revealer = video_controls_revealer.clone();
+        let video_reset_controls = video_reset_controls.clone();
         move |target: gtk::Picture,
               target_is_a: bool,
               asset_id: String,
@@ -1210,6 +1464,9 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let video = video.clone();
             let ensure_video = ensure_video.clone();
             let media_stack = media_stack.clone();
+            let set_video_input_active = set_video_input_active.clone();
+            let video_controls_revealer = video_controls_revealer.clone();
+            let video_reset_controls = video_reset_controls.clone();
             let lightbox_drag_path = lightbox_drag_path.clone();
             let our_gen = load_gen.get().wrapping_add(1);
             load_gen.set(our_gen);
@@ -1222,6 +1479,12 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             if media_stack.visible_child_name().as_deref() == Some("video") {
                 media_stack.set_visible_child_name("image");
             }
+            // Reset to the still-image input model: release the video input layer
+            // (so image gestures reach `scrolled_picture`) and hide/reset the
+            // video playback controls until this asset proves to be a video.
+            set_video_input_active(false);
+            video_controls_revealer.set_reveal_child(false);
+            video_reset_controls();
             unavailable_overlay.set_reveal_child(false);
             unavailable_overlay.set_can_target(false);
             *unavailable_path.borrow_mut() = None;
@@ -1312,6 +1575,13 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         {
                             vp.play_uri(&uri);
                             media_stack.set_visible_child_name("video");
+                            // Playing: raise the transparent input layer so
+                            // tap+swipe reach it above the GL video surface,
+                            // reset the playback controls, and mark them as the
+                            // video-kind controls (revealed with the chrome).
+                            set_video_input_active(true);
+                            video_reset_controls();
+                            video_controls_revealer.set_reveal_child(true);
                         }
                     }
                     return;
@@ -1784,28 +2054,41 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
 
     // Toggle chrome on single tap (no drag). GestureClick with n_press==1.
-    let tap = gtk::GestureClick::new();
-    tap.set_button(gtk::gdk::BUTTON_PRIMARY);
-    tap.connect_released(clone!(
-        #[strong]
-        set_chrome,
-        #[strong]
-        chrome_visible,
-        #[strong]
-        zoom_level,
-        move |gesture, n_press, _, _| {
-            // Ignore taps while zoomed in (those pan) and multi-press.
-            if n_press != 1 || (zoom_level.get() - 1.0).abs() > 0.01 {
-                return;
-            }
-            (*set_chrome)(!chrome_visible.get());
-            gesture.set_state(gtk::EventSequenceState::Claimed);
+    //
+    // Built by a closure so an IDENTICAL tap can be attached to BOTH the
+    // `media_stack` (handles images and paused video) AND the transparent
+    // `video_input_layer` above the video surface (handles playing video, which
+    // otherwise swallows ancestor input via its GL subsurface — see the input
+    // layer comment). Only one is ever the event target (the layer is pickable
+    // only while a video shows), so the tap never fires twice.
+    let attach_tap = {
+        let set_chrome = set_chrome.clone();
+        let chrome_visible = chrome_visible.clone();
+        let zoom_level = zoom_level.clone();
+        move |widget: &gtk::Widget| {
+            let tap = gtk::GestureClick::new();
+            tap.set_button(gtk::gdk::BUTTON_PRIMARY);
+            tap.connect_released(clone!(
+                #[strong]
+                set_chrome,
+                #[strong]
+                chrome_visible,
+                #[strong]
+                zoom_level,
+                move |gesture, n_press, _, _| {
+                    // Ignore taps while zoomed in (those pan) and multi-press.
+                    if n_press != 1 || (zoom_level.get() - 1.0).abs() > 0.01 {
+                        return;
+                    }
+                    (*set_chrome)(!chrome_visible.get());
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                }
+            ));
+            widget.add_controller(tap);
         }
-    ));
-    // Attach at the media_stack level so the tap-to-toggle-chrome fires over
-    // BOTH the image and the video child (a gtk::Picture doesn't consume
-    // pointer events, so they reach this ancestor).
-    media_stack.add_controller(tap);
+    };
+    attach_tap(media_stack.upcast_ref::<gtk::Widget>());
+    attach_tap(video_input_layer.upcast_ref::<gtk::Widget>());
 
     // Favorite toggle.
     favorite_btn.connect_clicked(clone!(
@@ -2296,9 +2579,14 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     // direction: horizontal = prev/next, down = dismiss, up = details sheet.
     // Attaching at capture and claiming the sequence stops the enclosing
     // AdwNavigationView from treating a horizontal drag as an edge-swipe pop.
-    let nav_drag = gtk::GestureDrag::new();
-    nav_drag.set_touch_only(false);
-    nav_drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+    //
+    // Built by a closure so an IDENTICAL directional gesture can be attached to
+    // BOTH `media_stack` (images + paused video) AND the transparent
+    // `video_input_layer` above the playing-video GL surface (which swallows
+    // ancestor input). The state cells and helper closures below are SHARED
+    // between the two gestures — only one is ever the event target at a time (the
+    // layer is pickable only while a video shows), so they never both drive a
+    // drag simultaneously.
     let drag_claimed = Rc::new(Cell::new(false));
     // Tracks whether the *current* drag is an interactive drag-to-dismiss
     // (downward-dominant): once set, `drag_update` translates the image with
@@ -2346,6 +2634,30 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             media_dismiss_bin.reset_dismiss();
         }
     ));
+    // Builds a fresh capture-phase directional gesture wired to the shared
+    // state/helpers above and attaches it to `widget`. Called for both
+    // `media_stack` and `video_input_layer`.
+    let attach_nav_drag = {
+        let goto_prev = goto_prev.clone();
+        let goto_next = goto_next.clone();
+        let exit_viewer_dismiss = exit_viewer_dismiss.clone();
+        let sheet = sheet.clone();
+        let zoom_level = zoom_level.clone();
+        let drag_claimed = drag_claimed.clone();
+        let drag_dismissing = drag_dismissing.clone();
+        let drag_horizontal = drag_horizontal.clone();
+        let swipe_active = swipe_active.clone();
+        let drag_velocity_y = drag_velocity_y.clone();
+        let drag_last_sample = drag_last_sample.clone();
+        let media_dismiss_bin = media_dismiss_bin.clone();
+        let scrolled_picture = scrolled_picture.clone();
+        let apply_dismiss_offset = apply_dismiss_offset.clone();
+        let apply_nav_offset = apply_nav_offset.clone();
+        let reset_dismiss_offset = reset_dismiss_offset.clone();
+        move |widget: &gtk::Widget| {
+    let nav_drag = gtk::GestureDrag::new();
+    nav_drag.set_touch_only(false);
+    nav_drag.set_propagation_phase(gtk::PropagationPhase::Capture);
     nav_drag.connect_drag_begin(clone!(
         #[strong]
         drag_velocity_y,
@@ -2610,12 +2922,18 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             // Downward drags are handled by the interactive-dismiss branch above.
         }
     ));
+    widget.add_controller(nav_drag);
+        }
+    };
     // Attach at the media_stack level so the directional swipe (navigate /
-    // swipe-down dismiss / swipe-up details) fires over BOTH the image and the
-    // video child. Capture phase + claiming still wins negotiation against the
+    // swipe-down dismiss / swipe-up details) fires over the image and paused
+    // video. Capture phase + claiming still wins negotiation against the
     // enclosing AdwNavigationView edge-swipe and, over images, against the
-    // zoom/pan gestures on the inner ScrolledWindow.
-    media_stack.add_controller(nav_drag);
+    // zoom/pan gestures on the inner ScrolledWindow. Also attach an identical
+    // gesture to the transparent `video_input_layer` so the swipe works over a
+    // PLAYING video whose GL subsurface would otherwise swallow the input.
+    attach_nav_drag(media_stack.upcast_ref::<gtk::Widget>());
+    attach_nav_drag(video_input_layer.upcast_ref::<gtk::Widget>());
 
     // ── Keyboard shortcuts ──────────────────────────────────────────────
     let key_controller = gtk::EventControllerKey::new();

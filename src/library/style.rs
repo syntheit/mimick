@@ -394,6 +394,46 @@ box.mimick-sheet-grabber {
     border-radius: 999px;
     margin-bottom: 6px;
 }
+
+/* ── Inline video playback controls (Immich-mobile style) ─────────── */
+
+box.mimick-lightbox-videobar {
+    padding: 4px 12px 2px 12px;
+    color: white;
+}
+
+.mimick-lightbox-videobar button {
+    color: white;
+    background: transparent;
+    box-shadow: none;
+    border: none;
+    min-width: 32px;
+    min-height: 32px;
+}
+
+.mimick-lightbox-videobar button:hover {
+    background: alpha(white, 0.16);
+}
+
+label.mimick-lightbox-video-time {
+    color: white;
+    font-size: 0.80em;
+    font-feature-settings: "tnum";
+    min-width: 40px;
+}
+
+scale.mimick-lightbox-video-scale {
+    color: white;
+}
+
+scale.mimick-lightbox-video-scale trough {
+    background: alpha(white, 0.30);
+    min-height: 4px;
+}
+
+scale.mimick-lightbox-video-scale highlight {
+    background: white;
+}
 "#;
 
 static REGISTERED: OnceLock<()> = OnceLock::new();
