@@ -152,6 +152,14 @@ async fn main() {
         is_primary_instance_clone.store(true, Ordering::SeqCst);
 
         log::info!("Mimick primary instance initializing");
+
+        // Initialise GStreamer once, before any playback pipeline is built. A
+        // failure here is not fatal — video playback simply degrades to the
+        // still poster (see the lightbox), so we log rather than panic.
+        if let Err(err) = gstreamer::init() {
+            log::warn!("GStreamer init failed; inline video playback disabled: {}", err);
+        }
+
         // Always follow the desktop's light/dark preference.
         adw::StyleManager::default().set_color_scheme(adw::ColorScheme::Default);
 

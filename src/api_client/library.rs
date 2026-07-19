@@ -240,13 +240,19 @@ impl ImmichApiClient {
         }
     }
 
-    /// Streaming URI for the transcoded video (query-param auth so gtk::MediaFile can play it).
+    /// Streaming URI for the transcoded video (query-param auth so the GStreamer
+    /// pipeline can play it).
+    ///
+    /// The API key is percent-encoded before interpolation: Immich keys can
+    /// contain `+` or `=`, which would otherwise corrupt the `?apiKey=` query
+    /// string (`+` decodes to a space, `=` starts a new pair).
     pub async fn video_playback_uri(&self, asset_id: &str) -> Option<String> {
         let base_url = self.get_active_url().await?;
         let settings = self.settings_snapshot();
+        let key = glib::Uri::escape_string(&settings.api_key, None, false);
         Some(format!(
             "{}/api/assets/{}/video/playback?apiKey={}",
-            base_url, asset_id, settings.api_key
+            base_url, asset_id, key
         ))
     }
 

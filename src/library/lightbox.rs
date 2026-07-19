@@ -8,6 +8,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use glib::clone;
+use gstreamer as gst;
+use gstreamer_play as gstplay;
 use gtk::prelude::*;
 use libadwaita::prelude::*;
 use libadwaita::{CallbackAnimationTarget, TimedAnimation};
@@ -166,6 +168,101 @@ mod dismiss_bin {
 }
 
 use dismiss_bin::DismissBin;
+
+/// Inline video playback backed by a GStreamer `gtk4paintablesink` pipeline
+/// (the approach Delfin uses), replacing `gtk::Video`/`gtk::MediaFile` which
+/// fail silently for Immich's transcoded streams.
+///
+/// The widget handed to the caller (`picture`) renders the sink's
+/// `gdk::Paintable`; the `Play` drives decode/seek/playback. Construction is
+/// fallible: if the `gtk4paintablesink` element can't be created (plugin not
+/// installed) we return `None` and the lightbox stays on the still poster.
+struct LightboxVideo {
+    play: gstplay::Play,
+    picture: gtk::Picture,
+    /// Keeps the message-bus watch alive: the `BusWatchGuard` removes the watch
+    /// on drop, so it must outlive the pipeline.
+    _bus_watch: gst::bus::BusWatchGuard,
+}
+
+impl LightboxVideo {
+    /// Build the pipeline. `on_error` fires on the main thread when the play
+    /// pipeline posts a fatal error, so the caller can fall the media stack
+    /// back to the still poster. Returns `None` (with a log line) if GStreamer
+    /// or the `gtk4paintablesink` plugin is unavailable, so callers degrade
+    /// gracefully rather than showing a black frame.
+    fn new(on_error: impl Fn() + 'static) -> Option<Self> {
+        let sink = match gst::ElementFactory::make("gtk4paintablesink").build() {
+            Ok(sink) => sink,
+            Err(err) => {
+                log::warn!(
+                    "gtk4paintablesink unavailable ({err}); inline video disabled, using poster"
+                );
+                return None;
+            }
+        };
+        // The paintable is a plain gdk::Paintable property on the sink; because
+        // the whole tree resolves to a single glib 0.22, this is the *same*
+        // GObject type gtk4 expects — no cross-version paintable mismatch.
+        let paintable: gtk::gdk::Paintable = sink.property("paintable");
+
+        // Wrap the sink in a glsinkbin so GStreamer can negotiate GL/DMABuf
+        // upload paths; fall back to the bare sink if glsinkbin is missing.
+        let video_sink = gst::ElementFactory::make("glsinkbin")
+            .property("sink", &sink)
+            .build()
+            .unwrap_or_else(|_| sink.clone());
+
+        let renderer = gstplay::PlayVideoOverlayVideoRenderer::with_sink(&video_sink);
+        let play = gstplay::Play::new(Some(renderer));
+
+        let picture = gtk::Picture::builder()
+            .paintable(&paintable)
+            .content_fit(gtk::ContentFit::Contain)
+            .vexpand(true)
+            .hexpand(true)
+            .build();
+
+        // Watch the play message bus for fatal errors so a failed stream is
+        // visible/graceful (fall back to the poster) rather than a silent black
+        // frame. The `Play` posts its own application messages, so we detect
+        // errors via `PlayMessage::parse` rather than the raw `MessageView`.
+        // The bus starts flushing; enable delivery, then attach a local
+        // (main-thread) watch and keep its guard alive in the struct.
+        let bus = play.message_bus();
+        bus.set_flushing(false);
+        let bus_watch = bus
+            .add_watch_local(move |_, msg| {
+                if gstplay::Play::is_play_message(msg)
+                    && let Ok(gstplay::PlayMessage::Error(err)) = gstplay::PlayMessage::parse(msg)
+                {
+                    log::warn!("Inline video playback error: {}", err.error());
+                    on_error();
+                }
+                glib::ControlFlow::Continue
+            })
+            .ok()?;
+
+        Some(Self {
+            play,
+            picture,
+            _bus_watch: bus_watch,
+        })
+    }
+
+    /// Start (or restart) playback of `uri`.
+    fn play_uri(&self, uri: &str) {
+        self.play.set_uri(Some(uri));
+        self.play.play();
+    }
+
+    /// Stop playback and clear the URI so the previous stream fully releases
+    /// its decoder/network resources when navigating away or dismissing.
+    fn stop(&self) {
+        self.play.stop();
+        self.play.set_uri(None);
+    }
+}
 
 /// Everything we can learn about a local file off the main thread before
 /// handing the data back to GTK. `exif` is the cached EXIF parse; `dims`
@@ -859,20 +956,51 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     let swipe_active = Rc::new(Cell::new(false));
     let resolution_full = ui.ctx.config.read().data.library_preview_full_resolution;
 
-    let video_player = gtk::Video::builder()
-        .autoplay(true)
-        .vexpand(true)
-        .hexpand(true)
-        .visible(false)
-        .build();
     let media_stack = gtk::Stack::builder()
         .vexpand(true)
         .hexpand(true)
         .transition_type(gtk::StackTransitionType::None)
         .build();
     media_stack.add_named(&picture_overlay, Some("image"));
-    media_stack.add_named(&video_player, Some("video"));
     media_stack.set_visible_child_name("image");
+
+    // Inline video playback via a GStreamer `gtk4paintablesink` pipeline (built
+    // lazily, once, and reused across navigation). `None` when the plugin is
+    // missing — in that case videos fall back to the still poster. On a fatal
+    // pipeline error the watch flips the media stack back to the poster.
+    let video: Rc<RefCell<Option<LightboxVideo>>> = Rc::new(RefCell::new(None));
+    let ensure_video = {
+        let video = video.clone();
+        let media_stack = media_stack.clone();
+        Rc::new(move || -> Option<gtk::Picture> {
+            if video.borrow().is_none() {
+                let media_stack_err = media_stack.clone();
+                let Some(vp) = LightboxVideo::new(move || {
+                    // Fatal playback error: reveal the poster instead of a black
+                    // frame so the failure is visible, not silent.
+                    media_stack_err.set_visible_child_name("image");
+                }) else {
+                    return None;
+                };
+                media_stack.add_named(&vp.picture, Some("video"));
+                *video.borrow_mut() = Some(vp);
+            }
+            video.borrow().as_ref().map(|vp| vp.picture.clone())
+        })
+    };
+
+    // Stop playback whenever the lightbox page is hidden/popped. This covers
+    // every exit path — back button, Escape, delete, and the swipe-down
+    // dismiss — so a video never keeps decoding/streaming behind the grid.
+    page.connect_hidden(clone!(
+        #[strong]
+        video,
+        move |_| {
+            if let Some(vp) = video.borrow().as_ref() {
+                vp.stop();
+            }
+        }
+    ));
 
     // ── Chrome: top bar and bottom bar (hidden by default) ──────────────
     let back_btn = gtk::Button::builder()
@@ -1048,7 +1176,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let load_gen = load_gen.clone();
         let pic_stack = pic_stack.clone();
         let active_a = active_a.clone();
-        let video_player = video_player.clone();
+        let video = video.clone();
+        let ensure_video = ensure_video.clone();
         let media_stack = media_stack.clone();
         move |target: gtk::Picture,
               target_is_a: bool,
@@ -1067,13 +1196,19 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let load_gen = load_gen.clone();
             let pic_stack = pic_stack.clone();
             let active_a = active_a.clone();
-            let video_player = video_player.clone();
+            let video = video.clone();
+            let ensure_video = ensure_video.clone();
             let media_stack = media_stack.clone();
             let lightbox_drag_path = lightbox_drag_path.clone();
             let our_gen = load_gen.get().wrapping_add(1);
             load_gen.set(our_gen);
+            // Navigating (or reloading) always tears down any active playback so
+            // the previous video stops and releases its decoder/network before
+            // we show the next asset.
+            if let Some(vp) = video.borrow().as_ref() {
+                vp.stop();
+            }
             if media_stack.visible_child_name().as_deref() == Some("video") {
-                video_player.set_media_stream(None::<&gtk::MediaStream>);
                 media_stack.set_visible_child_name("image");
             }
             unavailable_overlay.set_reveal_child(false);
@@ -1149,6 +1284,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     cancel_loader.set(true);
                     loader.set_reveal_child(false);
                     let uri = if !local_path.is_empty() {
+                        // Local file: GStreamer plays a file:// URI directly.
                         Some(format!("file://{}", local_path))
                     } else {
                         ui.ctx.api_client.video_playback_uri(&asset_id).await
@@ -1157,10 +1293,15 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         return;
                     }
                     if let Some(uri) = uri {
-                        let gio_file = gtk::gio::File::for_uri(&uri);
-                        let mf = gtk::MediaFile::for_file(&gio_file);
-                        video_player.set_media_stream(Some(mf.upcast_ref::<gtk::MediaStream>()));
-                        media_stack.set_visible_child_name("video");
+                        // Build (or reuse) the GStreamer pipeline. If the sink
+                        // plugin is missing, `ensure_video` returns None and we
+                        // stay on the poster (already committed above).
+                        if ensure_video().is_some()
+                            && let Some(vp) = video.borrow().as_ref()
+                        {
+                            vp.play_uri(&uri);
+                            media_stack.set_visible_child_name("video");
+                        }
                     }
                     return;
                 }

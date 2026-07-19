@@ -11,6 +11,8 @@ dirs = "6.0.0"
 gdk4 = "0.11"
 glib = "0.22.7"
 gtk = { version = "0.11.2", package = "gtk4", features = ["v4_22"] }
+gstreamer = { version = "0.25", features = ["v1_20"] }
+gstreamer-play = "0.25"
 ksni = "0.3.4"
 libadwaita = { version = "0.9.1", features = ["v1_6"] }
 libshumate = { version = "0.8.1", features = ["v1_6"] }
