@@ -15,6 +15,15 @@ use crate::library::asset_object::AssetObject;
 use crate::library::masonry::quality::fallback_bucket;
 use crate::library::thumbnail_cache::ThumbnailCache;
 
+pub(crate) fn collect_asset_dates(model: &LibraryAssetModel) -> Vec<(u32, String)> {
+    (0..model.n_items())
+        .filter_map(|i| {
+            let obj = model.item(i).and_downcast::<AssetObject>()?;
+            Some((i, obj.property::<String>("created-at")))
+        })
+        .collect()
+}
+
 pub(crate) fn collect_dims(model: &LibraryAssetModel) -> Vec<(u32, u32)> {
     let n = model.n_items();
     let mut out = Vec::with_capacity(n as usize);

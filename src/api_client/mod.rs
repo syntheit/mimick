@@ -453,6 +453,13 @@ pub struct AssetDetails {
     /// Extracted EXIF metadata block.
     #[serde(default)]
     pub exif_info: Option<ExifInfo>,
+    /// Whether the asset is marked as a favorite.
+    #[serde(default)]
+    pub is_favorite: bool,
+    /// User-editable description text (top-level, distinct from the EXIF
+    /// `description`; Immich stores the edited value here).
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Type of asset thumbnails requested.

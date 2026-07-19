@@ -360,6 +360,8 @@ pub fn build_settings_window_with_parent(
         library_group,
         preview_full_row,
         grid_quality_row,
+        grid_layout_row,
+        grid_columns_row,
         raw_full_decode_row,
         raw_cache_row,
         disk_cache_row,
@@ -411,6 +413,41 @@ pub fn build_settings_window_with_parent(
         let mut cfg = ctx_for_quality.config.write();
         if cfg.data.library_grid_quality != value {
             cfg.data.library_grid_quality = value.to_string();
+            cfg.save();
+        }
+    });
+
+    // --- Grid layout row ---
+    let initial_layout_idx: u32 = match ctx.config.read().data.library_grid_layout.as_str() {
+        "masonry" => 1,
+        _ => 0,
+    };
+    grid_layout_row.set_selected(initial_layout_idx);
+    // Columns row is only meaningful in square mode.
+    grid_columns_row.set_sensitive(initial_layout_idx == 0);
+    let ctx_for_layout = ctx.clone();
+    let columns_row_for_layout = grid_columns_row.clone();
+    grid_layout_row.connect_selected_notify(move |row| {
+        let value = match row.selected() {
+            1 => "masonry",
+            _ => "square",
+        };
+        columns_row_for_layout.set_sensitive(value == "square");
+        let mut cfg = ctx_for_layout.config.write();
+        if cfg.data.library_grid_layout != value {
+            cfg.data.library_grid_layout = value.to_string();
+            cfg.save();
+        }
+    });
+
+    // --- Grid columns row ---
+    grid_columns_row.set_value(ctx.config.read().data.library_grid_columns as f64);
+    let ctx_for_columns = ctx.clone();
+    grid_columns_row.connect_value_notify(move |row| {
+        let new_cols = row.value() as u32;
+        let mut cfg = ctx_for_columns.config.write();
+        if cfg.data.library_grid_columns != new_cols {
+            cfg.data.library_grid_columns = new_cols;
             cfg.save();
         }
     });

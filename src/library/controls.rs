@@ -14,7 +14,6 @@ use crate::library::asset_object::AssetObject;
 use crate::library::state::{LibrarySortMode, LibrarySource};
 use crate::settings_window::{build_settings_window_with_parent, show_queue_inspector};
 
-use super::download::{open_local_with_default_app, spawn_video_handoff};
 use super::{
     LibraryWindowUi, apply_timeline_ui_state, load_albums, load_source_page, load_status,
     open_lightbox, refresh_albums_view, update_timeline_banner_if_active,
@@ -483,29 +482,17 @@ pub(super) fn sidebar_dispatch(ui: Rc<LibraryWindowUi>, source: LibrarySource) {
 pub(super) fn connect_grid_handlers(ui: Rc<LibraryWindowUi>) {
     let ui_for_activate = ui.clone();
     ui.grid.canvas.set_activate_handler(move |position| {
-        let Some(item) = ui_for_activate
+        if ui_for_activate
             .grid
             .model
             .item(position)
             .and_downcast::<AssetObject>()
-        else {
-            return;
-        };
-        let asset_id = item.property::<String>("id");
-        let filename = item.property::<String>("filename");
-        let local_path = item.property::<String>("local-path");
-        let asset_type = item.property::<String>("asset-type");
-
-        // Videos open in the system default player.
-        if asset_type.eq_ignore_ascii_case("VIDEO") {
-            if !local_path.is_empty() {
-                open_local_with_default_app(&local_path);
-            } else {
-                spawn_video_handoff(ui_for_activate.clone(), asset_id, filename);
-            }
+            .is_none()
+        {
             return;
         }
-
+        // Both images and videos open in the lightbox; the lightbox plays
+        // videos inline via gtk::Video (streaming or local file).
         open_lightbox(ui_for_activate.clone(), position);
     });
 

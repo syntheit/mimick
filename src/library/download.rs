@@ -1,8 +1,7 @@
-//! Download flow, video handoff, and transfer-tracking helpers.
+//! Download flow and transfer-tracking helpers.
 //!
 //! Streams the original-quality asset from the server into a local file,
-//! updating the progress bar and transfer rate display. Video files can
-//! optionally be handed off to the system default player after download.
+//! updating the progress bar and transfer rate display.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -83,36 +82,6 @@ pub(super) fn open_local_with_default_app(path: &str) {
     {
         log::warn!("Failed to open {}: {}", uri, err);
     }
-}
-
-pub(super) fn spawn_video_handoff(ui: Rc<LibraryWindowUi>, asset_id: String, filename: String) {
-    glib::MainContext::default().spawn_local(async move {
-        let Some(cache_dir) = crate::profile::cache_dir().map(|p| p.join("video")) else {
-            return;
-        };
-        let _ = std::fs::create_dir_all(&cache_dir);
-        let safe_name =
-            crate::sanitize::safe_filename(&filename).unwrap_or_else(|| asset_id.clone());
-        let path = cache_dir.join(&safe_name);
-        if !path.exists()
-            && let Err(err) = {
-                begin_download_session(&ui.ctx, filename.clone());
-                let progress =
-                    track_download_item(&ui.ctx, asset_id.clone(), Some(filename.clone()), None);
-                let result = ui
-                    .ctx
-                    .api_client
-                    .download_original_to_file(&asset_id, &path, Some(progress))
-                    .await;
-                finish_download_item(&ui.ctx, &asset_id);
-                result
-            }
-        {
-            log::warn!("Video handoff failed for {}: {}", asset_id, err);
-            return;
-        }
-        open_local_with_default_app(&path.display().to_string());
-    });
 }
 
 pub(super) fn start_download(ui: Rc<LibraryWindowUi>, asset_id: String, filename: String) {

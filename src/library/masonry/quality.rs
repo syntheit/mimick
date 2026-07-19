@@ -43,6 +43,22 @@ pub(crate) fn bucket_for_row_height(h: f32, quality: GridQuality) -> ThumbnailSi
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GridLayout {
+    Masonry,
+    #[default]
+    SquareGrid,
+}
+
+impl GridLayout {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "masonry" => Self::Masonry,
+            _ => Self::SquareGrid,
+        }
+    }
+}
+
 /// Smaller size to try when a requested bucket isn't available on the server.
 pub(crate) fn fallback_bucket(size: ThumbnailSize) -> Option<ThumbnailSize> {
     match size {

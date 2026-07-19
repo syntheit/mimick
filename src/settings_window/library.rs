@@ -5,6 +5,8 @@ pub struct LibraryWidgets {
     pub library_group: adw::PreferencesGroup,
     pub preview_full_row: adw::SwitchRow,
     pub grid_quality_row: adw::ComboRow,
+    pub grid_layout_row: adw::ComboRow,
+    pub grid_columns_row: adw::SpinRow,
     pub raw_full_decode_row: adw::SwitchRow,
     pub raw_cache_row: adw::SwitchRow,
     pub disk_cache_row: adw::SpinRow,
@@ -34,6 +36,22 @@ pub fn build_library_group(settings_page: &adw::PreferencesPage) -> LibraryWidge
         .model(&quality_options)
         .build();
     library_group.add(&grid_quality_row);
+
+    let layout_options = gtk::StringList::new(&["Square Grid", "Masonry"]);
+    let grid_layout_row = adw::ComboRow::builder()
+        .title("Grid Layout")
+        .subtitle("Square: uniform tiles grouped by day. Masonry: aspect-correct justified rows.")
+        .model(&layout_options)
+        .build();
+    library_group.add(&grid_layout_row);
+
+    let columns_adj = gtk::Adjustment::new(3.0, 2.0, 8.0, 1.0, 1.0, 0.0);
+    let grid_columns_row = adw::SpinRow::builder()
+        .title("Grid Columns")
+        .subtitle("Number of columns in square grid mode.")
+        .adjustment(&columns_adj)
+        .build();
+    library_group.add(&grid_columns_row);
 
     let raw_full_decode_row = adw::SwitchRow::builder()
         .title("Full RAW Decoding")
@@ -80,6 +98,8 @@ pub fn build_library_group(settings_page: &adw::PreferencesPage) -> LibraryWidge
         library_group,
         preview_full_row,
         grid_quality_row,
+        grid_layout_row,
+        grid_columns_row,
         raw_full_decode_row,
         raw_cache_row,
         disk_cache_row,

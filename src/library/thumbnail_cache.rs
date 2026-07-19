@@ -686,7 +686,11 @@ fn encode_png_bytes(
 fn target_dim_for_bucket(size: ThumbnailSize) -> i32 {
     match size {
         ThumbnailSize::Thumbnail => 256,
-        ThumbnailSize::Preview => 1440,
+        // Grid tiles are ~450 physical px on the phone; 768 is crisply
+        // oversampled while staying far cheaper to decode/upload than the
+        // source's native 1440 (avoids scroll jank). Grid-only — the lightbox
+        // loads full/original separately.
+        ThumbnailSize::Preview => 768,
         ThumbnailSize::Fullsize => 2560,
     }
 }

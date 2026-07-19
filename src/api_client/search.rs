@@ -397,6 +397,20 @@ impl ImmichApiClient {
         if let Some(obj) = body.as_object_mut() {
             obj.entry("withExif")
                 .or_insert(serde_json::Value::Bool(true));
+            // Exclude hidden assets (e.g. the .MOV motion parts of iPhone Live
+            // Photos, which Immich marks visibility=hidden and never generates
+            // thumbnails for — they'd otherwise show as blank tiles / 404s).
+            // Only default to the timeline scope when the caller hasn't asked
+            // for a different one (archive/trash set their own filters).
+            if !obj.contains_key("visibility")
+                && !obj.contains_key("isArchived")
+                && !obj.contains_key("withDeleted")
+            {
+                obj.insert(
+                    "visibility".into(),
+                    serde_json::Value::String("timeline".into()),
+                );
+            }
         }
         let base_url = self
             .get_active_url()

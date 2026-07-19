@@ -6,8 +6,8 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::ObjectSubclassIsExt;
 
 use super::{
-    AssetContextMenuHandler, GridQuality, LibraryAssetModel, MasonryCanvas, ThumbnailCache, imp,
-    item_at_x, row_at_y,
+    AssetContextMenuHandler, GridLayout, GridQuality, LibraryAssetModel, MasonryCanvas,
+    ThumbnailCache, imp, item_at_x, row_at_y,
 };
 use crate::app_context::AppContext;
 use crate::library::asset_object::AssetObject;
@@ -42,6 +42,29 @@ impl MasonryCanvas {
             imp.invalidate_layout();
             self.queue_draw();
         }
+        // On the phone (narrow) detach the drag-export controller so touch drags
+        // are handed to the ScrolledWindow for scrolling instead of starting a
+        // DnD export. Drag-export stays available on the desktop.
+        self.set_drag_export_enabled(!narrow);
+    }
+
+    /// Attach or detach the drag-export `DragSource` controller. See the field
+    /// docs on `imp::MasonryCanvas::drag_source`. No-op until `install_drag_source`
+    /// has run (the controller is created there).
+    pub fn set_drag_export_enabled(&self, on: bool) {
+        let imp = self.imp();
+        if imp.drag_source_active.get() == on {
+            return;
+        }
+        let Some(ds) = imp.drag_source.borrow().clone() else {
+            return;
+        };
+        if on {
+            self.add_controller(ds);
+        } else {
+            self.remove_controller(&ds);
+        }
+        imp.drag_source_active.set(on);
     }
 
     pub fn set_select_mode(&self, on: bool) {
@@ -51,6 +74,23 @@ impl MasonryCanvas {
     pub fn set_quality(&self, quality: GridQuality) {
         let imp = self.imp();
         if imp.quality.replace(quality) != quality {
+            self.queue_draw();
+        }
+    }
+
+    pub fn set_layout_mode(&self, mode: GridLayout) {
+        let imp = self.imp();
+        if imp.layout_mode.replace(mode) != mode {
+            imp.invalidate_layout();
+            self.queue_draw();
+        }
+    }
+
+    pub fn set_grid_columns(&self, cols: u32) {
+        let imp = self.imp();
+        let new_cols = cols.max(1);
+        if imp.grid_columns.replace(new_cols) != new_cols {
+            imp.invalidate_layout();
             self.queue_draw();
         }
     }
@@ -164,7 +204,13 @@ impl MasonryCanvas {
             }
         });
 
+        // Retain the controller so it can be detached on mobile (see set_narrow).
+        *self.imp().drag_source.borrow_mut() = Some(drag_source.clone());
         self.add_controller(drag_source);
+        self.imp().drag_source_active.set(true);
+        // Apply the current form factor: if we're already narrow, keep it off.
+        let narrow = self.imp().narrow.get();
+        self.set_drag_export_enabled(!narrow);
     }
 }
 
@@ -300,7 +346,13 @@ fn primary_click_controller(canvas: &MasonryCanvas) -> gtk::GestureClick {
     primary.set_button(gtk::gdk::BUTTON_PRIMARY);
     let weak = canvas.downgrade();
     // Use `released` instead of `pressed` so a drag gesture that starts
-    // from the same press doesn't also trigger lightbox activation.
+    // from the same press doesn't also trigger lightbox activation. On mobile
+    // the drag source is detached (see set_narrow), so the ScrolledWindow owns
+    // touch drags and cancels this gesture on a real drag — a stationary tap
+    // still fires `released` and opens the lightbox. (A press→release movement
+    // threshold was tried here but broke taps: `connect_pressed` doesn't fire
+    // reliably for touch, leaving the press point at (0,0) so every tap read as
+    // a large drag and was discarded.)
     primary.connect_released(move |gesture, _, x, y| {
         if let Some(canvas) = weak.upgrade() {
             if canvas.imp().drag_active.get() {

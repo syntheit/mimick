@@ -17,8 +17,8 @@ use crate::library::local_exif::{self, LocalExif};
 
 use super::context_menu::show_asset_context_menu;
 use super::download::{
-    begin_download_session, finish_download_item, open_local_with_default_app, spawn_video_handoff,
-    start_download, track_download_item,
+    begin_download_session, finish_download_item, open_local_with_default_app, start_download,
+    track_download_item,
 };
 use super::{LOCAL_ID_PREFIX, LibraryWindowUi, load_source_page, load_texture_oriented};
 
@@ -352,15 +352,81 @@ fn format_datetime_display(iso: &str) -> String {
     iso.get(..19).unwrap_or(iso).replace('T', " ").to_string()
 }
 
-/// Truncate a filename to a maximum character limit, appending an ellipsis if needed.
-fn truncate_filename(name: &str, max_chars: usize) -> String {
-    let count = name.chars().count();
-    if count <= max_chars {
-        return name.to_string();
+/// Format an ISO 8601 timestamp as a long, human-friendly local string, e.g.
+/// "Monday, July 19, 2026 · 3:42 PM". Falls back to the compact display form
+/// (and finally the raw string) if the value can't be parsed.
+fn format_full_timestamp(iso: &str) -> String {
+    use chrono::{DateTime, Local, Utc};
+    let local: Option<DateTime<Local>> = DateTime::parse_from_rfc3339(iso)
+        .map(|dt| dt.into())
+        .ok()
+        .or_else(|| iso.parse::<DateTime<Utc>>().ok().map(|dt| dt.into()));
+    if let Some(local) = local {
+        // %-I / %-M strip leading zeros on Unix. Weekday, month name, day, year.
+        return local.format("%A, %B %-d, %Y · %-I:%M %p").to_string();
     }
-    let keep = max_chars.saturating_sub(1);
-    let head: String = name.chars().take(keep).collect();
-    format!("{}…", head)
+    let compact = format_datetime_display(iso);
+    if compact.trim().is_empty() {
+        iso.to_string()
+    } else {
+        compact
+    }
+}
+
+/// Short date/time for the lightbox top bar, e.g. "Jul 19, 2026, 3:42 PM".
+/// Empty string when the timestamp can't be parsed so the caller can hide it.
+fn format_topbar_datetime(iso: &str) -> String {
+    use chrono::{DateTime, Local, Utc};
+    let local: Option<DateTime<Local>> = DateTime::parse_from_rfc3339(iso)
+        .map(|dt| dt.into())
+        .ok()
+        .or_else(|| iso.parse::<DateTime<Utc>>().ok().map(|dt| dt.into()));
+    local
+        .map(|l| l.format("%b %-d, %Y · %-I:%M %p").to_string())
+        .unwrap_or_default()
+}
+
+/// Build a small OpenStreetMap minimap centered on `(lat, lon)` with a marker,
+/// ~180px tall at zoom 14. Uses libshumate's `SimpleMap` with an OSM raster
+/// tile source and a single marker layer.
+fn build_minimap(lat: f64, lon: f64) -> Option<gtk::Widget> {
+    use libshumate::prelude::*;
+
+    let map = libshumate::SimpleMap::new();
+    map.set_height_request(180);
+    map.set_hexpand(true);
+
+    // OSM raster tiles. Immich uses the standard Mapnik tile server layout.
+    let source = libshumate::RasterRenderer::new_full_from_url(
+        "osm-mapnik",
+        "OpenStreetMap",
+        "© OpenStreetMap contributors",
+        "https://www.openstreetmap.org/copyright",
+        0,
+        19,
+        256,
+        libshumate::MapProjection::Mercator,
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    );
+    map.set_map_source(Some(&source));
+
+    let viewport = map.viewport()?;
+    viewport.set_zoom_level(14.0);
+    viewport.set_location(lat, lon);
+
+    // Drop a marker at the coordinates.
+    let marker = libshumate::Marker::new();
+    marker.set_location(lat, lon);
+    let pin = gtk::Image::from_icon_name("mark-location-symbolic");
+    pin.set_pixel_size(28);
+    pin.add_css_class("error");
+    marker.set_child(Some(&pin));
+
+    let marker_layer = libshumate::MarkerLayer::new_full(&viewport, gtk::SelectionMode::None);
+    marker_layer.add_marker(&marker);
+    map.add_overlay_layer(&marker_layer);
+
+    Some(map.upcast())
 }
 
 /// Apply zoom to a lightbox Picture. Zoom is fit-relative: 1.0 = the size the
@@ -396,60 +462,125 @@ fn apply_lightbox_zoom(
     Some((cw, ch))
 }
 
-/// Construct and present the fullscreen lightbox view for a selected asset.
+/// Present a simple modal alert anchored to the main window.
+fn show_lightbox_alert(ui: &LibraryWindowUi, heading: &str, body: &str) {
+    let alert = libadwaita::AlertDialog::builder()
+        .heading(heading)
+        .body(body)
+        .build();
+    alert.add_response("ok", "OK");
+    alert.present(Some(&ui.window));
+}
+
+/// Show an album-picker dialog and add `asset_id` to the chosen album.
+///
+/// Fetches the album list, then presents an `AdwAlertDialog` whose body is a
+/// scrollable list of album buttons. Picking one issues the add-to-album call.
+fn show_add_to_album_dialog(ui: Rc<LibraryWindowUi>, asset_id: String) {
+    glib::MainContext::default().spawn_local(async move {
+        let albums = match ui.ctx.api_client.get_all_albums().await {
+            Ok(a) => a,
+            Err(err) => {
+                show_lightbox_alert(&ui, "Add to album", &err);
+                return;
+            }
+        };
+        if albums.is_empty() {
+            show_lightbox_alert(&ui, "Add to album", "No albums found on the server.");
+            return;
+        }
+        let mut albums = albums;
+        albums.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+        let dialog = libadwaita::AlertDialog::builder()
+            .heading("Add to album")
+            .build();
+        dialog.add_response("cancel", "Cancel");
+        dialog.set_close_response("cancel");
+
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["boxed-list"])
+            .build();
+        for (name, album_id) in &albums {
+            let row = libadwaita::ActionRow::builder()
+                .title(name)
+                .activatable(true)
+                .build();
+            row.add_suffix(&gtk::Image::from_icon_name("list-add-symbolic"));
+            let ui = ui.clone();
+            let asset_id = asset_id.clone();
+            let album_id = album_id.clone();
+            let name = name.clone();
+            let dialog_weak = dialog.downgrade();
+            row.connect_activated(move |_| {
+                if let Some(dialog) = dialog_weak.upgrade() {
+                    dialog.close();
+                }
+                let ui = ui.clone();
+                let asset_id = asset_id.clone();
+                let album_id = album_id.clone();
+                let name = name.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let ok = ui
+                        .ctx
+                        .api_client
+                        .add_assets_to_album(&album_id, &[asset_id])
+                        .await;
+                    if !ok {
+                        show_lightbox_alert(
+                            &ui,
+                            "Add to album",
+                            &format!("Failed to add to \"{name}\"."),
+                        );
+                    }
+                });
+            });
+            list.append(&row);
+        }
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_height(240)
+            .propagate_natural_height(true)
+            .child(&list)
+            .build();
+        dialog.set_extra_child(Some(&scroller));
+        dialog.present(Some(&ui.window));
+    });
+}
+
+/// Construct and present the Immich-mobile-style fullscreen lightbox.
+///
+/// The viewer is a black canvas with no chrome by default. A single tap on the
+/// image toggles two translucent bars (top: back / date / favorite / menu;
+/// bottom: share / add-to-album / delete). Horizontal swipes navigate between
+/// photos, a downward swipe dismisses the viewer, and an upward swipe opens the
+/// details bottom sheet. Pinch-zoom / pan and inline video playback are kept.
 pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
-    let Some(item) = ui.grid.model.item(position).and_downcast::<AssetObject>() else {
+    let Some(_item) = ui.grid.model.item(position).and_downcast::<AssetObject>() else {
         return;
     };
-    let initial_filename = item.property::<String>("filename");
-    let title_cap = if ui.split.is_collapsed() { 14 } else { 24 };
-    let title_for_header = truncate_filename(&initial_filename, title_cap);
 
     let page = libadwaita::NavigationPage::builder()
-        .title(&title_for_header)
+        .title("Photo")
         .can_pop(true)
         .build();
-    let toolbar = libadwaita::ToolbarView::builder().build();
-    let header = libadwaita::HeaderBar::builder()
-        .show_back_button(true)
-        .build();
-    let prev_btn = gtk::Button::builder()
-        .icon_name("go-previous-symbolic")
-        .tooltip_text("Previous (Left)")
-        .build();
-    let next_btn = gtk::Button::builder()
-        .icon_name("go-next-symbolic")
-        .tooltip_text("Next (Right)")
-        .build();
-    let details_btn = gtk::ToggleButton::builder()
-        .icon_name("dialog-information-symbolic")
-        .tooltip_text("Toggle details (I)")
-        .active(false)
-        .build();
-    header.pack_start(&prev_btn);
-    header.pack_start(&next_btn);
-    header.pack_end(&details_btn);
-    toolbar.add_top_bar(&header);
 
-    let body = libadwaita::OverlaySplitView::builder()
-        .sidebar_position(gtk::PackType::End)
-        .show_sidebar(false)
-        .collapsed(ui.split.is_collapsed())
-        .enable_show_gesture(true)
-        .enable_hide_gesture(true)
-        .min_sidebar_width(180.0)
-        .max_sidebar_width(320.0)
-        .sidebar_width_fraction(0.4)
+    // Root bottom sheet: content is the black viewer overlay; the sheet is the
+    // swipe-up details drawer.
+    let sheet = libadwaita::BottomSheet::builder()
+        .can_open(true)
+        .can_close(true)
+        .modal(true)
         .build();
+
     let viewer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .margin_top(4)
-        .margin_bottom(8)
-        .margin_start(4)
-        .margin_end(4)
         .hexpand(true)
+        .vexpand(true)
+        .css_classes(["mimick-viewer-black"])
         .build();
+
     // Two picture widgets in a stack so navigation can slide between them.
     let picture_a = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Contain)
@@ -472,18 +603,16 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     pic_stack.add_named(&picture_b, Some("b"));
     pic_stack.set_visible_child_name("a");
     let scrolled_picture = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Automatic)
-        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .hscrollbar_policy(gtk::PolicyType::External)
+        .vscrollbar_policy(gtk::PolicyType::External)
         .child(&pic_stack)
         .vexpand(true)
         .hexpand(true)
         .kinetic_scrolling(false)
-        .min_content_width(120)
         .build();
 
     // Spinner overlay: a centered Mimick app icon that rotates while a
-    // full-resolution texture is being fetched / decoded. Hidden by default;
-    // the load_into_picture closure toggles it.
+    // full-resolution texture is being fetched / decoded.
     let loader_icon = gtk::Image::builder()
         .icon_name("dev.nicx.mimick")
         .pixel_size(72)
@@ -549,47 +678,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .build();
     picture_overlay.add_overlay(&unavailable_overlay);
 
-    // Video poster badge: clickable play icon shown over the still thumbnail
-    // when the current asset is a video; hands off to the grid's player flow.
-    let video_badge_target: Rc<RefCell<Option<(String, String, String)>>> =
-        Rc::new(RefCell::new(None));
-    let video_badge_icon = gtk::Image::builder()
-        .icon_name("mimick-video-symbolic")
-        .pixel_size(72)
-        .css_classes(vec!["mimick-video-badge".to_string()])
-        .build();
-    let video_badge_button = gtk::Button::builder()
-        .child(&video_badge_icon)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .tooltip_text("Play video in external player")
-        .css_classes(vec!["circular".to_string(), "flat".to_string()])
-        .visible(false)
-        .build();
-    video_badge_button.connect_clicked({
-        let video_badge_target = video_badge_target.clone();
-        let ui_for_video = ui.clone();
-        move |_| {
-            let Some((local_path, asset_id, filename)) = video_badge_target.borrow().clone() else {
-                return;
-            };
-            if !local_path.is_empty() {
-                open_local_with_default_app(&local_path);
-            } else {
-                spawn_video_handoff(ui_for_video.clone(), asset_id, filename);
-            }
-        }
-    });
-    picture_overlay.add_overlay(&video_badge_button);
-
     // Drag source for exporting the current asset's original file.
-    // `lightbox_drag_path` is updated by the load logic whenever an asset
-    // is displayed (from local path or preview cache).
     let lightbox_drag_path: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::new(RefCell::new(None));
     {
         let drag_source = gtk::DragSource::new();
         drag_source.set_actions(gtk::gdk::DragAction::COPY);
-
         let drag_path = lightbox_drag_path.clone();
         drag_source.connect_prepare(move |_source, _x, _y| {
             let path = drag_path.borrow().clone()?;
@@ -599,138 +692,190 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let file = gtk::gio::File::for_path(&path);
             Some(gtk::gdk::ContentProvider::for_value(&file.to_value()))
         });
-
         picture_overlay.add_controller(drag_source);
     }
 
     let active_a = Rc::new(Cell::new(true));
     let zoom_level = Rc::new(Cell::new(1.0_f64));
-    let initial_full = ui.ctx.config.read().data.library_preview_full_resolution;
-    let resolution_toggle = gtk::ToggleButton::builder()
-        .label(if initial_full { "Raw" } else { "Prev" })
-        .tooltip_text("Toggle preview vs original full-resolution image")
-        .active(initial_full)
+    let resolution_full = ui.ctx.config.read().data.library_preview_full_resolution;
+
+    let video_player = gtk::Video::builder()
+        .autoplay(true)
+        .vexpand(true)
+        .hexpand(true)
+        .visible(false)
         .build();
-    let download = gtk::Button::builder()
-        .icon_name("mimick-download-symbolic")
-        .tooltip_text("Download asset")
+    let media_stack = gtk::Stack::builder()
+        .vexpand(true)
+        .hexpand(true)
+        .transition_type(gtk::StackTransitionType::None)
         .build();
-    let zoom_out_btn = gtk::Button::builder()
-        .icon_name("zoom-out-symbolic")
-        .tooltip_text("Zoom out (Ctrl+-)")
+    media_stack.add_named(&picture_overlay, Some("image"));
+    media_stack.add_named(&video_player, Some("video"));
+    media_stack.set_visible_child_name("image");
+
+    // ── Chrome: top bar and bottom bar (hidden by default) ──────────────
+    let back_btn = gtk::Button::builder()
+        .icon_name("go-previous-symbolic")
+        .tooltip_text("Back")
         .build();
-    let zoom_in_btn = gtk::Button::builder()
-        .icon_name("zoom-in-symbolic")
-        .tooltip_text("Zoom in (Ctrl++)")
+    let datetime_label = gtk::Label::builder()
+        .css_classes(["mimick-lightbox-datetime"])
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .hexpand(true)
+        .halign(gtk::Align::Center)
         .build();
-    let zoom_reset_btn = gtk::Button::builder()
-        .label("100%")
-        .tooltip_text("Reset zoom (Ctrl+0)")
+    let favorite_btn = gtk::ToggleButton::builder()
+        .icon_name("non-starred-symbolic")
+        .tooltip_text("Favorite")
         .build();
-    let zoom_group = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .css_classes(vec!["linked".to_string()])
+    let menu = gtk::gio::Menu::new();
+    menu.append(Some("Download"), Some("lightbox.download"));
+    menu.append(Some("Copy to clipboard"), Some("lightbox.copy"));
+    menu.append(Some("Open with…"), Some("lightbox.openwith"));
+    menu.append(Some("Full resolution"), Some("lightbox.fullres"));
+    let menu_btn = gtk::MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .menu_model(&menu)
+        .tooltip_text("More")
         .build();
-    zoom_group.append(&zoom_out_btn);
-    zoom_group.append(&zoom_reset_btn);
-    zoom_group.append(&zoom_in_btn);
-    let actions = gtk::Box::builder()
+    let top_actions = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(4)
         .build();
-    let actions_spacer = gtk::Box::builder()
+    top_actions.append(&favorite_btn);
+    top_actions.append(&menu_btn);
+    let topbar = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .hexpand(true)
+        .spacing(6)
+        .css_classes(["mimick-lightbox-topbar"])
         .build();
-    actions.append(&zoom_group);
-    actions.append(&actions_spacer);
-    actions.append(&resolution_toggle);
-    actions.append(&download);
-    viewer.append(&picture_overlay);
-    viewer.append(&actions);
+    topbar.append(&back_btn);
+    topbar.append(&datetime_label);
+    topbar.append(&top_actions);
+    let top_revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideDown)
+        .transition_duration(160)
+        .reveal_child(false)
+        .valign(gtk::Align::Start)
+        .child(&topbar)
+        .build();
 
+    let make_action = |icon: &str, label: &str| -> gtk::Button {
+        let inner = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .halign(gtk::Align::Center)
+            .build();
+        let img = gtk::Image::from_icon_name(icon);
+        img.set_pixel_size(20);
+        let lbl = gtk::Label::new(Some(label));
+        inner.append(&img);
+        inner.append(&lbl);
+        gtk::Button::builder()
+            .child(&inner)
+            .hexpand(true)
+            .css_classes(["flat"])
+            .build()
+    };
+    let share_btn = make_action("send-to-symbolic", "Share");
+    let addalbum_btn = make_action("list-add-symbolic", "Album");
+    let delete_btn = make_action("user-trash-symbolic", "Delete");
+    let bottombar = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(4)
+        .homogeneous(true)
+        .css_classes(["mimick-lightbox-bottombar"])
+        .build();
+    bottombar.append(&share_btn);
+    bottombar.append(&addalbum_btn);
+    bottombar.append(&delete_btn);
+    let bottom_revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideUp)
+        .transition_duration(160)
+        .reveal_child(false)
+        .valign(gtk::Align::End)
+        .child(&bottombar)
+        .build();
+
+    viewer.append(&media_stack);
+    // Overlay the chrome bars on top of the viewer.
+    let chrome_overlay = gtk::Overlay::builder().build();
+    chrome_overlay.set_child(Some(&viewer));
+    chrome_overlay.add_overlay(&top_revealer);
+    chrome_overlay.add_overlay(&bottom_revealer);
+
+    // ── Details drawer contents ─────────────────────────────────────────
     let details_inner = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(14)
+        .spacing(12)
         .margin_top(14)
-        .margin_bottom(14)
-        .margin_start(10)
-        .margin_end(10)
+        .margin_bottom(20)
+        .margin_start(12)
+        .margin_end(12)
         .build();
-    let details_pane = gtk::ScrolledWindow::builder()
-        .child(&details_inner)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .hexpand(false)
-        .min_content_width(180)
-        .max_content_width(320)
-        .css_classes(vec!["mimick-details-pane".to_string()])
+    let sheet_grabber = gtk::Box::builder()
+        .halign(gtk::Align::Center)
+        .width_request(36)
+        .height_request(4)
+        .css_classes(["mimick-sheet-grabber"])
         .build();
-    let details_filename = gtk::Label::builder()
+    let details_timestamp = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::WordChar)
-        .max_width_chars(28)
-        .css_classes(vec!["title-3".to_string()])
+        .css_classes(["title-4"])
         .build();
-    let details_summary = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::WordChar)
-        .max_width_chars(28)
+    let description_group = libadwaita::PreferencesGroup::builder()
+        .title("Description")
         .build();
-    let details_loading = gtk::Label::builder()
-        .xalign(0.0)
-        .label("Loading details…")
-        .css_classes(vec!["dim-label".to_string()])
+    let description_row = libadwaita::EntryRow::builder()
+        .title("Add a description")
+        .build();
+    description_group.add(&description_row);
+    let details_map_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
         .build();
     let details_exif = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
-        .visible(false)
         .build();
-    details_inner.append(&details_filename);
-    details_inner.append(&details_summary);
+    let details_loading = gtk::Label::builder()
+        .xalign(0.0)
+        .label("Loading details…")
+        .css_classes(["dim-label"])
+        .build();
+    details_inner.append(&sheet_grabber);
+    details_inner.append(&details_timestamp);
+    details_inner.append(&description_group);
+    details_inner.append(&details_map_box);
     details_inner.append(&details_loading);
     details_inner.append(&details_exif);
-
-    body.set_content(Some(&viewer));
-    body.set_sidebar(Some(&details_pane));
-    toolbar.set_content(Some(&body));
-    page.set_child(Some(&toolbar));
-
-    details_btn
-        .bind_property("active", &body, "show-sidebar")
-        .sync_create()
-        .bidirectional()
-        .build();
-    ui.split
-        .bind_property("collapsed", &body, "collapsed")
-        .sync_create()
+    let details_pane = gtk::ScrolledWindow::builder()
+        .child(&details_inner)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(560)
         .build();
 
-    // On narrow widths, hide the prev/next header buttons -- Left/Right
-    // keyboard shortcuts still work, and the saved space lets the title fit.
-    // The details toggle stays visible so users can still access the EXIF pane.
-    let sync_nav_visibility = {
-        let prev_btn = prev_btn.clone();
-        let next_btn = next_btn.clone();
-        let split = ui.split.clone();
-        move || {
-            let show = !split.is_collapsed();
-            prev_btn.set_visible(show);
-            next_btn.set_visible(show);
-        }
+    sheet.set_content(Some(&chrome_overlay));
+    sheet.set_sheet(Some(&details_pane));
+    page.set_child(Some(&sheet));
+
+    // Chrome visibility toggle state.
+    let chrome_visible = Rc::new(Cell::new(false));
+    let set_chrome = {
+        let top_revealer = top_revealer.clone();
+        let bottom_revealer = bottom_revealer.clone();
+        let chrome_visible = chrome_visible.clone();
+        Rc::new(move |show: bool| {
+            chrome_visible.set(show);
+            top_revealer.set_reveal_child(show);
+            bottom_revealer.set_reveal_child(show);
+        })
     };
-    sync_nav_visibility();
-    let sync_clone = sync_nav_visibility.clone();
-    ui.split
-        .connect_notify_local(Some("collapsed"), move |_, _| sync_clone());
 
+    // Async load generation guard.
     let pos_cell = Rc::new(Cell::new(position));
-    // Increments on every navigation. Async load tasks capture the generation
-    // they were started for and skip UI writes if the user has navigated away
-    // by the time their decode finishes (relevant for slow RAW files).
     let load_gen = Rc::new(Cell::new(0u64));
     let load_into_picture = Rc::new({
         let ui = ui.clone();
@@ -743,8 +888,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let load_gen = load_gen.clone();
         let pic_stack = pic_stack.clone();
         let active_a = active_a.clone();
-        let video_badge_button = video_badge_button.clone();
-        let video_badge_target = video_badge_target.clone();
+        let video_player = video_player.clone();
+        let media_stack = media_stack.clone();
         move |target: gtk::Picture,
               target_is_a: bool,
               asset_id: String,
@@ -762,41 +907,21 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let load_gen = load_gen.clone();
             let pic_stack = pic_stack.clone();
             let active_a = active_a.clone();
-            let video_badge_button = video_badge_button.clone();
-            let video_badge_target = video_badge_target.clone();
+            let video_player = video_player.clone();
+            let media_stack = media_stack.clone();
             let lightbox_drag_path = lightbox_drag_path.clone();
             let our_gen = load_gen.get().wrapping_add(1);
             load_gen.set(our_gen);
+            if media_stack.visible_child_name().as_deref() == Some("video") {
+                video_player.set_media_stream(None::<&gtk::MediaStream>);
+                media_stack.set_visible_child_name("image");
+            }
             unavailable_overlay.set_reveal_child(false);
             unavailable_overlay.set_can_target(false);
             *unavailable_path.borrow_mut() = None;
-            // Clear drag path while loading; updated once resolved.
             *lightbox_drag_path.borrow_mut() = None;
-            // Videos use the still thumbnail as a poster + play badge; image
-            // decoders would all fail and fall through to "unavailable".
             let is_video =
                 crate::media_kinds::asset_kind(&mime) == crate::media_kinds::AssetKind::Video;
-            log::debug!(
-                "Lightbox load: asset={} file={:?} mime={} source={} full_res={} kind={}",
-                asset_id,
-                filename,
-                mime,
-                if local_path.is_empty() {
-                    "remote"
-                } else {
-                    "local"
-                },
-                full_res,
-                if is_video { "video" } else { "image" },
-            );
-            if is_video {
-                *video_badge_target.borrow_mut() =
-                    Some((local_path.clone(), asset_id.clone(), filename.clone()));
-                video_badge_button.set_visible(true);
-            } else {
-                *video_badge_target.borrow_mut() = None;
-                video_badge_button.set_visible(false);
-            }
             if let Some(texture) = ui
                 .ctx
                 .thumbnail_cache
@@ -804,10 +929,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             {
                 target.set_paintable(Some(&texture));
             }
-            // Reveal the spinner after a short delay so fast cache hits and
-            // quick JPEG decodes don't flash it. Local paths get a longer
-            // delay since most JPEGs decode in well under 250ms, but RAW
-            // and large TIFF decodes can run for seconds and need feedback.
             let arm_delay_ms: u64 = if local_path.is_empty() { 120 } else { 250 };
             let loader_for_arm = loader.clone();
             let cancel_loader = Rc::new(Cell::new(false));
@@ -820,8 +941,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             });
             glib::MainContext::default().spawn_local(async move {
                 let is_current = || load_gen.get() == our_gen;
-                // Defer the child switch by one idle so the target picture
-                // re-measures with the new texture before the slide starts.
                 let commit_visible = || {
                     let pic_stack = pic_stack.clone();
                     let active_a = active_a.clone();
@@ -839,7 +958,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     unavailable_overlay.set_reveal_child(true);
                 };
                 if is_video {
-                    // Use the grid's preview thumbnail as the poster.
                     let thumb_result = ui
                         .ctx
                         .thumbnail_cache
@@ -854,6 +972,20 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     commit_visible();
                     cancel_loader.set(true);
                     loader.set_reveal_child(false);
+                    let uri = if !local_path.is_empty() {
+                        Some(format!("file://{}", local_path))
+                    } else {
+                        ui.ctx.api_client.video_playback_uri(&asset_id).await
+                    };
+                    if !is_current() {
+                        return;
+                    }
+                    if let Some(uri) = uri {
+                        let gio_file = gtk::gio::File::for_uri(&uri);
+                        let mf = gtk::MediaFile::for_file(&gio_file);
+                        video_player.set_media_stream(Some(mf.upcast_ref::<gtk::MediaStream>()));
+                        media_stack.set_visible_child_name("video");
+                    }
                     return;
                 }
                 if !local_path.is_empty() {
@@ -885,14 +1017,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     {
                         let _ = std::fs::create_dir_all(&cache_dir);
                         let temp = original_preview_cache_path(&cache_dir, &asset_id, &filename);
-                        if temp.exists() {
-                            log::debug!(
-                                "Lightbox original cache hit for {} at {}",
-                                asset_id,
-                                temp.display(),
-                            );
-                        } else {
-                            let download_started = std::time::Instant::now();
+                        if !temp.exists() {
                             let download_result = {
                                 begin_download_session(&ui.ctx, format!("preview {asset_id}"));
                                 let progress = track_download_item(
@@ -919,14 +1044,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                                 }
                                 return;
                             }
-                            let downloaded_bytes =
-                                std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
-                            log::debug!(
-                                "Lightbox original downloaded for {} in {}ms ({} bytes)",
-                                asset_id,
-                                download_started.elapsed().as_millis(),
-                                downloaded_bytes,
-                            );
                         }
                         let decoded = load_texture_oriented(&temp).await;
                         if !is_current() {
@@ -967,33 +1084,35 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         }
     });
 
-    // -1 = back/prev (slide right), +1 = forward/next (slide left), 0 = no transition
+    // Full-resolution preference stored per-viewer; toggled via the ⋮ menu.
+    let full_res_pref = Rc::new(Cell::new(resolution_full));
+    // Current asset's remote id / favorite / description for the action wiring.
+    let cur_favorite = Rc::new(Cell::new(false));
+
+    // -1 = back/prev (slide right), +1 = forward/next (slide left), 0 = none.
     let nav_dir = Rc::new(Cell::new(0i8));
     let render = Rc::new({
         let ui = ui.clone();
-        let page = page.clone();
         let pos_cell = pos_cell.clone();
         let load_into_picture = load_into_picture.clone();
-        let resolution_toggle = resolution_toggle.clone();
-        let download = download.clone();
-        let zoom_group = zoom_group.clone();
-        let prev_btn = prev_btn.clone();
-        let next_btn = next_btn.clone();
-        let details_filename = details_filename.clone();
-        let details_summary = details_summary.clone();
-        let details_loading = details_loading.clone();
-        let details_exif = details_exif.clone();
+        let full_res_pref = full_res_pref.clone();
         let pic_stack = pic_stack.clone();
         let picture_a = picture_a.clone();
         let picture_b = picture_b.clone();
         let scrolled_picture = scrolled_picture.clone();
         let active_a = active_a.clone();
         let zoom_level = zoom_level.clone();
-        let zoom_reset_btn = zoom_reset_btn.clone();
         let nav_dir = nav_dir.clone();
+        let datetime_label = datetime_label.clone();
+        let favorite_btn = favorite_btn.clone();
+        let cur_favorite = cur_favorite.clone();
+        let details_timestamp = details_timestamp.clone();
+        let description_row = description_row.clone();
+        let details_map_box = details_map_box.clone();
+        let details_exif = details_exif.clone();
+        let details_loading = details_loading.clone();
         move || {
             let pos = pos_cell.get();
-            let n = ui.grid.model.n_items();
             let Some(item) = ui.grid.model.item(pos).and_downcast::<AssetObject>() else {
                 return;
             };
@@ -1002,41 +1121,28 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let local_path = item.property::<String>("local-path");
             let mime = item.property::<String>("mime-type");
             let created = item.property::<String>("created-at");
-            let sync_state = item.property::<u32>("sync-state");
 
-            let cap = if ui.split.is_collapsed() { 14 } else { 24 };
-            page.set_title(&truncate_filename(&filename, cap));
-            details_filename.set_label(&filename);
-            let sync_label = match sync_state {
-                2 => "On Immich and locally",
-                1 => "Local only",
-                _ => "On Immich only",
-            };
-            details_summary.set_label(&format!(
-                "{} · {}\nCreated: {}",
-                mime,
-                sync_label,
-                format_datetime_display(&created)
-            ));
+            datetime_label.set_label(&format_topbar_datetime(&created));
+            details_timestamp.set_label(&format_full_timestamp(&created));
 
+            // Reset per-asset details UI.
             while let Some(c) = details_exif.first_child() {
                 details_exif.remove(&c);
             }
             details_exif.set_visible(false);
-
-            prev_btn.set_sensitive(pos > 0);
-            next_btn.set_sensitive(pos + 1 < n);
+            while let Some(c) = details_map_box.first_child() {
+                details_map_box.remove(&c);
+            }
+            description_row.set_text("");
+            favorite_btn.set_active(false);
+            favorite_btn.set_icon_name("non-starred-symbolic");
+            cur_favorite.set(false);
 
             let is_local = !local_path.is_empty() && asset_id.starts_with(LOCAL_ID_PREFIX);
             let is_video =
                 crate::media_kinds::asset_kind(&mime) == crate::media_kinds::AssetKind::Video;
-            resolution_toggle.set_visible(!is_local && !is_video);
-            download.set_visible(!is_local && !is_video);
-            zoom_group.set_visible(!is_video);
 
-            // Load into the *inactive* picture; commit the slide transition
-            // after the texture is set so the user sees the current image
-            // (with loader spinner) until the new one is actually ready.
+            // Load into the inactive picture; commit the slide once ready.
             let target_is_a = !active_a.get();
             let target = if target_is_a {
                 picture_a.clone()
@@ -1045,12 +1151,14 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             };
             zoom_level.set(1.0);
             apply_lightbox_zoom(&target, &scrolled_picture, 1.0);
-            zoom_reset_btn.set_label("100%");
             pic_stack.set_transition_type(match nav_dir.get() {
                 1 => gtk::StackTransitionType::SlideLeft,
                 -1 => gtk::StackTransitionType::SlideRight,
                 _ => gtk::StackTransitionType::None,
             });
+            // Videos and local files always use their native source; the
+            // full-resolution preference only affects remote still images.
+            let want_full = full_res_pref.get() && !is_local && !is_video;
             (*load_into_picture)(
                 target,
                 target_is_a,
@@ -1058,19 +1166,17 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 filename.clone(),
                 mime.clone(),
                 local_path.clone(),
-                resolution_toggle.is_active(),
+                want_full,
             );
             nav_dir.set(0);
 
-            if is_local
-                && crate::media_kinds::asset_kind(&mime) != crate::media_kinds::AssetKind::Video
-            {
+            if is_local && !is_video {
                 // Local image: parse EXIF on a blocking worker.
-                // Hits the on-disk cache so repeat opens are cheap.
                 details_loading.set_visible(true);
                 let pos_cell_async = pos_cell.clone();
                 let details_loading = details_loading.clone();
                 let details_exif = details_exif.clone();
+                let details_map_box = details_map_box.clone();
                 let local_path_async = local_path.clone();
                 glib::MainContext::default().spawn_local(async move {
                     let cache_root = local_exif::cache_root();
@@ -1083,8 +1189,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                             .as_ref()
                             .and_then(|m| m.modified().ok())
                             .map(systemtime_to_rfc3339);
-                        // Pixbuf header-only read — covers JPEG, PNG, GIF,
-                        // TIFF, WebP and HEIF/AVIF (when loaders installed).
                         let dims = gtk::gdk_pixbuf::Pixbuf::file_info(path)
                             .map(|(_, w, h)| (w, h))
                             .and_then(|(w, h)| {
@@ -1106,10 +1210,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         return;
                     }
                     details_loading.set_visible(false);
-                    // Render whatever we have. Files without an EXIF block
-                    // (Unsplash, screenshots, edited copies) still get the
-                    // Image group populated from filesystem + Pixbuf, so the
-                    // user always sees *something* in the details pane.
                     let Some(probe) = probed else {
                         return;
                     };
@@ -1140,17 +1240,27 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         "Taken"
                     };
                     let projected = exif_from_local(&info, probe.file_size);
+                    if let (Some(lat), Some(lon)) = (projected.latitude, projected.longitude)
+                        && let Some(map) = build_minimap(lat, lon)
+                    {
+                        details_map_box.append(&map);
+                    }
                     fill_exif_box(&details_exif, &projected, taken_label);
                     details_exif.set_visible(true);
                 });
                 return;
             }
 
+            // Remote asset: fetch full details for EXIF, favorite, description.
             details_loading.set_visible(true);
             let pos_cell_async = pos_cell.clone();
             let ui_async = ui.clone();
             let details_loading = details_loading.clone();
             let details_exif = details_exif.clone();
+            let details_map_box = details_map_box.clone();
+            let description_row = description_row.clone();
+            let favorite_btn = favorite_btn.clone();
+            let cur_favorite = cur_favorite.clone();
             let asset_id_async = asset_id.clone();
             glib::MainContext::default().spawn_local(async move {
                 let result = ui_async
@@ -1163,7 +1273,26 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 }
                 details_loading.set_visible(false);
                 let Ok(details) = result else { return };
+                favorite_btn.set_active(details.is_favorite);
+                favorite_btn.set_icon_name(if details.is_favorite {
+                    "starred-symbolic"
+                } else {
+                    "non-starred-symbolic"
+                });
+                cur_favorite.set(details.is_favorite);
+                if let Some(desc) = &details.description {
+                    description_row.set_text(desc);
+                } else if let Some(exif) = &details.exif_info
+                    && let Some(desc) = &exif.description
+                {
+                    description_row.set_text(desc);
+                }
                 if let Some(exif) = details.exif_info {
+                    if let (Some(lat), Some(lon)) = (exif.latitude, exif.longitude)
+                        && let Some(map) = build_minimap(lat, lon)
+                    {
+                        details_map_box.append(&map);
+                    }
                     fill_exif_box(&details_exif, &exif, "Taken");
                     details_exif.set_visible(true);
                 }
@@ -1173,6 +1302,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
 
     (*render)();
 
+    // ── Navigation helpers ──────────────────────────────────────────────
     let goto_prev = Rc::new(clone!(
         #[strong]
         pos_cell,
@@ -1180,19 +1310,17 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         render,
         #[strong]
         nav_dir,
+        #[strong]
+        set_chrome,
         move || {
             let pos = pos_cell.get();
             if pos > 0 {
                 pos_cell.set(pos - 1);
                 nav_dir.set(-1);
+                (*set_chrome)(false);
                 (*render)();
             }
         }
-    ));
-    prev_btn.connect_clicked(clone!(
-        #[strong]
-        goto_prev,
-        move |_| (*goto_prev)()
     ));
     let goto_next = Rc::new(clone!(
         #[strong]
@@ -1202,14 +1330,15 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         render,
         #[strong]
-        next_btn,
-        #[strong]
         nav_dir,
+        #[strong]
+        set_chrome,
         move || {
             let pos = pos_cell.get();
             if pos + 1 < ui.grid.model.n_items() {
                 pos_cell.set(pos + 1);
                 nav_dir.set(1);
+                (*set_chrome)(false);
                 (*render)();
                 return;
             }
@@ -1217,11 +1346,9 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let Some(req) = next_request else {
                 return;
             };
-            next_btn.set_sensitive(false);
             let model = ui.grid.model.clone();
             let pos_cell_h = pos_cell.clone();
             let render_h = render.clone();
-            let next_btn_h = next_btn.clone();
             let nav_dir_h = nav_dir.clone();
             let prev_count = model.n_items();
             let handler_id = Rc::new(std::cell::RefCell::new(None::<glib::SignalHandlerId>));
@@ -1236,7 +1363,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     nav_dir_h.set(1);
                     (*render_h)();
                 }
-                next_btn_h.set_sensitive(true);
                 if let Some(hid) = handler_id_clone.borrow_mut().take() {
                     m.disconnect(hid);
                 }
@@ -1246,12 +1372,266 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         }
     ));
 
-    next_btn.connect_clicked(clone!(
+    // Exit the viewer (back button / swipe-down / Escape).
+    let exit_viewer = Rc::new(clone!(
         #[strong]
-        goto_next,
-        move |_| (*goto_next)()
+        ui,
+        move || {
+            ui.nav.pop();
+        }
     ));
 
+    back_btn.connect_clicked(clone!(
+        #[strong]
+        exit_viewer,
+        move |_| (*exit_viewer)()
+    ));
+
+    // Toggle chrome on single tap (no drag). GestureClick with n_press==1.
+    let tap = gtk::GestureClick::new();
+    tap.set_button(gtk::gdk::BUTTON_PRIMARY);
+    tap.connect_released(clone!(
+        #[strong]
+        set_chrome,
+        #[strong]
+        chrome_visible,
+        #[strong]
+        zoom_level,
+        move |gesture, n_press, _, _| {
+            // Ignore taps while zoomed in (those pan) and multi-press.
+            if n_press != 1 || (zoom_level.get() - 1.0).abs() > 0.01 {
+                return;
+            }
+            (*set_chrome)(!chrome_visible.get());
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        }
+    ));
+    pic_stack.add_controller(tap);
+
+    // Favorite toggle.
+    favorite_btn.connect_clicked(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        pos_cell,
+        #[strong]
+        cur_favorite,
+        move |btn| {
+            let Some(item) = ui.grid.model.item(pos_cell.get()).and_downcast::<AssetObject>()
+            else {
+                return;
+            };
+            let asset_id = item.property::<String>("id");
+            if asset_id.starts_with(LOCAL_ID_PREFIX) {
+                return;
+            }
+            let want = !cur_favorite.get();
+            cur_favorite.set(want);
+            btn.set_icon_name(if want {
+                "starred-symbolic"
+            } else {
+                "non-starred-symbolic"
+            });
+            let ui = ui.clone();
+            glib::MainContext::default().spawn_local(async move {
+                if let Err(err) = ui.ctx.api_client.set_asset_favorite(&asset_id, want).await {
+                    log::warn!("Set favorite failed: {}", err);
+                }
+            });
+        }
+    ));
+
+    // Description commit.
+    description_row.connect_apply(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        pos_cell,
+        move |row| {
+            let Some(item) = ui.grid.model.item(pos_cell.get()).and_downcast::<AssetObject>()
+            else {
+                return;
+            };
+            let asset_id = item.property::<String>("id");
+            if asset_id.starts_with(LOCAL_ID_PREFIX) {
+                return;
+            }
+            let text = row.text().to_string();
+            let ui = ui.clone();
+            glib::MainContext::default().spawn_local(async move {
+                if let Err(err) = ui.ctx.api_client.set_asset_description(&asset_id, &text).await
+                {
+                    log::warn!("Set description failed: {}", err);
+                }
+            });
+        }
+    ));
+
+    // Delete action (confirm → soft-delete → pop viewer + refresh).
+    delete_btn.connect_clicked(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        pos_cell,
+        #[strong]
+        exit_viewer,
+        move |_| {
+            let Some(item) = ui.grid.model.item(pos_cell.get()).and_downcast::<AssetObject>()
+            else {
+                return;
+            };
+            let asset_id = item.property::<String>("id");
+            if asset_id.starts_with(LOCAL_ID_PREFIX) {
+                show_lightbox_alert(&ui, "Cannot delete", "This is a local-only asset.");
+                return;
+            }
+            let dialog = libadwaita::AlertDialog::builder()
+                .heading("Move to trash?")
+                .body("The item can be restored from the Immich trash.")
+                .build();
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("delete", "Move to trash");
+            dialog.set_response_appearance("delete", libadwaita::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let ui2 = ui.clone();
+            let exit_viewer = exit_viewer.clone();
+            dialog.connect_response(None, move |dlg, response| {
+                dlg.close();
+                if response != "delete" {
+                    return;
+                }
+                let ui = ui2.clone();
+                let exit_viewer = exit_viewer.clone();
+                let ids = vec![asset_id.clone()];
+                glib::MainContext::default().spawn_local(async move {
+                    match ui.ctx.api_client.delete_assets(&ids).await {
+                        Ok(()) => {
+                            (*exit_viewer)();
+                            super::refresh_library_after_mutation(ui.clone(), true);
+                        }
+                        Err(err) => {
+                            log::error!("Delete failed: {}", err);
+                            show_lightbox_alert(&ui, "Delete failed", &err);
+                        }
+                    }
+                });
+            });
+            dialog.present(Some(&ui.window));
+        }
+    ));
+
+    // Add-to-album action.
+    addalbum_btn.connect_clicked(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        pos_cell,
+        move |_| {
+            let Some(item) = ui.grid.model.item(pos_cell.get()).and_downcast::<AssetObject>()
+            else {
+                return;
+            };
+            let asset_id = item.property::<String>("id");
+            if asset_id.starts_with(LOCAL_ID_PREFIX) {
+                show_lightbox_alert(&ui, "Cannot add", "This is a local-only asset.");
+                return;
+            }
+            show_add_to_album_dialog(ui.clone(), asset_id);
+        }
+    ));
+
+    // Share action: export the original then hand off to the portal / default.
+    share_btn.connect_clicked(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        pos_cell,
+        move |_| {
+            let Some(item) = ui.grid.model.item(pos_cell.get()).and_downcast::<AssetObject>()
+            else {
+                return;
+            };
+            let asset_id = item.property::<String>("id");
+            let remote_id = item.property::<String>("remote-id");
+            let local_path = item.property::<String>("local-path");
+            let filename = item.property::<String>("filename");
+            let ui = ui.clone();
+            glib::MainContext::default().spawn_local(async move {
+                match super::context_menu::ensure_original_asset_path(
+                    &ui, &asset_id, &remote_id, &local_path, &filename,
+                )
+                .await
+                {
+                    Ok(path) => open_local_with_default_app(&path.display().to_string()),
+                    Err(err) => show_lightbox_alert(&ui, "Share failed", &err),
+                }
+            });
+        }
+    ));
+
+    // ── Menu actions (download / copy / open-with / full-res) ───────────
+    let action_group = gtk::gio::SimpleActionGroup::new();
+    let download_action = gtk::gio::SimpleAction::new("download", None);
+    download_action.connect_activate(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        pos_cell,
+        move |_, _| {
+            if let Some(item) = ui.grid.model.item(pos_cell.get()).and_downcast::<AssetObject>() {
+                let asset_id = item.property::<String>("id");
+                let filename = item.property::<String>("filename");
+                if !asset_id.starts_with(LOCAL_ID_PREFIX) {
+                    start_download(ui.clone(), asset_id, filename);
+                }
+            }
+        }
+    ));
+    action_group.add_action(&download_action);
+    let copy_action = gtk::gio::SimpleAction::new("copy", None);
+    copy_action.connect_activate(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        pos_cell,
+        move |_, _| {
+            super::context_menu::copy_current_asset(ui.clone(), pos_cell.get());
+        }
+    ));
+    action_group.add_action(&copy_action);
+    let openwith_action = gtk::gio::SimpleAction::new("openwith", None);
+    openwith_action.connect_activate(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        pos_cell,
+        move |_, _| {
+            super::context_menu::open_current_asset_in_default_app(ui.clone(), pos_cell.get());
+        }
+    ));
+    action_group.add_action(&openwith_action);
+    let fullres_action = gtk::gio::SimpleAction::new_stateful(
+        "fullres",
+        None,
+        &full_res_pref.get().to_variant(),
+    );
+    fullres_action.connect_activate(clone!(
+        #[strong]
+        full_res_pref,
+        #[strong]
+        render,
+        move |act, _| {
+            let new = !full_res_pref.get();
+            full_res_pref.set(new);
+            act.set_state(&new.to_variant());
+            (*render)();
+        }
+    ));
+    action_group.add_action(&fullres_action);
+    page.insert_action_group("lightbox", Some(&action_group));
+
+    // ── Zoom / pan machinery ────────────────────────────────────────────
     let active_picture = clone!(
         #[strong]
         active_a,
@@ -1267,9 +1647,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             }
         }
     );
-
-    // Track cursor position over the picture area so zoom can be focal-point
-    // aware. None when the cursor is outside the viewer; falls back to centre.
     let cursor_pos: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
     let motion = gtk::EventControllerMotion::new();
     motion.connect_motion(clone!(
@@ -1296,25 +1673,19 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         scrolled_picture,
         #[strong]
-        zoom_reset_btn,
-        #[strong]
         cursor_pos,
         move |z: f64| {
             let z_new = z.clamp(1.0, 10.0);
             let z_old = zoom_level.get();
             if (z_new - z_old).abs() < 0.0001 {
-                zoom_reset_btn.set_label(&format!("{}%", (z_new * 100.0).round() as i32));
                 return;
             }
-
-            // Pick the focal point: cursor if inside the viewer, else centre.
             let viewer_w = scrolled_picture.width().max(1) as f64;
             let viewer_h = scrolled_picture.height().max(1) as f64;
             let (fx, fy) = cursor_pos
                 .get()
                 .filter(|&(x, y)| x >= 0.0 && y >= 0.0 && x <= viewer_w && y <= viewer_h)
                 .unwrap_or((viewer_w / 2.0, viewer_h / 2.0));
-
             let hadj = scrolled_picture.hadjustment();
             let vadj = scrolled_picture.vadjustment();
             let scroll_x = hadj.value();
@@ -1322,15 +1693,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let ratio = z_new / z_old.max(0.0001);
             let target_scroll_x = (scroll_x + fx) * ratio - fx;
             let target_scroll_y = (scroll_y + fy) * ratio - fy;
-
             zoom_level.set(z_new);
             let content = apply_lightbox_zoom(&active_picture(), &scrolled_picture, z_new);
-            zoom_reset_btn.set_label(&format!("{}%", (z_new * 100.0).round() as i32));
-
-            // Pre-set adjustment ranges to match the new content size so the
-            // scroll position can be applied in the same frame. Without this
-            // the value would be clamped to the stale (old-zoom) range and
-            // corrected only after layout, causing a one-frame flicker.
             if let Some((cw, ch)) = content {
                 hadj.set_upper(cw.max(viewer_w));
                 hadj.set_page_size(viewer_w);
@@ -1346,7 +1710,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             vadj.set_value(target_scroll_y);
         }
     ));
-
     let zoom_by = Rc::new(clone!(
         #[strong]
         zoom_level,
@@ -1356,7 +1719,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             (*set_zoom)(zoom_level.get() * factor);
         }
     ));
-
     let zoom_reset = Rc::new(clone!(
         #[strong]
         set_zoom,
@@ -1365,24 +1727,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         }
     ));
 
-    zoom_in_btn.connect_clicked(clone!(
-        #[strong]
-        zoom_by,
-        move |_| (*zoom_by)(1.2)
-    ));
-    zoom_out_btn.connect_clicked(clone!(
-        #[strong]
-        zoom_by,
-        move |_| (*zoom_by)(1.0 / 1.2)
-    ));
-    zoom_reset_btn.connect_clicked(clone!(
-        #[strong]
-        zoom_reset,
-        move |_| (*zoom_reset)()
-    ));
-
-    // Trackpad pinch-to-zoom. On scrolled_picture so it shares a stable
-    // coordinate frame with drag (see drag comment below).
+    // Trackpad pinch-to-zoom.
     let pinch = gtk::GestureZoom::new();
     let pinch_start = Rc::new(Cell::new(1.0_f64));
     pinch.connect_begin(clone!(
@@ -1405,14 +1750,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
     scrolled_picture.add_controller(pinch.clone());
 
-    // Click-and-drag panning when zoomed in. Attached to scrolled_picture,
-    // not pic_stack: pic_stack moves under the cursor when we update the
-    // scroll adjustments, which makes the gesture's pic_stack-local offset
-    // oscillate frame-to-frame and jitter the image.
+    // Click-and-drag panning when zoomed in.
     let drag_start = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
-    let drag = gtk::GestureDrag::new();
-    drag.set_button(gtk::gdk::BUTTON_PRIMARY);
-    drag.connect_drag_begin(clone!(
+    let pan_drag = gtk::GestureDrag::new();
+    pan_drag.set_button(gtk::gdk::BUTTON_PRIMARY);
+    pan_drag.connect_drag_begin(clone!(
         #[strong]
         scrolled_picture,
         #[strong]
@@ -1423,21 +1765,28 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             drag_start.set((hadj.value(), vadj.value()));
         }
     ));
-    drag.connect_drag_update(clone!(
+    pan_drag.connect_drag_update(clone!(
         #[strong]
         scrolled_picture,
         #[strong]
         drag_start,
+        #[strong]
+        zoom_level,
         move |_, off_x, off_y| {
+            // Only pan when zoomed in; otherwise leave scroll alone so the
+            // swipe navigation gesture can interpret the motion.
+            if (zoom_level.get() - 1.0).abs() < 0.01 {
+                return;
+            }
             let (sx0, sy0) = drag_start.get();
             scrolled_picture.hadjustment().set_value(sx0 - off_x);
             scrolled_picture.vadjustment().set_value(sy0 - off_y);
         }
     ));
-    scrolled_picture.add_controller(drag.clone());
-    drag.group_with(&pinch);
+    scrolled_picture.add_controller(pan_drag.clone());
+    pan_drag.group_with(&pinch);
 
-    // Double-click on the picture: zoom in 2x toward the click position.
+    // Double-click: zoom in 2x toward the click position.
     let double_click = gtk::GestureClick::new();
     double_click.set_button(gtk::gdk::BUTTON_PRIMARY);
     double_click.connect_pressed(clone!(
@@ -1450,23 +1799,16 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         move |_, n_press, x, y| {
             if n_press == 2 {
                 cursor_pos.set(Some((x, y)));
-                (*set_zoom)(zoom_level.get() * 2.0);
+                let z = zoom_level.get();
+                if (z - 1.0).abs() < 0.01 {
+                    (*set_zoom)(2.0);
+                } else {
+                    (*set_zoom)(1.0);
+                }
             }
         }
     ));
     scrolled_picture.add_controller(double_click);
-
-    // Middle-click: reset zoom to 100%.
-    let middle_click = gtk::GestureClick::new();
-    middle_click.set_button(gtk::gdk::BUTTON_MIDDLE);
-    middle_click.connect_pressed(clone!(
-        #[strong]
-        zoom_reset,
-        move |_, _, _, _| {
-            (*zoom_reset)();
-        }
-    ));
-    scrolled_picture.add_controller(middle_click);
 
     // Right-click: open the standard asset context menu.
     let right_click = gtk::GestureClick::new();
@@ -1484,39 +1826,84 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
     scrolled_picture.add_controller(right_click);
 
-    // Horizontal swipe for prev/next navigation; ignored when zoomed in.
-    let swipe = gtk::GestureSwipe::new();
-    swipe.set_touch_only(false);
-    swipe.connect_swipe(clone!(
+    // ── Directional swipe/drag gesture ──────────────────────────────────
+    // A CAPTURE-phase drag on the picture stack that interprets the release
+    // direction: horizontal = prev/next, down = dismiss, up = details sheet.
+    // Attaching at capture and claiming the sequence stops the enclosing
+    // AdwNavigationView from treating a horizontal drag as an edge-swipe pop.
+    let nav_drag = gtk::GestureDrag::new();
+    nav_drag.set_touch_only(false);
+    nav_drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let drag_claimed = Rc::new(Cell::new(false));
+    nav_drag.connect_drag_update(clone!(
+        #[strong]
+        zoom_level,
+        #[strong]
+        drag_claimed,
+        move |gesture, off_x, off_y| {
+            // When zoomed in the pan gesture owns the motion.
+            if (zoom_level.get() - 1.0).abs() > 0.01 {
+                return;
+            }
+            if drag_claimed.get() {
+                return;
+            }
+            // Claim once the motion is clearly a directional swipe so we
+            // pre-empt the NavigationView edge-swipe on horizontal drags.
+            if off_x.abs() > 24.0 || off_y.abs() > 24.0 {
+                drag_claimed.set(true);
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+            }
+        }
+    ));
+    nav_drag.connect_drag_end(clone!(
         #[strong]
         goto_prev,
         #[strong]
         goto_next,
         #[strong]
+        exit_viewer,
+        #[strong]
+        sheet,
+        #[strong]
         zoom_level,
-        move |_, vx, _vy| {
-            // Ignore swipes when zoomed in — those should pan instead.
+        #[strong]
+        drag_claimed,
+        move |_, off_x, off_y| {
+            let claimed = drag_claimed.replace(false);
             if (zoom_level.get() - 1.0).abs() > 0.01 {
                 return;
             }
-            // vx < 0 means finger moved left → go to next asset.
-            // vx > 0 means finger moved right → go to previous asset.
-            const MIN_VELOCITY: f64 = 50.0;
-            if vx < -MIN_VELOCITY {
-                (*goto_next)();
-            } else if vx > MIN_VELOCITY {
-                (*goto_prev)();
+            const THRESH: f64 = 60.0;
+            let ax = off_x.abs();
+            let ay = off_y.abs();
+            if ax < THRESH && ay < THRESH {
+                return;
+            }
+            let _ = claimed;
+            if ax > ay {
+                // Horizontal: right drag → prev, left drag → next.
+                if off_x > 0.0 {
+                    (*goto_prev)();
+                } else {
+                    (*goto_next)();
+                }
+            } else if off_y > 0.0 {
+                // Downward drag → dismiss.
+                (*exit_viewer)();
+            } else {
+                // Upward drag → open details sheet.
+                sheet.set_open(true);
             }
         }
     ));
-    pic_stack.add_controller(swipe);
+    pic_stack.add_controller(nav_drag);
 
+    // ── Keyboard shortcuts ──────────────────────────────────────────────
     let key_controller = gtk::EventControllerKey::new();
     key_controller.connect_key_pressed(clone!(
         #[strong]
-        ui,
-        #[strong]
-        details_btn,
+        exit_viewer,
         #[strong]
         goto_prev,
         #[strong]
@@ -1525,6 +1912,12 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         zoom_by,
         #[strong]
         zoom_reset,
+        #[strong]
+        set_chrome,
+        #[strong]
+        chrome_visible,
+        #[strong]
+        sheet,
         move |_, key, _, mods| {
             let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             match (ctrl, key) {
@@ -1550,12 +1943,16 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     (*goto_next)();
                     glib::Propagation::Stop
                 }
-                (false, gtk::gdk::Key::i) | (false, gtk::gdk::Key::I) => {
-                    details_btn.set_active(!details_btn.is_active());
+                (false, gtk::gdk::Key::Up) | (false, gtk::gdk::Key::i) | (false, gtk::gdk::Key::I) => {
+                    sheet.set_open(true);
+                    glib::Propagation::Stop
+                }
+                (false, gtk::gdk::Key::space) => {
+                    (*set_chrome)(!chrome_visible.get());
                     glib::Propagation::Stop
                 }
                 (false, gtk::gdk::Key::Escape) => {
-                    ui.nav.pop();
+                    (*exit_viewer)();
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
@@ -1564,9 +1961,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     ));
     page.add_controller(key_controller);
 
-    // Ctrl+wheel zoom on the picture area, captured before the scrolled window
-    // can use it for panning. Listening on both axes so trackpad two-finger
-    // scrolls (which sometimes emit horizontal deltas) still trigger zoom.
+    // Ctrl+wheel zoom on the picture area.
     let zoom_scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
     zoom_scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
     zoom_scroll.connect_scroll(clone!(
@@ -1587,32 +1982,6 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         }
     ));
     scrolled_picture.add_controller(zoom_scroll);
-
-    download.connect_clicked(clone!(
-        #[strong]
-        ui,
-        #[strong]
-        pos_cell,
-        move |_| {
-            let pos = pos_cell.get();
-            if let Some(item) = ui.grid.model.item(pos).and_downcast::<AssetObject>() {
-                let asset_id = item.property::<String>("id");
-                let filename = item.property::<String>("filename");
-                if !asset_id.starts_with(LOCAL_ID_PREFIX) {
-                    start_download(ui.clone(), asset_id, filename);
-                }
-            }
-        }
-    ));
-
-    resolution_toggle.connect_toggled(clone!(
-        #[strong]
-        render,
-        move |btn| {
-            btn.set_label(if btn.is_active() { "Raw" } else { "Prev" });
-            (*render)();
-        }
-    ));
 
     ui.nav.push(&page);
 }

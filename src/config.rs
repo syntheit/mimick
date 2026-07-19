@@ -263,6 +263,12 @@ pub struct ConfigData {
     /// Grid thumbnail quality: "auto", "thumbnail", "preview". Defaults to auto.
     #[serde(default = "default_grid_quality")]
     pub library_grid_quality: String,
+    /// Grid layout mode: "square" (default) or "masonry".
+    #[serde(default = "default_grid_layout")]
+    pub library_grid_layout: String,
+    /// Number of columns in square grid mode (2–8). Defaults to 3.
+    #[serde(default = "default_grid_columns")]
+    pub library_grid_columns: u32,
     /// Total on-disk cache cap in megabytes across all subcaches
     /// (thumbnails, raw_decode, exif, video, preview, open-in).
     /// Pruning runs once at startup. Defaults to 2000 MB.
@@ -310,6 +316,8 @@ impl Default for ConfigData {
             download_target_path: None,
             library_preview_full_resolution: false,
             library_grid_quality: default_grid_quality(),
+            library_grid_layout: default_grid_layout(),
+            library_grid_columns: default_grid_columns(),
             cache_disk_cap_mb: default_cache_disk_cap_mb(),
             raw_decode_cache_enabled: false,
             raw_full_decode: false,
@@ -325,8 +333,20 @@ fn default_true() -> bool {
     true
 }
 
+fn default_grid_layout() -> String {
+    "square".to_string()
+}
+
+fn default_grid_columns() -> u32 {
+    3
+}
+
 fn default_grid_quality() -> String {
-    "thumbnail".to_string()
+    // "thumbnail" fetches Immich's ~256px thumbnail, which looks blurry on a
+    // HiDPI phone (tiles render at ~450 physical px). "preview" fetches the
+    // larger source; the grid decodes it to a tile-appropriate size (see
+    // target_dim_for_bucket).
+    "preview".to_string()
 }
 
 /// Helper to default parallel upload worker threads to 3.

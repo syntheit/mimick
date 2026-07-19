@@ -22,10 +22,33 @@ pub struct LaidItem {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum RowKind {
+    Tiles,
+    DateHeader { label: String },
+}
+
+impl Default for RowKind {
+    fn default() -> Self {
+        Self::Tiles
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct LaidRow {
     pub y: f32,
     pub h: f32,
     pub items: Vec<LaidItem>,
+    pub kind: RowKind,
+}
+
+impl LaidRow {
+    pub fn tiles(y: f32, h: f32, items: Vec<LaidItem>) -> Self {
+        Self { y, h, items, kind: RowKind::Tiles }
+    }
+
+    pub fn header(y: f32, h: f32, label: String) -> Self {
+        Self { y, h, items: vec![], kind: RowKind::DateHeader { label } }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -146,11 +169,7 @@ fn build_row(
         x_cursor += w + cfg.gap;
     }
 
-    LaidRow {
-        y,
-        h: row_h,
-        items: placed,
-    }
+    LaidRow::tiles(y, row_h, placed)
 }
 
 fn scale_to_fit(indices: &[usize], dims: &[(u32, u32)], canvas_w: f32, cfg: LayoutConfig) -> f32 {
@@ -168,6 +187,111 @@ fn scale_to_fit(indices: &[usize], dims: &[(u32, u32)], canvas_w: f32, cfg: Layo
     }
     let scale = ((canvas_w - total_gap) / sum).max(0.0);
     cfg.max_row_height * scale
+}
+
+const HEADER_H: f32 = 40.0;
+pub(crate) const SQUARE_GAP: f32 = 4.0;
+
+/// English ordinal suffix for a day-of-month (1 → "st", 2 → "nd", …, 11 → "th").
+fn ordinal_suffix(day: u32) -> &'static str {
+    match (day % 10, day % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    }
+}
+
+/// Format an ISO8601 `created_at` timestamp into an Immich-style day header,
+/// e.g. "Monday, July 19th 2026". Falls back to the raw string (or "Unknown"
+/// when empty) if the value can't be parsed as a date.
+///
+/// Only the calendar date is used — no timezone conversion — because grouping
+/// is keyed on the stored `YYYY-MM-DD` prefix and the header must match the
+/// group boundary exactly.
+fn format_day_header(created_at: &str) -> String {
+    use chrono::{Datelike, NaiveDate};
+    // The date portion is the first 10 chars (YYYY-MM-DD) of the ISO string.
+    let date_part = created_at.get(..10).unwrap_or(created_at);
+    if let Ok(date) = NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
+        let weekday = date.format("%A"); // e.g. "Monday"
+        let month = date.format("%B"); // e.g. "July"
+        let day = date.day();
+        return format!(
+            "{}, {} {}{} {}",
+            weekday,
+            month,
+            day,
+            ordinal_suffix(day),
+            date.year()
+        );
+    }
+    if created_at.trim().is_empty() {
+        "Unknown".to_string()
+    } else {
+        created_at.to_string()
+    }
+}
+
+/// Square-grid layout grouped by day.
+///
+/// `asset_dates` is a slice of `(model_index, created_at_iso8601)` pairs.
+/// Groups consecutive runs of the same day (YYYY-MM-DD prefix), inserts a
+/// date-header row before each group, then places tiles in a fixed-column grid.
+pub(crate) fn pack_grid_squares_grouped(
+    asset_dates: &[(u32, String)],
+    total_width: f32,
+    columns: usize,
+    gap: f32,
+) -> (Vec<LaidRow>, f32) {
+    if asset_dates.is_empty() || total_width <= 0.0 || columns == 0 {
+        return (vec![], 0.0);
+    }
+    let cols = columns as f32;
+    let tile = ((total_width - gap * (cols - 1.0)) / cols).max(1.0);
+
+    // Group consecutive entries by their date prefix (first 10 chars =
+    // YYYY-MM-DD). The group key stays the raw day for exact boundary
+    // matching; `label` is the pretty header ("Monday, July 19th 2026").
+    let mut groups: Vec<(String, String, Vec<u32>)> = Vec::new();
+    for (idx, created_at) in asset_dates {
+        let day = created_at.get(..10).unwrap_or("").to_string();
+        if groups.last().map(|(d, _, _)| d != &day).unwrap_or(true) {
+            let label = format_day_header(created_at);
+            groups.push((day, label, vec![]));
+        }
+        groups.last_mut().unwrap().2.push(*idx);
+    }
+
+    let mut rows = Vec::new();
+    let mut y = 0.0_f32;
+
+    for (_day, label, indices) in groups {
+        rows.push(LaidRow::header(y, HEADER_H, label));
+        y += HEADER_H + gap;
+
+        let n = indices.len() as u32;
+        let n_rows = n.div_ceil(columns as u32);
+        for r in 0..n_rows {
+            let start = (r * columns as u32) as usize;
+            let end = ((start as u32 + columns as u32).min(n)) as usize;
+            let items = indices[start..end]
+                .iter()
+                .enumerate()
+                .map(|(c, &ai)| LaidItem {
+                    asset_index: ai,
+                    x: c as f32 * (tile + gap),
+                    w: tile,
+                })
+                .collect();
+            rows.push(LaidRow::tiles(y, tile, items));
+            y += tile + gap;
+        }
+        y += gap;
+    }
+
+    (rows, y)
 }
 
 pub(crate) fn first_row_at_or_after(rows: &[LaidRow], y: f32) -> usize {
@@ -271,21 +395,9 @@ mod tests {
     #[test]
     fn binary_search_finds_correct_row() {
         let rows = vec![
-            LaidRow {
-                y: 0.0,
-                h: 100.0,
-                items: vec![],
-            },
-            LaidRow {
-                y: 100.0,
-                h: 150.0,
-                items: vec![],
-            },
-            LaidRow {
-                y: 250.0,
-                h: 80.0,
-                items: vec![],
-            },
+            LaidRow::tiles(0.0, 100.0, vec![]),
+            LaidRow::tiles(100.0, 150.0, vec![]),
+            LaidRow::tiles(250.0, 80.0, vec![]),
         ];
         assert_eq!(row_at_y(&rows, 0.0), Some(0));
         assert_eq!(row_at_y(&rows, 100.0), Some(1));
@@ -295,27 +407,11 @@ mod tests {
 
     #[test]
     fn item_hit_test_within_row() {
-        let row = LaidRow {
-            y: 0.0,
-            h: 100.0,
-            items: vec![
-                LaidItem {
-                    asset_index: 5,
-                    x: 0.0,
-                    w: 50.0,
-                },
-                LaidItem {
-                    asset_index: 6,
-                    x: 50.0,
-                    w: 80.0,
-                },
-                LaidItem {
-                    asset_index: 7,
-                    x: 130.0,
-                    w: 40.0,
-                },
-            ],
-        };
+        let row = LaidRow::tiles(0.0, 100.0, vec![
+            LaidItem { asset_index: 5, x: 0.0, w: 50.0 },
+            LaidItem { asset_index: 6, x: 50.0, w: 80.0 },
+            LaidItem { asset_index: 7, x: 130.0, w: 40.0 },
+        ]);
         assert_eq!(item_at_x(&row, 0.0).map(|i| i.asset_index), Some(5));
         assert_eq!(item_at_x(&row, 50.0).map(|i| i.asset_index), Some(6));
         assert_eq!(item_at_x(&row, 130.0).map(|i| i.asset_index), Some(7));
@@ -331,23 +427,30 @@ mod tests {
     }
 
     #[test]
+    fn day_header_formats_immich_style() {
+        assert_eq!(
+            format_day_header("2026-07-19T15:42:00.000Z"),
+            "Sunday, July 19th 2026"
+        );
+        assert_eq!(format_day_header("2026-07-01"), "Wednesday, July 1st 2026");
+        assert_eq!(format_day_header("2026-07-02"), "Thursday, July 2nd 2026");
+        assert_eq!(format_day_header("2026-07-03"), "Friday, July 3rd 2026");
+        assert_eq!(format_day_header("2026-07-11"), "Saturday, July 11th 2026");
+        assert_eq!(format_day_header("2026-07-21"), "Tuesday, July 21st 2026");
+    }
+
+    #[test]
+    fn day_header_falls_back_on_unparseable() {
+        assert_eq!(format_day_header("not-a-date"), "not-a-date");
+        assert_eq!(format_day_header(""), "Unknown");
+    }
+
+    #[test]
     fn first_row_skip_lands_on_intersecting_row() {
         let rows = vec![
-            LaidRow {
-                y: 0.0,
-                h: 100.0,
-                items: vec![],
-            },
-            LaidRow {
-                y: 100.0,
-                h: 100.0,
-                items: vec![],
-            },
-            LaidRow {
-                y: 200.0,
-                h: 100.0,
-                items: vec![],
-            },
+            LaidRow::tiles(0.0, 100.0, vec![]),
+            LaidRow::tiles(100.0, 100.0, vec![]),
+            LaidRow::tiles(200.0, 100.0, vec![]),
         ];
         assert_eq!(first_row_at_or_after(&rows, -50.0), 0);
         assert_eq!(first_row_at_or_after(&rows, 0.0), 0);

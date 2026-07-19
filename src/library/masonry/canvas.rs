@@ -27,9 +27,10 @@ const VIEWPORTS_BEHIND: f32 = 2.0;
 const VIEWPORTS_AHEAD: f32 = 4.0;
 
 use super::layout::{
-    LaidItem, LaidRow, LayoutConfig, first_row_at_or_after, item_at_x, pack_rows, row_at_y,
+    LaidItem, LaidRow, LayoutConfig, RowKind, SQUARE_GAP, first_row_at_or_after, item_at_x,
+    pack_grid_squares_grouped, pack_rows, row_at_y,
 };
-pub use super::quality::GridQuality;
+pub use super::quality::{GridLayout, GridQuality};
 use super::quality::{bucket_for_row_height, fallback_bucket};
 
 mod interaction;
@@ -82,6 +83,8 @@ mod imp {
         pub narrow: Cell<bool>,
         pub select_mode: Cell<bool>,
         pub quality: Cell<GridQuality>,
+        pub layout_mode: Cell<GridLayout>,
+        pub grid_columns: Cell<u32>,
         pub rows: RefCell<Vec<LaidRow>>,
         pub cached_width: Cell<f32>,
         pub layout_h: Cell<f32>,
@@ -103,6 +106,13 @@ mod imp {
         pub uncheck_icon: OnceCell<gdk4::Paintable>,
         /// True while a drag-out operation is in progress; suppresses click-to-activate.
         pub drag_active: Cell<bool>,
+        /// The drag-export controller, retained so it can be detached on mobile.
+        /// On a touchscreen a DragSource captures touch drags to start a DnD
+        /// export, which steals them from the ScrolledWindow and makes the grid
+        /// impossible to scroll by finger. Detached while narrow (see set_narrow).
+        pub drag_source: RefCell<Option<gtk::DragSource>>,
+        /// Whether `drag_source` is currently attached as a controller.
+        pub drag_source_active: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -117,6 +127,7 @@ mod imp {
             self.parent_constructed();
             self.obj().add_css_class("mimick-masonry-canvas");
             self.cached_width.set(-1.0);
+            self.grid_columns.set(3);
         }
     }
 
@@ -192,8 +203,17 @@ mod imp {
                 self.layout_h.set(0.0);
                 return 0.0;
             };
-            let dims = collect_dims(model);
-            let (rows, h) = pack_rows(&dims, width, self.cfg());
+            let (rows, h) = match self.layout_mode.get() {
+                GridLayout::SquareGrid => {
+                    let dates = collect_asset_dates(model);
+                    let cols = self.grid_columns.get().max(1) as usize;
+                    pack_grid_squares_grouped(&dates, width, cols, SQUARE_GAP)
+                }
+                GridLayout::Masonry => {
+                    let dims = collect_dims(model);
+                    pack_rows(&dims, width, self.cfg())
+                }
+            };
             *self.rows.borrow_mut() = rows;
             self.cached_width.set(width);
             self.layout_h.set(h);
@@ -264,6 +284,11 @@ mod imp {
             stats: &mut SnapshotStats,
             to_load: &mut Vec<LoadRequest>,
         ) {
+            if let RowKind::DateHeader { label } = &row.kind {
+                self.paint_date_header(snapshot, row.y, row.h, label);
+                return;
+            }
+
             let row_in_viewport = row.y + row.h > viewport.top && row.y < viewport.bottom;
             let bucket = bucket_for_row_height(row.h, self.quality.get());
 
@@ -271,6 +296,25 @@ mod imp {
                 stats.record(self.paint_item(snapshot, sctx, row, it, row_in_viewport));
                 self.queue_load_if_needed(sctx.model, it, row, viewport.center, bucket, to_load);
             }
+        }
+
+        fn paint_date_header(&self, snapshot: &gtk::Snapshot, y: f32, h: f32, label: &str) {
+            use gtk::pango;
+            let layout = pango::Layout::new(&self.obj().pango_context());
+            layout.set_text(label);
+            let mut font_desc = pango::FontDescription::new();
+            font_desc.set_weight(pango::Weight::Bold);
+            font_desc.set_size(11 * pango::SCALE);
+            layout.set_font_description(Some(&font_desc));
+            let color = if libadwaita::StyleManager::default().is_dark() {
+                gdk4::RGBA::new(0.8, 0.8, 0.8, 1.0)
+            } else {
+                gdk4::RGBA::new(0.2, 0.2, 0.2, 1.0)
+            };
+            snapshot.save();
+            snapshot.translate(&gtk::graphene::Point::new(12.0, y + (h - 14.0) * 0.5));
+            snapshot.append_layout(&layout, &color);
+            snapshot.restore();
         }
 
         fn paint_item(
@@ -305,7 +349,23 @@ mod imp {
             }
 
             let result = if let Some(tex) = cached.as_ref() {
-                snapshot.append_texture(tex, &rect);
+                if self.layout_mode.get() == GridLayout::SquareGrid {
+                    let tile = rect.width();
+                    let (tw, th) = (tex.width() as f32, tex.height() as f32);
+                    let scale = (tile / tw).max(tile / th);
+                    let (dw, dh) = (tw * scale, th * scale);
+                    let draw = gtk::graphene::Rect::new(
+                        rect.x() + (tile - dw) * 0.5,
+                        rect.y() + (tile - dh) * 0.5,
+                        dw,
+                        dh,
+                    );
+                    snapshot.push_clip(&rect);
+                    snapshot.append_texture(tex, &draw);
+                    snapshot.pop();
+                } else {
+                    snapshot.append_texture(tex, &rect);
+                }
                 PaintResult::Hit
             } else {
                 snapshot.append_color(&sctx.placeholder, &rect);
@@ -594,7 +654,7 @@ mod imp {
     }
 }
 
-use super::load::{collect_dims, load_with_fallback, propagate_dimensions};
+use super::load::{collect_asset_dates, collect_dims, load_with_fallback, propagate_dimensions};
 
 glib::wrapper! {
     pub struct MasonryCanvas(ObjectSubclass<imp::MasonryCanvas>)

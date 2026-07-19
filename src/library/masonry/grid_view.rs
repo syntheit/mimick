@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use gtk::prelude::*;
 
-use super::canvas::{GridQuality, MasonryCanvas};
+use super::canvas::{GridLayout, GridQuality, MasonryCanvas};
 use crate::app_context::AppContext;
 use crate::library::asset_model::LibraryAssetModel;
 
@@ -38,8 +38,13 @@ pub fn build_grid_view(
     canvas.set_narrow(narrow.get());
     canvas.set_select_mode(select_toggle.is_active());
     canvas.set_context_menu_handler(context_menu_handler.clone());
-    let initial_quality = GridQuality::parse(&ctx.config.read().data.library_grid_quality);
-    canvas.set_quality(initial_quality);
+    {
+        let cfg = ctx.config.read();
+        let initial_quality = GridQuality::parse(&cfg.data.library_grid_quality);
+        canvas.set_quality(initial_quality);
+        canvas.set_layout_mode(GridLayout::parse(&cfg.data.library_grid_layout));
+        canvas.set_grid_columns(cfg.data.library_grid_columns.max(1));
+    }
     canvas.install_drag_source(ctx.clone());
 
     {
@@ -61,6 +66,8 @@ pub fn build_grid_view(
     let scrolled = gtk::ScrolledWindow::builder()
         .child(&canvas)
         .hscrollbar_policy(gtk::PolicyType::Never)
+        // Explicit: kinetic (touch/flick) scrolling for the phone.
+        .kinetic_scrolling(true)
         .vexpand(true)
         .hexpand(true)
         .build();

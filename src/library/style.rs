@@ -340,6 +340,60 @@ row.mimick-album-drop-hover {
     transition: background 150ms ease-in-out, transform 150ms ease-in-out;
     transform: scale(1.03);
 }
+
+/* ── Immich-style mobile lightbox ──────────────────────────────────
+   Black canvas, no chrome by default; tap reveals the top/bottom
+   translucent bars. */
+
+.mimick-viewer-black,
+.mimick-viewer-black picture {
+    background-color: black;
+}
+
+box.mimick-lightbox-topbar {
+    padding: 6px 8px;
+    background: linear-gradient(to bottom, alpha(black, 0.60), alpha(black, 0.0));
+    color: white;
+}
+
+box.mimick-lightbox-bottombar {
+    padding: 8px 12px;
+    background: linear-gradient(to top, alpha(black, 0.60), alpha(black, 0.0));
+    color: white;
+}
+
+.mimick-lightbox-topbar button,
+.mimick-lightbox-bottombar button {
+    color: white;
+    background: transparent;
+    box-shadow: none;
+    border: none;
+}
+
+.mimick-lightbox-topbar button:hover,
+.mimick-lightbox-bottombar button:hover {
+    background: alpha(white, 0.16);
+}
+
+label.mimick-lightbox-datetime {
+    color: white;
+    font-weight: 600;
+}
+
+box.mimick-lightbox-bottombar label {
+    color: white;
+    font-size: 0.82em;
+}
+
+.mimick-lightbox-fav-active {
+    color: #ff5a7a;
+}
+
+box.mimick-sheet-grabber {
+    background: alpha(@window_fg_color, 0.30);
+    border-radius: 999px;
+    margin-bottom: 6px;
+}
 "#;
 
 static REGISTERED: OnceLock<()> = OnceLock::new();

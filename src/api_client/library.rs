@@ -240,6 +240,16 @@ impl ImmichApiClient {
         }
     }
 
+    /// Streaming URI for the transcoded video (query-param auth so gtk::MediaFile can play it).
+    pub async fn video_playback_uri(&self, asset_id: &str) -> Option<String> {
+        let base_url = self.get_active_url().await?;
+        let settings = self.settings_snapshot();
+        Some(format!(
+            "{}/api/assets/{}/video/playback?apiKey={}",
+            base_url, asset_id, settings.api_key
+        ))
+    }
+
     /// Fetch unique user ID of the logged-in API user.
     pub async fn fetch_current_user_id(&self) -> Result<String, String> {
         let base_url = self
@@ -267,6 +277,62 @@ impl ImmichApiClient {
             Ok(resp) => Err(format!("HTTP {}", resp.status())),
             Err(err) => Err(err.to_string()),
         }
+    }
+
+    /// Update a mutable field on a single asset via `PUT /api/assets/{id}`.
+    ///
+    /// `patch` is the JSON body; Immich accepts partial updates (e.g.
+    /// `{"description": "..."}` or `{"isFavorite": true}`). Shared by the
+    /// description and favorite helpers below.
+    async fn update_asset(
+        &self,
+        asset_id: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/assets/{}", base_url, asset_id);
+        match self
+            .client
+            .put(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(15))
+            .body(patch.to_string())
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                self.clear_issue().await;
+                Ok(())
+            }
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    /// Update an asset's description text.
+    pub async fn set_asset_description(
+        &self,
+        asset_id: &str,
+        description: &str,
+    ) -> Result<(), String> {
+        self.update_asset(asset_id, serde_json::json!({ "description": description }))
+            .await
+    }
+
+    /// Set or clear an asset's favorite flag.
+    pub async fn set_asset_favorite(
+        &self,
+        asset_id: &str,
+        is_favorite: bool,
+    ) -> Result<(), String> {
+        self.update_asset(asset_id, serde_json::json!({ "isFavorite": is_favorite }))
+            .await
     }
 
     /// Soft-delete specified assets from the Immich server.

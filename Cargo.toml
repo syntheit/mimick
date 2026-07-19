@@ -13,6 +13,7 @@ glib = "0.22.7"
 gtk = { version = "0.11.2", package = "gtk4", features = ["v4_22"] }
 ksni = "0.3.4"
 libadwaita = { version = "0.9.1", features = ["v1_6"] }
+libshumate = { version = "0.8.1", features = ["v1_6"] }
 log = "0.4.29"
 lru = "0.18.0"
 parking_lot = "0.12.5"

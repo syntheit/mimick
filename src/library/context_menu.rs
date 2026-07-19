@@ -146,6 +146,36 @@ pub(super) fn show_asset_context_menu(
     popover.popup();
 }
 
+/// Copy the asset at `position` to the clipboard. Convenience wrapper used by
+/// the lightbox ⋮ menu; resolves the AssetObject then delegates.
+pub(super) fn copy_current_asset(ui: Rc<LibraryWindowUi>, position: u32) {
+    let Some(item) = ui.grid.model.item(position).and_downcast::<AssetObject>() else {
+        return;
+    };
+    copy_asset_to_clipboard(
+        ui.clone(),
+        item.property::<String>("id"),
+        item.property::<String>("remote-id"),
+        item.property::<String>("local-path"),
+        item.property::<String>("filename"),
+    );
+}
+
+/// Open the asset at `position` in the system default app. Wrapper for the
+/// lightbox ⋮ menu.
+pub(super) fn open_current_asset_in_default_app(ui: Rc<LibraryWindowUi>, position: u32) {
+    let Some(item) = ui.grid.model.item(position).and_downcast::<AssetObject>() else {
+        return;
+    };
+    open_asset_in_default_app(
+        ui.clone(),
+        item.property::<String>("id"),
+        item.property::<String>("remote-id"),
+        item.property::<String>("local-path"),
+        item.property::<String>("filename"),
+    );
+}
+
 fn copy_asset_to_clipboard(
     ui: Rc<LibraryWindowUi>,
     asset_id: String,
