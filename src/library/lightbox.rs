@@ -1086,7 +1086,18 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .child(&bottombar)
         .build();
 
-    viewer.append(&media_stack);
+    // Wrap the whole media stack (image OR video) in an outer DismissBin so a
+    // swipe-down translates + fades whichever child is currently visible. The
+    // inner `dismiss_bin` (around `pic_stack`, inside the ScrolledWindow) stays
+    // in the tree purely for the image layout; it is kept at identity now — the
+    // outer bin is the one the swipe gestures drive so the motion covers video
+    // too. Attaching the tap/nav gestures at this level makes them fire
+    // regardless of which media_stack child shows.
+    let media_dismiss_bin = DismissBin::new();
+    media_dismiss_bin.set_hexpand(true);
+    media_dismiss_bin.set_vexpand(true);
+    media_dismiss_bin.set_child(&media_stack);
+    viewer.append(&media_dismiss_bin);
     // Overlay the chrome bars on top of the viewer.
     let chrome_overlay = gtk::Overlay::builder().build();
     chrome_overlay.set_child(Some(&viewer));
@@ -1447,7 +1458,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let load_into_picture = load_into_picture.clone();
         let full_res_pref = full_res_pref.clone();
         let pic_stack = pic_stack.clone();
-        let dismiss_bin = dismiss_bin.clone();
+        let media_dismiss_bin = media_dismiss_bin.clone();
         let picture_a = picture_a.clone();
         let picture_b = picture_b.clone();
         let scrolled_picture = scrolled_picture.clone();
@@ -1503,8 +1514,9 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             zoom_level.set(1.0);
             apply_lightbox_zoom(&target, &scrolled_picture, 1.0);
             // Clear any leftover drag-to-dismiss translation/opacity so the new
-            // photo is centered and fully opaque.
-            dismiss_bin.reset_dismiss();
+            // photo is centered and fully opaque. Reset the OUTER bin (the one
+            // the swipe gestures drive, covering both image and video).
+            media_dismiss_bin.reset_dismiss();
             pic_stack.set_transition_type(match nav_dir.get() {
                 1 => gtk::StackTransitionType::SlideLeft,
                 -1 => gtk::StackTransitionType::SlideRight,
@@ -1790,7 +1802,10 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             gesture.set_state(gtk::EventSequenceState::Claimed);
         }
     ));
-    pic_stack.add_controller(tap);
+    // Attach at the media_stack level so the tap-to-toggle-chrome fires over
+    // BOTH the image and the video child (a gtk::Picture doesn't consume
+    // pointer events, so they reach this ancestor).
+    media_stack.add_controller(tap);
 
     // Favorite toggle.
     favorite_btn.connect_clicked(clone!(
@@ -2130,7 +2145,14 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         set_zoom,
         #[strong]
         swipe_active,
+        #[strong]
+        media_stack,
         move |_, scale| {
+            // Video is not zoomable: no-op when the video child is showing so a
+            // pinch over an inline video can never zoom it.
+            if media_stack.visible_child_name().as_deref() == Some("video") {
+                return;
+            }
             // Never zoom while a single-finger directional swipe owns the
             // sequence. `GestureZoom` needs 2 touch points so this should never
             // fire on a 1-finger swipe, but guard anyway so a stray 2-point
@@ -2167,7 +2189,16 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         zoom_level,
         #[strong]
         swipe_active,
+        #[strong]
+        media_stack,
         move |_, off_x, off_y| {
+            // Video is not pannable: never touch scroll when the video child is
+            // showing so a drag over an inline video is free to navigate/dismiss
+            // via `nav_drag`. (Zoom is also forced to 1.0 over video, but guard
+            // explicitly.)
+            if media_stack.visible_child_name().as_deref() == Some("video") {
+                return;
+            }
             // Pan ONLY when zoomed in; at fit (zoom == 1.0) leave scroll alone so
             // the `nav_drag` swipe gesture owns the motion. Also stand down while
             // a directional swipe/dismiss is in flight so a claimed swipe can
@@ -2216,7 +2247,14 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         swipe_active,
         #[strong]
         dbl_press_pos,
+        #[strong]
+        media_stack,
         move |_, n_press, x, y| {
+            // Video is not zoomable: a double-tap over an inline video must not
+            // zoom (it just does nothing extra beyond the tap's chrome toggle).
+            if media_stack.visible_child_name().as_deref() == Some("video") {
+                return;
+            }
             if n_press != 2 || swipe_active.get() {
                 return;
             }
@@ -2276,33 +2314,36 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     // `drag_end` regardless of any parallel gesture's callback ordering.
     let drag_velocity_y = Rc::new(Cell::new(0.0_f64));
     let drag_last_sample: Rc<Cell<Option<(f64, std::time::Instant)>>> = Rc::new(Cell::new(None));
-    // Applies a live downward translation + fade to the image via the
-    // GPU-transform bin (queue_draw only — no relayout, so it stays smooth).
+    // Applies a live downward translation + fade to the *whole media stack*
+    // (image OR video) via the outer GPU-transform bin (queue_draw only — no
+    // relayout, so it stays smooth). Driving the outer bin is what makes the
+    // dismiss motion visible over a playing video, not just over a photo.
     let apply_dismiss_offset = Rc::new(clone!(
         #[strong]
-        dismiss_bin,
+        media_dismiss_bin,
         #[strong]
         scrolled_picture,
         move |off_y: f64| {
             let h = scrolled_picture.height().max(1) as f64;
-            dismiss_bin.set_dismiss_offset(off_y, h);
+            media_dismiss_bin.set_dismiss_offset(off_y, h);
         }
     ));
-    // Applies a live horizontal translation to the image for finger-following
-    // prev/next navigation (queue_draw only — GPU transform, no relayout).
+    // Applies a live horizontal translation to the media stack for
+    // finger-following prev/next navigation (queue_draw only — GPU transform,
+    // no relayout).
     let apply_nav_offset = Rc::new(clone!(
         #[strong]
-        dismiss_bin,
+        media_dismiss_bin,
         move |off_x: f64| {
-            dismiss_bin.set_nav_offset(off_x);
+            media_dismiss_bin.set_nav_offset(off_x);
         }
     ));
     // Resets the translation/opacity so a freshly loaded photo is centered.
     let reset_dismiss_offset = Rc::new(clone!(
         #[strong]
-        dismiss_bin,
+        media_dismiss_bin,
         move || {
-            dismiss_bin.reset_dismiss();
+            media_dismiss_bin.reset_dismiss();
         }
     ));
     nav_drag.connect_drag_begin(clone!(
@@ -2430,7 +2471,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         drag_last_sample,
         #[strong]
-        dismiss_bin,
+        media_dismiss_bin,
         #[strong]
         scrolled_picture,
         #[strong]
@@ -2470,8 +2511,13 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         apply_dismiss_offset,
                         move |v| apply_dismiss_offset(v)
                     ));
-                    let anim =
-                        TimedAnimation::new(&dismiss_bin, off_y.max(0.0), h, duration, target);
+                    let anim = TimedAnimation::new(
+                        &media_dismiss_bin,
+                        off_y.max(0.0),
+                        h,
+                        duration,
+                        target,
+                    );
                     anim.set_easing(libadwaita::Easing::EaseInCubic);
                     anim.connect_done(clone!(
                         #[strong]
@@ -2501,7 +2547,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         move |v| apply_dismiss_offset(v)
                     ));
                     let anim =
-                        TimedAnimation::new(&dismiss_bin, off_y.max(0.0), 0.0, 200, target);
+                        TimedAnimation::new(&media_dismiss_bin, off_y.max(0.0), 0.0, 200, target);
                     anim.set_easing(libadwaita::Easing::EaseOutCubic);
                     anim.connect_done(clone!(
                         #[strong]
@@ -2534,7 +2580,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         move |v| apply_nav_offset(v)
                     ));
                     let anim =
-                        TimedAnimation::new(&dismiss_bin, off_x * 0.9, 0.0, 180, target);
+                        TimedAnimation::new(&media_dismiss_bin, off_x * 0.9, 0.0, 180, target);
                     anim.set_easing(libadwaita::Easing::EaseOutCubic);
                     anim.connect_done(clone!(
                         #[strong]
@@ -2564,7 +2610,12 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             // Downward drags are handled by the interactive-dismiss branch above.
         }
     ));
-    pic_stack.add_controller(nav_drag);
+    // Attach at the media_stack level so the directional swipe (navigate /
+    // swipe-down dismiss / swipe-up details) fires over BOTH the image and the
+    // video child. Capture phase + claiming still wins negotiation against the
+    // enclosing AdwNavigationView edge-swipe and, over images, against the
+    // zoom/pan gestures on the inner ScrolledWindow.
+    media_stack.add_controller(nav_drag);
 
     // ── Keyboard shortcuts ──────────────────────────────────────────────
     let key_controller = gtk::EventControllerKey::new();
