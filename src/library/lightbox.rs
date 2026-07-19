@@ -23,6 +23,132 @@ use super::download::{
 };
 use super::{LOCAL_ID_PREFIX, LibraryWindowUi, load_source_page, load_texture_oriented};
 
+/// A single-child bin that applies a live vertical translation + fade to its
+/// child purely at paint time (GPU transform, no relayout). Used to drive the
+/// swipe-down-to-dismiss motion of the lightbox image without forcing a
+/// `ScrolledWindow` relayout every frame (which `margin_top` would).
+mod dismiss_bin {
+    use std::cell::Cell;
+
+    use gtk::glib;
+    use gtk::graphene;
+    use gtk::gsk;
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+
+    mod imp {
+        use super::*;
+
+        #[derive(Default)]
+        pub struct DismissBin {
+            pub offset_y: Cell<f64>,
+            pub opacity: Cell<f64>,
+        }
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for DismissBin {
+            const NAME: &'static str = "MimickDismissBin";
+            type Type = super::DismissBin;
+            type ParentType = gtk::Widget;
+        }
+
+        impl ObjectImpl for DismissBin {
+            fn constructed(&self) {
+                self.parent_constructed();
+                self.opacity.set(1.0);
+                // Bin layout: measure/allocate the single child to fill us, so
+                // we never have to override measure()/size_allocate().
+                self.obj()
+                    .set_layout_manager(Some(gtk::BinLayout::new()));
+            }
+
+            fn dispose(&self) {
+                while let Some(child) = self.obj().first_child() {
+                    child.unparent();
+                }
+            }
+        }
+
+        impl WidgetImpl for DismissBin {
+            fn snapshot(&self, snapshot: &gtk::Snapshot) {
+                let widget = self.obj();
+                let opacity = self.opacity.get().clamp(0.0, 1.0);
+                let offset_y = self.offset_y.get();
+                let faded = opacity < 0.999;
+                if faded {
+                    snapshot.push_opacity(opacity);
+                }
+                if offset_y.abs() > 0.01 {
+                    let transform = gsk::Transform::new()
+                        .translate(&graphene::Point::new(0.0, offset_y as f32));
+                    snapshot.transform(Some(&transform));
+                }
+                // Paint the (single) child at the transformed origin.
+                if let Some(child) = widget.first_child() {
+                    widget.snapshot_child(&child, snapshot);
+                }
+                if faded {
+                    snapshot.pop();
+                }
+            }
+        }
+    }
+
+    glib::wrapper! {
+        pub struct DismissBin(ObjectSubclass<imp::DismissBin>)
+            @extends gtk::Widget,
+            @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+    }
+
+    impl DismissBin {
+        pub fn new() -> Self {
+            glib::Object::builder().build()
+        }
+
+        /// Set the single child widget (unparenting any previous one).
+        pub fn set_child(&self, child: &impl IsA<gtk::Widget>) {
+            while let Some(existing) = self.first_child() {
+                existing.unparent();
+            }
+            child.unparent();
+            child.set_parent(self);
+        }
+
+        /// Store the current dismiss translation (downward, px) and update the
+        /// derived opacity, then invalidate paint only (no relayout).
+        ///
+        /// `viewport_h` is the height used to normalise the fade; the image
+        /// fades toward 0.4 opacity as it is dragged a viewport-height down,
+        /// never fully vanishing while still on-screen so the drag reads as
+        /// interactive.
+        pub fn set_dismiss_offset(&self, offset_y: f64, viewport_h: f64) {
+            let clamped = offset_y.max(0.0);
+            let imp = self.imp();
+            imp.offset_y.set(clamped);
+            let h = viewport_h.max(1.0);
+            let fade = (clamped / h).min(0.6);
+            imp.opacity.set(1.0 - fade);
+            self.queue_draw();
+        }
+
+        /// Reset translation + opacity (freshly rendered / dismissed photo).
+        pub fn reset_dismiss(&self) {
+            let imp = self.imp();
+            imp.offset_y.set(0.0);
+            imp.opacity.set(1.0);
+            self.queue_draw();
+        }
+    }
+
+    impl Default for DismissBin {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}
+
+use dismiss_bin::DismissBin;
+
 /// Everything we can learn about a local file off the main thread before
 /// handing the data back to GTK. `exif` is the cached EXIF parse; `dims`
 /// comes from a pixbuf header-only read; `mtime_iso` falls back when the
@@ -607,10 +733,16 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     pic_stack.add_named(&picture_a, Some("a"));
     pic_stack.add_named(&picture_b, Some("b"));
     pic_stack.set_visible_child_name("a");
+    // Wrap the picture stack in a bin that applies the swipe-down-to-dismiss
+    // translation + fade as a GPU transform at paint time (no relayout).
+    let dismiss_bin = DismissBin::new();
+    dismiss_bin.set_hexpand(true);
+    dismiss_bin.set_vexpand(true);
+    dismiss_bin.set_child(&pic_stack);
     let scrolled_picture = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::External)
         .vscrollbar_policy(gtk::PolicyType::External)
-        .child(&pic_stack)
+        .child(&dismiss_bin)
         .vexpand(true)
         .hexpand(true)
         .kinetic_scrolling(false)
@@ -1017,68 +1149,89 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         return;
                     }
                 }
-                if full_res {
-                    if let Some(cache_dir) = crate::profile::cache_dir().map(|p| p.join("preview"))
-                    {
-                        let _ = std::fs::create_dir_all(&cache_dir);
-                        let temp = original_preview_cache_path(&cache_dir, &asset_id, &filename);
-                        if !temp.exists() {
-                            let download_result = {
-                                begin_download_session(&ui.ctx, format!("preview {asset_id}"));
-                                let progress = track_download_item(
-                                    &ui.ctx,
-                                    asset_id.clone(),
-                                    Some(format!("preview {asset_id}")),
-                                    None,
-                                );
-                                let result = ui
-                                    .ctx
-                                    .api_client
-                                    .download_original_to_file(&asset_id, &temp, Some(progress))
-                                    .await;
-                                finish_download_item(&ui.ctx, &asset_id);
-                                result
-                            };
-                            if let Err(err) = download_result {
-                                log::warn!("Lightbox original fetch failed: {}", err);
-                                if is_current() {
-                                    show_unavailable(None);
-                                    commit_visible();
-                                    cancel_loader.set(true);
-                                    loader.set_reveal_child(false);
-                                }
-                                return;
+                // Remote still image. Progressive display (Immich-mobile style):
+                // (1) show the sharp full-preview (1440) immediately so a tapped
+                // photo is instantly crisp, then (2) fetch + decode the ORIGINAL
+                // in the background and swap it in for genuine full resolution.
+                // Step 2 is non-blocking: the viewer is already interactive on
+                // the preview, and navigating away (stale generation) cancels
+                // the swap.
+                let preview_result = ui
+                    .ctx
+                    .thumbnail_cache
+                    .load_thumbnail(&asset_id, ThumbnailSize::Preview)
+                    .await;
+                if !is_current() {
+                    return;
+                }
+                let mut have_image = false;
+                match preview_result {
+                    Ok(texture) => {
+                        target.set_paintable(Some(&texture));
+                        have_image = true;
+                    }
+                    Err(_) => show_unavailable(None),
+                }
+                commit_visible();
+                if is_current() {
+                    cancel_loader.set(true);
+                    loader.set_reveal_child(false);
+                }
+
+                // Upgrade to the original for a genuinely full-resolution image.
+                // `full_res` (the per-viewer pref) forces this even when the
+                // preview failed; otherwise we only upgrade when the preview is
+                // already showing, so a failed asset stays on the "unavailable"
+                // card rather than double-erroring.
+                if !have_image && !full_res {
+                    return;
+                }
+                if let Some(cache_dir) = crate::profile::cache_dir().map(|p| p.join("preview")) {
+                    let _ = std::fs::create_dir_all(&cache_dir);
+                    let temp = original_preview_cache_path(&cache_dir, &asset_id, &filename);
+                    if !temp.exists() {
+                        let download_result = {
+                            begin_download_session(&ui.ctx, format!("preview {asset_id}"));
+                            let progress = track_download_item(
+                                &ui.ctx,
+                                asset_id.clone(),
+                                Some(format!("preview {asset_id}")),
+                                None,
+                            );
+                            let result = ui
+                                .ctx
+                                .api_client
+                                .download_original_to_file(&asset_id, &temp, Some(progress))
+                                .await;
+                            finish_download_item(&ui.ctx, &asset_id);
+                            result
+                        };
+                        if let Err(err) = download_result {
+                            log::warn!("Lightbox original fetch failed: {}", err);
+                            // Keep the preview on screen if we already have one.
+                            if is_current() && !have_image {
+                                show_unavailable(None);
+                                commit_visible();
+                                cancel_loader.set(true);
+                                loader.set_reveal_child(false);
                             }
-                        }
-                        let decoded = load_texture_oriented(&temp).await;
-                        if !is_current() {
                             return;
                         }
-                        if let Some(texture) = decoded {
-                            target.set_paintable(Some(&texture));
-                            *lightbox_drag_path.borrow_mut() =
-                                drag_export_path(&asset_id, &filename, &temp);
-                        } else {
-                            show_unavailable(Some(temp.display().to_string()));
-                        }
-                        commit_visible();
-                    } else if is_current() {
-                        show_unavailable(None);
-                        commit_visible();
                     }
-                } else {
-                    let thumb_result = ui
-                        .ctx
-                        .thumbnail_cache
-                        .load_thumbnail(&asset_id, ThumbnailSize::Preview)
-                        .await;
+                    let decoded = load_texture_oriented(&temp).await;
                     if !is_current() {
                         return;
                     }
-                    match thumb_result {
-                        Ok(texture) => target.set_paintable(Some(&texture)),
-                        Err(_) => show_unavailable(None),
+                    if let Some(texture) = decoded {
+                        target.set_paintable(Some(&texture));
+                        *lightbox_drag_path.borrow_mut() =
+                            drag_export_path(&asset_id, &filename, &temp);
+                    } else if !have_image {
+                        show_unavailable(Some(temp.display().to_string()));
+                        commit_visible();
                     }
+                } else if is_current() && !have_image {
+                    show_unavailable(None);
                     commit_visible();
                 }
                 if is_current() {
@@ -1102,6 +1255,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let load_into_picture = load_into_picture.clone();
         let full_res_pref = full_res_pref.clone();
         let pic_stack = pic_stack.clone();
+        let dismiss_bin = dismiss_bin.clone();
         let picture_a = picture_a.clone();
         let picture_b = picture_b.clone();
         let scrolled_picture = scrolled_picture.clone();
@@ -1158,8 +1312,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             apply_lightbox_zoom(&target, &scrolled_picture, 1.0);
             // Clear any leftover drag-to-dismiss translation/opacity so the new
             // photo is centered and fully opaque.
-            pic_stack.set_margin_top(0);
-            pic_stack.set_opacity(1.0);
+            dismiss_bin.reset_dismiss();
             pic_stack.set_transition_type(match nav_dir.get() {
                 1 => gtk::StackTransitionType::SlideLeft,
                 -1 => gtk::StackTransitionType::SlideRight,
@@ -1848,29 +2001,39 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     // (downward-dominant): once set, `drag_update` translates the image with
     // the finger and `drag_end` decides dismiss-vs-snap-back.
     let drag_dismissing = Rc::new(Cell::new(false));
-    // Applies a live downward translation + fade to the picture stack.
+    // Rolling velocity estimate (px/s, downward positive) for flick dismissal.
+    // Sampled from `(offset, Instant)` deltas in `drag_update` so it's ready in
+    // `drag_end` regardless of any parallel gesture's callback ordering.
+    let drag_velocity_y = Rc::new(Cell::new(0.0_f64));
+    let drag_last_sample: Rc<Cell<Option<(f64, std::time::Instant)>>> = Rc::new(Cell::new(None));
+    // Applies a live downward translation + fade to the image via the
+    // GPU-transform bin (queue_draw only — no relayout, so it stays smooth).
     let apply_dismiss_offset = Rc::new(clone!(
         #[strong]
-        pic_stack,
+        dismiss_bin,
         #[strong]
         scrolled_picture,
         move |off_y: f64| {
             let h = scrolled_picture.height().max(1) as f64;
-            let clamped = off_y.max(0.0);
-            pic_stack.set_margin_top(clamped as i32);
-            // Fade toward 0.4 as the image is dragged down; never fully hidden
-            // while still on-screen so the drag reads as interactive.
-            let fade = (clamped / h).min(0.6);
-            pic_stack.set_opacity(1.0 - fade);
+            dismiss_bin.set_dismiss_offset(off_y, h);
         }
     ));
     // Resets the translation/opacity so a freshly loaded photo is centered.
     let reset_dismiss_offset = Rc::new(clone!(
         #[strong]
-        pic_stack,
+        dismiss_bin,
         move || {
-            pic_stack.set_margin_top(0);
-            pic_stack.set_opacity(1.0);
+            dismiss_bin.reset_dismiss();
+        }
+    ));
+    nav_drag.connect_drag_begin(clone!(
+        #[strong]
+        drag_velocity_y,
+        #[strong]
+        drag_last_sample,
+        move |_, _, _| {
+            drag_velocity_y.set(0.0);
+            drag_last_sample.set(Some((0.0, std::time::Instant::now())));
         }
     ));
     nav_drag.connect_drag_update(clone!(
@@ -1881,11 +2044,30 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         drag_dismissing,
         #[strong]
+        drag_velocity_y,
+        #[strong]
+        drag_last_sample,
+        #[strong]
         apply_dismiss_offset,
         move |gesture, off_x, off_y| {
             // When zoomed in the pan gesture owns the motion.
             if (zoom_level.get() - 1.0).abs() > 0.01 {
                 return;
+            }
+            // Sample instantaneous vertical velocity (EMA-smoothed) so a quick
+            // flick registers even with little travel.
+            let now = std::time::Instant::now();
+            if let Some((prev_y, prev_t)) = drag_last_sample.get() {
+                let dt = now.duration_since(prev_t).as_secs_f64();
+                if dt > 0.0005 {
+                    let inst = (off_y - prev_y) / dt;
+                    let prev_v = drag_velocity_y.get();
+                    // 0.5 EMA: responsive but not jittery.
+                    drag_velocity_y.set(prev_v * 0.5 + inst * 0.5);
+                    drag_last_sample.set(Some((off_y, now)));
+                }
+            } else {
+                drag_last_sample.set(Some((off_y, now)));
             }
             if !drag_claimed.get() {
                 // Claim once the motion is clearly a directional swipe so we
@@ -1919,7 +2101,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         #[strong]
         drag_dismissing,
         #[strong]
-        pic_stack,
+        drag_velocity_y,
+        #[strong]
+        drag_last_sample,
+        #[strong]
+        dismiss_bin,
         #[strong]
         scrolled_picture,
         #[strong]
@@ -1929,26 +2115,33 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         move |_, off_x, off_y| {
             let _ = drag_claimed.replace(false);
             let was_dismissing = drag_dismissing.replace(false);
+            let velocity_y = drag_velocity_y.replace(0.0);
+            drag_last_sample.set(None);
             if (zoom_level.get() - 1.0).abs() > 0.01 {
                 return;
             }
             const THRESH: f64 = 60.0;
             const DISMISS_THRESH: f64 = 120.0;
+            // Downward flick: dismiss even on little travel if fast enough.
+            const FLICK_VELOCITY: f64 = 900.0;
             let ax = off_x.abs();
             let ay = off_y.abs();
 
             if was_dismissing {
-                // Interactive downward dismiss: past the threshold, continue
-                // the downward fade-out and pop; otherwise snap back to center.
+                // Interactive downward dismiss. Dismiss when dragged past the
+                // distance threshold OR flicked down fast; otherwise snap back.
                 let h = scrolled_picture.height().max(1) as f64;
-                if off_y > DISMISS_THRESH {
+                let flick = velocity_y > FLICK_VELOCITY && off_y > 8.0;
+                if off_y > DISMISS_THRESH || flick {
+                    // Continue downward + fade, then pop. Faster if flicked.
+                    let duration = if flick { 130 } else { 160 };
                     let target = CallbackAnimationTarget::new(clone!(
                         #[strong]
                         apply_dismiss_offset,
                         move |v| apply_dismiss_offset(v)
                     ));
                     let anim =
-                        TimedAnimation::new(&pic_stack, off_y.max(0.0), h, 160, target);
+                        TimedAnimation::new(&dismiss_bin, off_y.max(0.0), h, duration, target);
                     anim.set_easing(libadwaita::Easing::EaseInCubic);
                     anim.connect_done(clone!(
                         #[strong]
@@ -1968,7 +2161,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                         apply_dismiss_offset,
                         move |v| apply_dismiss_offset(v)
                     ));
-                    let anim = TimedAnimation::new(&pic_stack, off_y.max(0.0), 0.0, 200, target);
+                    let anim =
+                        TimedAnimation::new(&dismiss_bin, off_y.max(0.0), 0.0, 200, target);
                     anim.set_easing(libadwaita::Easing::EaseOutCubic);
                     anim.connect_done(clone!(
                         #[strong]

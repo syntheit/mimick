@@ -197,15 +197,30 @@ impl ThumbnailCache {
     }
 
     /// Retrieve a thumbnail texture from memory if present, updating LRU recency.
+    ///
+    /// Looks up the *grid-sized* decode of the bucket (Preview → 768). The grid
+    /// paint path and the lightbox instant-preview both use this, so both see
+    /// the cheap grid tile — the lightbox then upgrades to the full 1440 decode
+    /// asynchronously (progressive display).
     pub fn get_cached(&self, asset_id: &str, size: ThumbnailSize) -> Option<Texture> {
-        let key = cache_key(asset_id, size);
+        self.get_cached_scaled(asset_id, size, grid_decode_dim(size))
+    }
+
+    /// Same as `get_cached` but for a specific decode dimension.
+    pub fn get_cached_scaled(
+        &self,
+        asset_id: &str,
+        size: ThumbnailSize,
+        decode_dim: i32,
+    ) -> Option<Texture> {
+        let key = mem_cache_key(asset_id, size, decode_dim);
         self.memory.lock().get(&key)
     }
 
     /// Same as `get_cached` but does not touch LRU order. Use for read-only
     /// per-frame paint lookups.
     pub fn peek_cached(&self, asset_id: &str, size: ThumbnailSize) -> Option<Texture> {
-        let key = cache_key(asset_id, size);
+        let key = mem_cache_key(asset_id, size, grid_decode_dim(size));
         self.memory.lock().peek(&key)
     }
 
@@ -221,17 +236,28 @@ impl ThumbnailCache {
         }
     }
 
-    /// Asynchronously fetch a remote thumbnail with default non-cancellable execution.
+    /// Asynchronously fetch a remote thumbnail at full bucket resolution.
+    ///
+    /// Decodes to the size bucket's default dimension (`target_dim_for_bucket`),
+    /// i.e. the sharp viewer-quality decode (Preview → 1440). Used by the
+    /// lightbox and by list/detail views; the masonry grid uses the smaller
+    /// `load_thumbnail_cancellable` instead.
     pub async fn load_thumbnail(
         &self,
         asset_id: &str,
         size: ThumbnailSize,
     ) -> Result<Texture, String> {
-        self.load_thumbnail_cancellable(asset_id, size, || false)
+        self.load_thumbnail_scaled(asset_id, size, target_dim_for_bucket(size), || false)
             .await
     }
 
-    /// Asynchronously fetch a remote thumbnail with cancellable hook support.
+    /// Asynchronously fetch a remote thumbnail for the **masonry grid**, with
+    /// cancellable hook support.
+    ///
+    /// Decodes to the grid-tile dimension (Preview → 768) so grid textures stay
+    /// light. The lightbox instead calls `load_thumbnail_scaled` with the full
+    /// `target_dim_for_bucket` for a sharp viewer image; both reuse the same
+    /// download / disk file.
     pub async fn load_thumbnail_cancellable<F>(
         &self,
         asset_id: &str,
@@ -241,17 +267,39 @@ impl ThumbnailCache {
     where
         F: Fn() -> bool,
     {
-        if let Some(texture) = self.get_cached(asset_id, size) {
+        self.load_thumbnail_scaled(asset_id, size, grid_decode_dim(size), is_cancelled)
+            .await
+    }
+
+    /// Fetch a remote thumbnail, decoding the source bytes to `decode_dim`.
+    ///
+    /// The network request and on-disk cache are keyed only by `(asset_id,
+    /// size)`, so the grid (small decode) and the lightbox (full-preview
+    /// decode) share a single download and disk file. The *decoded* texture is
+    /// memory-cached per `decode_dim`, so the two paths don't clobber each
+    /// other's resolution in the LRU. This is what decouples grid decode from
+    /// viewer decode: same bytes, different decoded textures.
+    pub async fn load_thumbnail_scaled<F>(
+        &self,
+        asset_id: &str,
+        size: ThumbnailSize,
+        decode_dim: i32,
+        is_cancelled: F,
+    ) -> Result<Texture, String>
+    where
+        F: Fn() -> bool,
+    {
+        if let Some(texture) = self.get_cached_scaled(asset_id, size, decode_dim) {
             return Ok(texture);
         }
 
-        let key = cache_key(asset_id, size);
+        let key = mem_cache_key(asset_id, size, decode_dim);
         let guard = match self.enter_inflight(&key) {
             Ok(guard) => guard,
             Err(rx) => return await_inflight(rx).await,
         };
         let result = self
-            .fetch_remote_thumbnail(asset_id, size, &key, &is_cancelled)
+            .fetch_remote_thumbnail(asset_id, size, decode_dim, &key, &is_cancelled)
             .await;
         guard.publish(result.clone());
         result
@@ -262,6 +310,7 @@ impl ThumbnailCache {
         &self,
         asset_id: &str,
         size: ThumbnailSize,
+        decode_dim: i32,
         key: &str,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<Texture, String> {
@@ -277,7 +326,7 @@ impl ThumbnailCache {
         if is_cancelled() {
             return Err("cancelled".to_string());
         }
-        if let Some(texture) = self.get_cached(asset_id, size) {
+        if let Some(texture) = self.get_cached_scaled(asset_id, size, decode_dim) {
             return Ok(texture);
         }
 
@@ -290,7 +339,7 @@ impl ThumbnailCache {
         .map_err(|err| err.to_string())?;
 
         if let Some(bytes) = from_disk {
-            let texture = decode_to_scaled_texture(bytes, target_dim_for_bucket(size))
+            let texture = decode_to_scaled_texture(bytes, decode_dim)
                 .await
                 .map_err(|err| err.to_string())?;
             self.memory.lock().insert(key.to_string(), texture.clone());
@@ -309,7 +358,7 @@ impl ThumbnailCache {
             let _ = std::fs::write(&cache_file_for_write, &bytes_for_write);
         })
         .await;
-        let texture = decode_to_scaled_texture(bytes, target_dim_for_bucket(size))
+        let texture = decode_to_scaled_texture(bytes, decode_dim)
             .await
             .map_err(|err| err.to_string())?;
         self.memory.lock().insert(key.to_string(), texture.clone());
@@ -462,13 +511,23 @@ impl ThumbnailCache {
     }
 }
 
-/// Construct a cache key string for remote assets.
+/// Construct a disk cache key string for remote assets. Keyed only by
+/// `(asset_id, size)` — the encoded source bytes are shared across decode
+/// dimensions, so grid and lightbox reuse one download / one disk file.
 fn cache_key(asset_id: &str, size: ThumbnailSize) -> String {
     match size {
         ThumbnailSize::Thumbnail => format!("thumbnail:{}", asset_id),
         ThumbnailSize::Preview => format!("preview:{}", asset_id),
         ThumbnailSize::Fullsize => format!("fullsize:{}", asset_id),
     }
+}
+
+/// Construct an in-memory (decoded-texture) cache key. Includes the decode
+/// dimension so the same source bytes decoded at different resolutions (grid
+/// 768 vs. lightbox 1440 for a `Preview`) occupy distinct LRU slots instead of
+/// clobbering each other.
+fn mem_cache_key(asset_id: &str, size: ThumbnailSize, decode_dim: i32) -> String {
+    format!("{}@{}", cache_key(asset_id, size), decode_dim)
 }
 
 /// Construct a cache key string for local assets using hashed paths.
@@ -683,15 +742,33 @@ fn encode_png_bytes(
     Ok(encoded)
 }
 
+/// Grid-tile decode dimension for a `Preview` bucket. Grid tiles are ~450
+/// physical px on the phone; 768 is crisply oversampled while staying far
+/// cheaper to decode/upload than the source's native 1440 (avoids scroll
+/// jank). The lightbox decodes the same `Preview` source at the full
+/// `target_dim_for_bucket(Preview)` (1440) instead, via `load_thumbnail`.
+const GRID_PREVIEW_DECODE_DIM: i32 = 768;
+
+/// Default decode dimension for a size bucket. This is the resolution the
+/// viewer/lightbox and any generic `load_thumbnail` caller decode to; the
+/// masonry grid overrides `Preview` down to `GRID_PREVIEW_DECODE_DIM` via
+/// `load_thumbnail_scaled` so its tiles stay light.
 fn target_dim_for_bucket(size: ThumbnailSize) -> i32 {
     match size {
         ThumbnailSize::Thumbnail => 256,
-        // Grid tiles are ~450 physical px on the phone; 768 is crisply
-        // oversampled while staying far cheaper to decode/upload than the
-        // source's native 1440 (avoids scroll jank). Grid-only — the lightbox
-        // loads full/original separately.
-        ThumbnailSize::Preview => 768,
+        // Full preview resolution — sharp in the lightbox.
+        ThumbnailSize::Preview => 1440,
         ThumbnailSize::Fullsize => 2560,
+    }
+}
+
+/// Decode dimension for the masonry **grid**. Only `Preview` is capped down
+/// (to `GRID_PREVIEW_DECODE_DIM`); other buckets already decode small enough
+/// that the tile texture is cheap.
+fn grid_decode_dim(size: ThumbnailSize) -> i32 {
+    match size {
+        ThumbnailSize::Preview => GRID_PREVIEW_DECODE_DIM.min(target_dim_for_bucket(size)),
+        other => target_dim_for_bucket(other),
     }
 }
 
