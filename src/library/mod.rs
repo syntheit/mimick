@@ -1,9 +1,11 @@
 //! Library view module -- browse, search, and download assets from an Immich server.
 //!
-//! Constructs the main GTK window with a split-pane sidebar, paginated
-//! grid view, timeline scrubber, and search bar. Submodules handle the
-//! explore dashboard, album grids, lightbox, sidebar, and thumbnail
-//! caching independently.
+//! Constructs the main GTK window as an Immich-mobile-style bottom-nav shell:
+//! an `AdwViewStack` with Photos / Search / Albums / Library tabs (a header
+//! `AdwViewSwitcher` when wide, an `AdwViewSwitcherBar` when narrow), each tab
+//! owning its own `AdwNavigationView` for swipe-back drill-in. Submodules
+//! handle the explore dashboard, album grids, lightbox, shell scaffolding, and
+//! thumbnail caching independently.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -23,7 +25,6 @@ use crate::library::local_source::{
     LocalAsset, enumerate_local, enumerate_local_for_entry, filter_by_filename,
 };
 use crate::library::masonry::{GridViewParts, build_grid_view};
-use crate::library::sidebar::{SidebarParts, build_sidebar};
 use crate::library::state::{LibraryLoadState, LibrarySource};
 use crate::state_manager::TransferDirection;
 
@@ -31,8 +32,7 @@ use self::actions::{connect_bulk_actions, connect_select_mode};
 use self::album_link::{connect_album_link_row, refresh_album_link_row};
 use self::context_menu::show_asset_context_menu;
 use self::controls::{
-    connect_controls, connect_grid_handlers, connect_sidebar_handlers,
-    refresh_library_after_mutation, sidebar_dispatch,
+    connect_controls, connect_grid_handlers, refresh_library_after_mutation, tab_drill_in,
 };
 use self::download::format_rate;
 use self::filters::connect_filters_button;
@@ -48,7 +48,6 @@ pub mod explore_view;
 pub mod local_exif;
 pub mod local_source;
 pub mod masonry;
-pub mod sidebar;
 pub mod state;
 pub mod style;
 pub mod thumbnail_cache;
@@ -61,8 +60,11 @@ mod download;
 mod filters;
 mod lightbox;
 mod server_stats_dialog;
+mod shell;
 pub mod staging_view;
 mod upload_picker;
+
+use self::shell::TabView;
 
 const PAGE_SIZE: u32 = 50;
 
@@ -93,17 +95,32 @@ struct LibraryWindowUi {
     ctx: Arc<AppContext>,
     app: libadwaita::Application,
     window: libadwaita::ApplicationWindow,
+    /// Root navigation view — the lightbox pushes full-screen viewer pages
+    /// here so they cover the bottom nav.
     nav: libadwaita::NavigationView,
-    sidebar: SidebarParts,
+    /// Top-level bottom-nav tab container.
+    view_stack: libadwaita::ViewStack,
+    /// Per-tab navigation views (own their drill-in stack). The Search tab's
+    /// nav lives in `view_stack`; it needs no separate handle in Stage 1.
+    photos_tab: TabView,
+    albums_tab: TabView,
+    library_tab: TabView,
     grid: GridViewParts,
     explore: ExploreViewParts,
     albums: AlbumsViewParts,
-    content_stack: gtk::Stack,
-    error_label: gtk::Label,
+    /// The scrolled window hosting the shared photos grid canvas; re-parented
+    /// between the Photos tab and drill-in detail pages.
+    grid_scrolled: gtk::ScrolledWindow,
+    /// Whichever tab currently owns `grid_scrolled` for status updates
+    /// (`load_source_page`/`sync_content_state`). `None` = the Photos tab
+    /// root; `Some` = a pushed drill-in page.
+    active_drill: RefCell<Option<shell::DrillPage>>,
     transfer_bar: gtk::Box,
     transfer_progress: gtk::ProgressBar,
     transfer_icon: gtk::Image,
     transfer_label: gtk::Label,
+    /// Backup/transfer status button in the header (opens server stats).
+    status_button: gtk::Button,
     search_entry: gtk::SearchEntry,
     search_mode: gtk::DropDown,
     sort_mode: gtk::DropDown,
@@ -114,7 +131,6 @@ struct LibraryWindowUi {
     timeline_toggle: gtk::ToggleButton,
     timeline_banner: gtk::Label,
     source_mode_suppressed: Cell<bool>,
-    sidebar_suppressed: Cell<bool>,
     back_button: gtk::Button,
     select_toggle: gtk::ToggleButton,
     bulk_bar: gtk::Revealer,
@@ -124,8 +140,25 @@ struct LibraryWindowUi {
     album_sync_button: gtk::Button,
     last_seen_upload_batch: Cell<u64>,
     narrow: Rc<Cell<bool>>,
-    split: libadwaita::OverlaySplitView,
     drop_overlay: gtk::Revealer,
+}
+
+impl LibraryWindowUi {
+    /// The tab that currently owns the shared photos grid for status updates.
+    fn photos_status_target(&self) -> PhotosTarget {
+        match &*self.active_drill.borrow() {
+            Some(drill) => PhotosTarget::Drill(drill.clone()),
+            None => PhotosTarget::Root,
+        }
+    }
+}
+
+/// Where photos-grid loading/empty/error/loaded status should be applied.
+enum PhotosTarget {
+    /// The Photos-tab root stack.
+    Root,
+    /// A pushed album/library drill-in detail page.
+    Drill(shell::DrillPage),
 }
 
 /// Build and display the main library window application layout.
@@ -147,41 +180,18 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .show_start_title_buttons(true)
         .show_end_title_buttons(true)
         .build();
-    let sidebar_toggle = gtk::ToggleButton::builder()
-        .icon_name("sidebar-show-symbolic")
-        .tooltip_text("Toggle sidebar (F9)")
-        .active(true)
-        .css_classes(["mimick-pressable"])
-        .build();
     let back_button = gtk::Button::builder()
         .icon_name("go-previous-symbolic")
         .tooltip_text("Back (Alt+Left)")
         .sensitive(false)
         .css_classes(["mimick-pressable"])
         .build();
-    let menu = gtk::gio::Menu::new();
-    menu.append(Some("Refresh"), Some("win.refresh"));
-    menu.append(Some("Queue Inspector"), Some("win.queue"));
-    menu.append(Some("Settings"), Some("win.settings"));
-    let menu_button = gtk::MenuButton::builder()
-        .icon_name("open-menu-symbolic")
-        .menu_model(&menu)
-        .tooltip_text("Menu")
-        .css_classes(["mimick-pressable"])
-        .build();
-    header.pack_start(&sidebar_toggle);
-    header.pack_start(&back_button);
-    header.pack_end(&menu_button);
     let select_toggle = gtk::ToggleButton::builder()
         .icon_name("checkbox-symbolic")
         .tooltip_text("Select assets (Esc to exit)")
         .build();
 
-    let toolbar = libadwaita::ToolbarView::builder().build();
-    toolbar.add_top_bar(&header);
-
     let narrow_flag = Rc::new(Cell::new(false));
-    let sidebar = build_sidebar();
     let grid = build_grid_view(ctx.clone(), select_toggle.clone(), narrow_flag.clone());
     let explore = build_explore_view();
     let albums = build_albums_view();
@@ -290,33 +300,12 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .margin_start(12)
         .build();
 
-    let content_stack = gtk::Stack::builder()
-        .vexpand(true)
-        .hexpand(true)
-        .transition_type(gtk::StackTransitionType::Crossfade)
-        .transition_duration(180)
-        .build();
-    let loading_view = build_loading_view();
-    let empty_view = build_status_view(
-        "image-x-generic-symbolic",
-        "Nothing to show",
-        "No assets match the current view",
-    );
-    let error_view = build_status_view(
-        "dialog-warning-symbolic",
-        "Library data unavailable",
-        "Could not load library assets",
-    );
-    let error_label = error_view
-        .last_child()
-        .and_downcast::<gtk::Label>()
-        .expect("status-view subtitle label");
-    content_stack.add_named(&loading_view, Some("loading"));
-    content_stack.add_named(&empty_view, Some("empty"));
-    content_stack.add_named(&error_view, Some("error"));
-    content_stack.add_named(&grid.scrolled, Some("grid"));
-    content_stack.add_named(&explore.root, Some("explore"));
-    content_stack.add_named(&albums.root, Some("albums"));
+    // Four bottom-nav tabs, each owning its own NavigationView + drill-in
+    // loading/empty/error/content stack.
+    let photos_tab = TabView::new("Photos");
+    let search_tab = TabView::new("Search");
+    let albums_tab = TabView::new("Albums");
+    let library_tab = TabView::new("Library");
 
     let transfer_progress = gtk::ProgressBar::builder()
         .hexpand(true)
@@ -413,61 +402,154 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .child(&bulk_inner)
         .build();
 
-    let content = gtk::Box::builder()
+    // Photos tab content: the controls bar + shared masonry grid + select/bulk
+    // /transfer chrome all live here (the default tab).
+    let grid_scrolled = grid.scrolled.clone();
+    let photos_content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
-    content.append(&controls);
-    content.append(&album_link_listbox);
-    content.append(&timeline_banner);
-    content.append(&content_stack);
-    content.append(&bulk_bar);
-    content.append(&transfer_bar);
+    photos_content.append(&controls);
+    photos_content.append(&album_link_listbox);
+    photos_content.append(&timeline_banner);
+    photos_content.append(&grid_scrolled);
+    photos_content.append(&bulk_bar);
+    photos_content.append(&transfer_bar);
+    photos_tab.set_content_child(&photos_content);
+    photos_tab.show_content();
 
-    // Drop overlay: shown when files are dragged over the window.
-    let (content_with_drop, drop_overlay) = build_drop_overlay(content);
+    // Albums & Library tabs host their landing views directly.
+    albums_tab.set_content_child(&albums.root);
+    albums_tab.show_content();
+    library_tab.set_content_child(&explore.root);
+    library_tab.show_content();
 
-    let split = libadwaita::OverlaySplitView::builder()
-        .sidebar(&sidebar.root)
-        .content(&content_with_drop)
-        .show_sidebar(true)
-        .enable_show_gesture(true)
-        .enable_hide_gesture(true)
+    // Search tab: Stage-1 minimal — a status-page placeholder. Metadata search
+    // continues to route through the Photos tab's search entry.
+    let search_placeholder = libadwaita::StatusPage::builder()
+        .icon_name("system-search-symbolic")
+        .title("Search")
+        .description("Use the search field in Photos to find assets. A dedicated search experience lands in a later stage.")
         .build();
-    split
-        .bind_property("show-sidebar", &sidebar_toggle, "active")
-        .sync_create()
-        .bidirectional()
-        .build();
-    toolbar.set_content(Some(&split));
+    search_tab.set_content_child(&search_placeholder);
+    search_tab.show_content();
 
-    let nav = libadwaita::NavigationView::new();
-    let root_page = libadwaita::NavigationPage::builder()
-        .child(&toolbar)
+    // The bottom-nav ViewStack with the four pages.
+    let view_stack = libadwaita::ViewStack::new();
+    let photos_page = view_stack.add_titled(
+        &photos_tab.nav,
+        Some(shell::TAB_PHOTOS),
+        "Photos",
+    );
+    photos_page.set_icon_name(Some("image-x-generic-symbolic"));
+    let search_page = view_stack.add_titled(
+        &search_tab.nav,
+        Some(shell::TAB_SEARCH),
+        "Search",
+    );
+    search_page.set_icon_name(Some("system-search-symbolic"));
+    let albums_page = view_stack.add_titled(
+        &albums_tab.nav,
+        Some(shell::TAB_ALBUMS),
+        "Albums",
+    );
+    albums_page.set_icon_name(Some("view-grid-symbolic"));
+    let library_page = view_stack.add_titled(
+        &library_tab.nav,
+        Some(shell::TAB_LIBRARY),
+        "Library",
+    );
+    library_page.set_icon_name(Some("view-app-grid-symbolic"));
+
+    // Header: back button (start), ViewSwitcher title (wide only),
+    // backup/transfer status + profile-avatar menu (end).
+    let header_switcher = libadwaita::ViewSwitcher::builder()
+        .stack(&view_stack)
+        .policy(libadwaita::ViewSwitcherPolicy::Wide)
+        .visible(false)
+        .build();
+    header.set_title_widget(Some(&header_switcher));
+
+    let status_button = gtk::Button::builder()
+        .icon_name("mimick-upload-symbolic")
+        .tooltip_text("Backup & transfer status")
+        .css_classes(["flat", "mimick-pressable"])
+        .build();
+
+    let profile_avatar = libadwaita::Avatar::builder()
+        .size(24)
+        .show_initials(false)
+        .build();
+    let profile_button = gtk::MenuButton::builder()
+        .child(&profile_avatar)
+        .tooltip_text("Settings")
+        .css_classes(["flat", "mimick-pressable"])
+        .build();
+    // Stage 1: the avatar button opens the existing settings window directly.
+    // (Converting settings to a dialog with a real menu is a later stage.)
+    let settings_menu = gtk::gio::Menu::new();
+    settings_menu.append(Some("Settings"), Some("win.settings"));
+    settings_menu.append(Some("Refresh"), Some("win.refresh"));
+    settings_menu.append(Some("Queue Inspector"), Some("win.queue"));
+    profile_button.set_menu_model(Some(&settings_menu));
+
+    header.pack_start(&back_button);
+    header.pack_end(&profile_button);
+    header.pack_end(&status_button);
+
+    // Bottom nav: ViewSwitcherBar, revealed only when narrow.
+    let switcher_bar = libadwaita::ViewSwitcherBar::builder()
+        .stack(&view_stack)
+        .reveal(true)
+        .build();
+
+    let toolbar = libadwaita::ToolbarView::builder().build();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&view_stack));
+    toolbar.add_bottom_bar(&switcher_bar);
+
+    // Drop overlay lives on the OUTERMOST container so it tints the whole
+    // window (above the bottom nav).
+    let toolbar_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    toolbar_box.append(&toolbar);
+    let (content_with_drop, drop_overlay) = build_drop_overlay(toolbar_box);
+
+    let root_toolbar_page = libadwaita::NavigationPage::builder()
+        .child(&content_with_drop)
         .title("Library")
         .can_pop(false)
         .build();
-    nav.add(&root_page);
+
+    let nav = libadwaita::NavigationView::new();
+    nav.add(&root_toolbar_page);
     window.set_content(Some(&nav));
 
-    let breakpoint = libadwaita::Breakpoint::new(
+    // Adaptive tandem: max-width 600sp -> reveal the bottom bar + hide the
+    // header switcher; wider -> hide the bar + show the header switcher. Also
+    // drives the `narrow` cell + canvas layout effect.
+    let narrow_bp = libadwaita::Breakpoint::new(
         libadwaita::BreakpointCondition::parse("max-width: 600sp")
             .expect("valid breakpoint condition"),
     );
-    breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
-    breakpoint.add_setter(&transfer_bar, "visible", Some(&false.to_value()));
+    narrow_bp.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
+    narrow_bp.add_setter(&header_switcher, "visible", Some(&false.to_value()));
+    narrow_bp.add_setter(&transfer_bar, "visible", Some(&false.to_value()));
     let narrow_apply = narrow_flag.clone();
     let canvas_for_apply = grid.canvas.clone();
-    breakpoint.connect_apply(move |_| {
+    narrow_bp.connect_apply(move |_| {
         narrow_apply.set(true);
         canvas_for_apply.set_narrow(true);
     });
     let narrow_unapply = narrow_flag.clone();
     let canvas_for_unapply = grid.canvas.clone();
-    breakpoint.connect_unapply(move |_| {
+    narrow_bp.connect_unapply(move |_| {
         narrow_unapply.set(false);
         canvas_for_unapply.set_narrow(false);
     });
-    window.add_breakpoint(breakpoint);
+    window.add_breakpoint(narrow_bp);
 
     let desktop_bp = libadwaita::Breakpoint::new(
         libadwaita::BreakpointCondition::parse("min-width: 600sp")
@@ -481,6 +563,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     desktop_bp.connect_unapply(move |_| {
         window_for_desktop_unapply.remove_css_class("mimick-wide");
     });
+    desktop_bp.add_setter(&switcher_bar, "reveal", Some(&false.to_value()));
+    desktop_bp.add_setter(&header_switcher, "visible", Some(&true.to_value()));
     desktop_bp.add_setter(
         &controls,
         "orientation",
@@ -494,45 +578,25 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     );
     window.add_breakpoint(desktop_bp);
 
-    // Tablet-width breakpoint: collapse sidebar to overlay before the inline
-    // sidebar + controls (~960 px natural) overflow a shrunk desktop window.
-    let tablet_bp = libadwaita::Breakpoint::new(
-        libadwaita::BreakpointCondition::parse("max-width: 1000sp")
-            .expect("valid breakpoint condition"),
-    );
-    tablet_bp.add_setter(&split, "collapsed", Some(&true.to_value()));
-    window.add_breakpoint(tablet_bp);
-
-    let f9 = gtk::Shortcut::builder()
-        .trigger(&gtk::ShortcutTrigger::parse_string("F9").unwrap())
-        .action(&gtk::CallbackAction::new(clone!(
-            #[strong]
-            split,
-            move |_, _| {
-                split.set_show_sidebar(!split.shows_sidebar());
-                glib::Propagation::Stop
-            }
-        )))
-        .build();
-    let shortcut_controller = gtk::ShortcutController::new();
-    shortcut_controller.add_shortcut(f9);
-    window.add_controller(shortcut_controller);
-
     let ui = Rc::new(LibraryWindowUi {
         ctx,
         app: app.clone(),
         window: window.clone(),
         nav: nav.clone(),
-        sidebar,
+        view_stack: view_stack.clone(),
+        photos_tab,
+        albums_tab,
+        library_tab,
         grid,
         explore,
         albums,
-        content_stack,
-        error_label,
+        grid_scrolled,
+        active_drill: RefCell::new(None),
         transfer_bar,
         transfer_progress,
         transfer_icon,
         transfer_label,
+        status_button: status_button.clone(),
         search_entry,
         search_mode,
         sort_mode,
@@ -543,7 +607,6 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         timeline_toggle,
         timeline_banner,
         source_mode_suppressed: Cell::new(false),
-        sidebar_suppressed: Cell::new(false),
         back_button: back_button.clone(),
         select_toggle: select_toggle.clone(),
         bulk_bar: bulk_bar.clone(),
@@ -553,7 +616,6 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         album_sync_button: album_sync_button.clone(),
         last_seen_upload_batch: Cell::new(0),
         narrow: narrow_flag.clone(),
-        split: split.clone(),
         drop_overlay: drop_overlay.clone(),
     });
     *ui.grid.context_menu_handler.borrow_mut() = Some(Box::new(clone!(
@@ -569,11 +631,20 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     connect_select_mode(ui.clone(), select_toggle.clone());
     connect_bulk_actions(ui.clone(), bulk_delete, bulk_download, bulk_clear);
 
-    connect_sidebar_handlers(ui.clone());
+    connect_tab_switch(ui.clone());
     connect_controls(ui.clone());
     connect_grid_handlers(ui.clone());
     connect_filters_button(ui.clone(), filters_button);
     connect_drop_target(ui.clone());
+
+    // Header backup/transfer status button -> server stats dialog.
+    ui.status_button.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            server_stats_dialog::present(ui.ctx.clone(), &ui.window);
+        }
+    ));
 
     let close_ctx = ui.ctx.clone();
     window.connect_close_request(move |_| {
@@ -600,6 +671,33 @@ fn bootstrap_window(ui: Rc<LibraryWindowUi>) {
     spawn_server_ping_loop(ui.clone());
     spawn_transfer_poll_loop(ui.clone());
     load_source_page(ui, initial_request, false);
+}
+
+/// Wire the bottom-nav ViewStack: lazily populate Albums/Library on first
+/// visit and refresh the header controls' per-tab search/sort context.
+fn connect_tab_switch(ui: Rc<LibraryWindowUi>) {
+    ui.view_stack.connect_visible_child_notify(clone!(
+        #[strong]
+        ui,
+        move |stack| {
+            let tab = stack.visible_child_name();
+            match tab.as_deref() {
+                Some(shell::TAB_ALBUMS) => {
+                    if ui.albums.populated.get() {
+                        ui.albums_tab.show_content();
+                    } else {
+                        ui.albums_tab.show_loading();
+                        refresh_albums_view(ui.clone());
+                    }
+                }
+                Some(shell::TAB_LIBRARY) => {
+                    load_explore_landing(ui.clone());
+                }
+                _ => {}
+            }
+            controls::sync_tab_controls(&ui);
+        }
+    ));
 }
 
 /// Build a drop overlay widget and wrap `content` in a `gtk::Overlay`.
@@ -902,21 +1000,13 @@ fn refresh_albums_view(ui: Rc<LibraryWindowUi>) {
             Ok(albums) => {
                 let on_click = album_click_handler(ui.clone());
                 populate_albums(&ui.albums, ui.ctx.clone(), albums, on_click);
-                if matches!(
-                    ui.content_stack.visible_child_name().as_deref(),
-                    Some("albums") | Some("loading")
-                ) {
-                    ui.content_stack.set_visible_child_name("albums");
-                }
+                ui.albums_tab.show_content();
             }
             Err(err) => {
                 log::warn!("Albums fetch failed: {}", err);
-                if !ui.albums.populated.get()
-                    && ui.content_stack.visible_child_name().as_deref() == Some("loading")
-                {
-                    ui.error_label
-                        .set_label(&format!("Could not load albums: {}", err));
-                    ui.content_stack.set_visible_child_name("error");
+                if !ui.albums.populated.get() {
+                    ui.albums_tab
+                        .show_error(&format!("Could not load albums: {}", err));
                 }
             }
         }
@@ -924,10 +1014,16 @@ fn refresh_albums_view(ui: Rc<LibraryWindowUi>) {
 }
 
 /// Produce a click callback handler for handling album activation events.
+///
+/// Clicking an album in the Albums tab pushes a drill-in detail grid page
+/// onto the Albums NavigationView (swipe-back), reusing the shared photos
+/// grid + `Album` source flow.
 fn album_click_handler(ui: Rc<LibraryWindowUi>) -> AlbumClick {
     Rc::new(move |id: &str, name: String| {
-        sidebar_dispatch(
+        tab_drill_in(
             ui.clone(),
+            ui.albums_tab.nav.clone(),
+            name.clone(),
             LibrarySource::Album {
                 id: id.to_string(),
                 name,
@@ -1052,7 +1148,7 @@ fn month_year_label(iso: &str) -> String {
     iso.chars().take(7).collect()
 }
 
-/// Retrieve albums from the API and update the side navigation sidebar entries.
+/// Retrieve albums from the API and populate the Albums tab landing view.
 fn load_albums(ui: Rc<LibraryWindowUi>) {
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
@@ -1060,19 +1156,21 @@ fn load_albums(ui: Rc<LibraryWindowUi>) {
         async move {
             match ui.ctx.api_client.fetch_library_albums().await {
                 Ok(albums) => {
-                    ui.ctx.library_state.lock().load_albums(albums);
-                    reload_sidebar(&ui);
+                    ui.ctx.library_state.lock().load_albums(albums.clone());
+                    let on_click = album_click_handler(ui.clone());
+                    populate_albums(&ui.albums, ui.ctx.clone(), albums, on_click);
+                    ui.albums_tab.show_content();
                 }
                 Err(err) => {
-                    // Sidebar-list refresh: never hijack the user's current
-                    // tab with an error page just because the albums list
-                    // couldn't reload. Only surface the error view when the
-                    // user is actively waiting on something.
-                    log::warn!("Albums sidebar refresh failed: {}", err);
-                    if ui.content_stack.visible_child_name().as_deref() == Some("loading") {
-                        ui.error_label
-                            .set_label(&format!("Could not load albums: {}", err));
-                        ui.content_stack.set_visible_child_name("error");
+                    // Background albums refresh: never hijack the Albums tab
+                    // with an error page unless it's still waiting on its
+                    // first load.
+                    log::warn!("Albums refresh failed: {}", err);
+                    if !ui.albums.populated.get()
+                        && ui.albums_tab.visible_child_name().as_deref() == Some("loading")
+                    {
+                        ui.albums_tab
+                            .show_error(&format!("Could not load albums: {}", err));
                     }
                 }
             }
@@ -1109,14 +1207,14 @@ fn load_status(ui: Rc<LibraryWindowUi>) {
 fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     if ui.explore.populated.get() {
         log::debug!("Explore: populated=true, reusing cached widgets");
-        ui.content_stack.set_visible_child_name("explore");
+        ui.library_tab.show_content();
         return;
     }
     ui.explore.populated.set(true);
     let ctx = ui.ctx.clone();
     explore_view::wire_people_filter(&ui.explore, ctx.clone(), || {});
     explore_view::show_loading(&ui.explore);
-    ui.content_stack.set_visible_child_name("explore");
+    ui.library_tab.show_content();
 
     let mctx = glib::MainContext::default();
 
@@ -1139,14 +1237,14 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                     person_ids: Some(vec![id]),
                     ..Default::default()
                 };
-                let request = click_ui.ctx.library_state.lock().switch_source(
+                tab_drill_in(
+                    click_ui.clone(),
+                    click_ui.library_tab.nav.clone(),
+                    name,
                     LibrarySource::AdvancedSearch {
                         filters: Box::new(filters),
                     },
                 );
-                click_ui.search_entry.set_text(&name);
-                apply_timeline_ui_state(&click_ui, &request.1);
-                load_source_page(click_ui.clone(), request, false);
             });
         }
     ));
@@ -1172,16 +1270,17 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                     ctx.clone(),
                     places,
                     move |_kind, value, _asset_id| {
-                        let next = LibrarySource::AdvancedSearch {
-                            filters: Box::new(MetadataSearchFilters {
-                                city: Some(value.clone()),
-                                ..Default::default()
-                            }),
-                        };
-                        let request = click_ui.ctx.library_state.lock().switch_source(next);
-                        click_ui.search_entry.set_text(&value);
-                        apply_timeline_ui_state(&click_ui, &request.1);
-                        load_source_page(click_ui.clone(), request, false);
+                        tab_drill_in(
+                            click_ui.clone(),
+                            click_ui.library_tab.nav.clone(),
+                            value.clone(),
+                            LibrarySource::AdvancedSearch {
+                                filters: Box::new(MetadataSearchFilters {
+                                    city: Some(value),
+                                    ..Default::default()
+                                }),
+                            },
+                        );
                     },
                 );
             }
@@ -1214,13 +1313,12 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
                         open_asset_in_lightbox(click_ui.clone(), asset_id);
                         return;
                     }
-                    let next = LibrarySource::SmartSearch {
-                        query: value.clone(),
-                    };
-                    let request = click_ui.ctx.library_state.lock().switch_source(next);
-                    click_ui.search_entry.set_text(&value);
-                    apply_timeline_ui_state(&click_ui, &request.1);
-                    load_source_page(click_ui.clone(), request, false);
+                    tab_drill_in(
+                        click_ui.clone(),
+                        click_ui.library_tab.nav.clone(),
+                        value.clone(),
+                        LibrarySource::SmartSearch { query: value },
+                    );
                 },
             );
         }
@@ -1288,7 +1386,7 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
         return;
     }
     if !append {
-        ui.content_stack.set_visible_child_name("loading");
+        photos_show_loading(&ui);
     }
     log::debug!("Loading library source {:?} page={}", request.1, request.2);
     glib::MainContext::default().spawn_local(clone!(
@@ -1429,7 +1527,6 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                     // signal handlers triggered by the stack transition
                     // can safely re-acquire library_state.
                     sync_content_state(&ui);
-                    reload_sidebar(&ui);
                     update_timeline_banner_if_active(&ui, &ui.grid.scrolled.vadjustment());
                 }
                 Err(err) => {
@@ -1438,177 +1535,79 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                         state.mark_error(generation, err.clone());
                     }
                     // Lock dropped before GTK calls (same pattern as Ok path).
-                    ui.error_label
-                        .set_label(&format!("Could not load library assets: {}", err));
-                    ui.content_stack.set_visible_child_name("error");
+                    photos_show_error(
+                        &ui,
+                        &format!("Could not load library assets: {}", err),
+                    );
                 }
             }
         }
     ));
 }
 
-fn setup_album_drop_target(
-    ui: &Rc<LibraryWindowUi>,
-    row: &gtk::ListBoxRow,
-    album_id: String,
-    album_name: String,
-) {
-    let row_drop = gtk::DropTarget::new(
-        gtk::gdk::FileList::static_type(),
-        gtk::gdk::DragAction::COPY,
-    );
-    let row_ref_enter = row.clone();
-    row_drop.connect_enter(move |target, _x, _y| {
-        if target.current_drop().is_some_and(|d| d.drag().is_some()) {
-            return gtk::gdk::DragAction::empty();
-        }
-        row_ref_enter.add_css_class("mimick-album-drop-hover");
-        gtk::gdk::DragAction::COPY
-    });
-    let row_ref_leave = row.clone();
-    row_drop.connect_leave(move |_target| {
-        row_ref_leave.remove_css_class("mimick-album-drop-hover");
-    });
-    let row_ref_drop = row.clone();
-    let ui_drop = ui.clone();
-    row_drop.connect_drop(move |target, value, _x, _y| {
-        row_ref_drop.remove_css_class("mimick-album-drop-hover");
-
-        if target.current_drop().is_some_and(|d| d.drag().is_some()) {
-            return false;
-        }
-        let file_list = match value.get::<gtk::gdk::FileList>() {
-            Ok(fl) => fl,
-            Err(_) => return false,
-        };
-        let paths: Vec<std::path::PathBuf> = file_list
-            .files()
-            .iter()
-            .filter_map(|f| f.path())
-            .filter(|p| crate::media_kinds::is_supported_path(p))
-            .collect();
-        if paths.is_empty() {
-            show_unsupported_drop_toast(&ui_drop);
-            return true;
-        }
-        handle_album_drop_upload(&ui_drop, (album_id.clone(), album_name.clone()), paths);
-        true
-    });
-    row.add_controller(row_drop);
-}
-
-fn build_album_sidebar_row(
-    ui: &Rc<LibraryWindowUi>,
-    album: &crate::api_client::LibraryAlbum,
-) -> gtk::ListBoxRow {
-    let subtitle = format!("{} asset(s)", album.asset_count);
-    let action = libadwaita::ActionRow::builder()
-        .title(&album.album_name)
-        .subtitle(&subtitle)
-        .title_lines(1)
-        .subtitle_lines(1)
-        .build();
-    let row = gtk::ListBoxRow::builder()
-        .tooltip_text(format!("{}:{}", album.id, album.album_name))
-        .child(&action)
-        .build();
-
-    // Per-row drop target: dragging files onto an album row uploads
-    // them directly into that album.
-    setup_album_drop_target(ui, &row, album.id.clone(), album.album_name.clone());
-
-    row
-}
-
-/// Repopulate and select the active album or fixed row in the side navigation sidebar.
-fn reload_sidebar(ui: &Rc<LibraryWindowUi>) {
-    while let Some(row) = ui.sidebar.albums_list.first_child() {
-        ui.sidebar.albums_list.remove(&row);
-    }
-
-    let selected_source = ui.ctx.library_state.lock().source.clone();
-    let albums = ui.ctx.library_state.lock().albums.clone();
-    for album in albums {
-        let row = build_album_sidebar_row(ui, &album);
-        ui.sidebar.albums_list.append(&row);
-    }
-
-    match selected_source {
-        LibrarySource::Timeline => {
-            select_fixed_row(&ui.sidebar.fixed_list, "photos");
-            ui.sidebar.albums_list.unselect_all();
-        }
-        LibrarySource::Explore => {
-            select_fixed_row(&ui.sidebar.fixed_list, "explore");
-            ui.sidebar.albums_list.unselect_all();
-        }
-        LibrarySource::Album { id, .. }
-        | LibrarySource::AlbumLocal { id, .. }
-        | LibrarySource::AlbumUnified { id, .. } => {
-            ui.sidebar.fixed_list.unselect_all();
-            ui.sidebar_suppressed.set(true);
-            let mut child = ui.sidebar.albums_list.first_child();
-            while let Some(widget) = child {
-                let next = widget.next_sibling();
-                if let Ok(row) = widget.downcast::<gtk::ListBoxRow>()
-                    && row.tooltip_text().as_deref().is_some_and(|tooltip| {
-                        tooltip.split_once(':').map(|(prefix, _)| prefix) == Some(id.as_str())
-                    })
-                {
-                    ui.sidebar.albums_list.select_row(Some(&row));
-                    ui.sidebar_suppressed.set(false);
-                    break;
-                }
-                child = next;
-            }
-            ui.sidebar_suppressed.set(false);
-        }
-        _ => {
-            ui.sidebar.fixed_list.unselect_all();
-            ui.sidebar.albums_list.unselect_all();
-        }
-    }
-}
-
-/// Helper to select a sidebar row matching a specific string key.
-fn select_fixed_row(list: &gtk::ListBox, key: &str) {
-    let mut child = list.first_child();
-    while let Some(widget) = child {
-        let next = widget.next_sibling();
-        if let Ok(row) = widget.downcast::<gtk::ListBoxRow>()
-            && row.tooltip_text().as_deref() == Some(key)
-        {
-            list.select_row(Some(&row));
-            return;
-        }
-        child = next;
-    }
-}
-
-/// Sync the visibility of the grid, loading, empty, and error page widgets.
+/// Apply the current photos-grid load state to whichever stack owns the
+/// shared grid — the Photos-tab root, or a pushed album/library drill-in.
 ///
 /// The lock on `library_state` is released **before** calling
 /// `set_visible_child_name` because that GTK call triggers widget
 /// realization, factory binds, and signal handlers that may need to
 /// re-acquire the same lock.  Holding it across the call caused a
 /// parking_lot deadlock on first library open.
-fn sync_content_state(ui: &LibraryWindowUi) {
-    let (child_name, error_msg) = {
+fn sync_content_state(ui: &Rc<LibraryWindowUi>) {
+    #[derive(Clone, Copy)]
+    enum Show {
+        Loading,
+        Content,
+        Empty,
+        Error,
+    }
+    let (show, error_msg) = {
         let state = ui.ctx.library_state.lock();
         match &state.load_state {
-            LibraryLoadState::Idle | LibraryLoadState::Loading => ("loading", None),
-            LibraryLoadState::Loaded => ("grid", None),
-            LibraryLoadState::Empty => ("empty", None),
-            LibraryLoadState::Error(msg) => ("error", Some(msg.clone())),
+            LibraryLoadState::Idle | LibraryLoadState::Loading => (Show::Loading, None),
+            LibraryLoadState::Loaded => (Show::Content, None),
+            LibraryLoadState::Empty => (Show::Empty, None),
+            LibraryLoadState::Error(msg) => (Show::Error, Some(msg.clone())),
         }
     };
-    if let Some(msg) = error_msg {
-        ui.error_label.set_label(&msg);
+    match ui.photos_status_target() {
+        PhotosTarget::Root => match show {
+            Show::Loading => ui.photos_tab.show_loading(),
+            Show::Content => ui.photos_tab.show_content(),
+            Show::Empty => ui.photos_tab.show_empty(),
+            Show::Error => ui
+                .photos_tab
+                .show_error(error_msg.as_deref().unwrap_or("Library data unavailable")),
+        },
+        PhotosTarget::Drill(drill) => match show {
+            Show::Loading => drill.show_loading(),
+            Show::Content => drill.show_content(),
+            Show::Empty => drill.show_empty(),
+            Show::Error => {
+                drill.show_error(error_msg.as_deref().unwrap_or("Library data unavailable"))
+            }
+        },
     }
-    ui.content_stack.set_visible_child_name(child_name);
 }
 
-/// Update the status sidebar rows with the current server route and statistics.
+/// Switch the target stack to its loading child.
+fn photos_show_loading(ui: &Rc<LibraryWindowUi>) {
+    match ui.photos_status_target() {
+        PhotosTarget::Root => ui.photos_tab.show_loading(),
+        PhotosTarget::Drill(drill) => drill.show_loading(),
+    }
+}
+
+/// Switch the target stack to its error child with `msg`.
+fn photos_show_error(ui: &Rc<LibraryWindowUi>, msg: &str) {
+    match ui.photos_status_target() {
+        PhotosTarget::Root => ui.photos_tab.show_error(msg),
+        PhotosTarget::Drill(drill) => drill.show_error(msg),
+    }
+}
+
+/// Update the header status button tooltip with the current server route and
+/// statistics (the sidebar footer rows are gone under the bottom-nav shell).
 fn update_footer(ui: &LibraryWindowUi, route: Option<String>) {
     let (stats_text, about_text) = {
         let state = ui.ctx.library_state.lock();
@@ -1634,10 +1633,8 @@ fn update_footer(ui: &LibraryWindowUi, route: Option<String>) {
             _ => "Connected through configured server",
         })
         .unwrap_or("Offline");
-    ui.sidebar.connection_row.set_subtitle(route_subtitle);
-    ui.sidebar
-        .server_row
-        .set_subtitle(&format!("{stats_text} | {about_text}"));
+    ui.status_button
+        .set_tooltip_text(Some(&format!("{route_subtitle} — {stats_text} | {about_text}")));
 }
 
 /// Synchronize the ongoing upload/download progress indicator bar and rate information text.
@@ -1706,7 +1703,7 @@ fn update_transfer_ui(ui: &LibraryWindowUi) {
 /// Construct a styled placeholder view containing an icon, header title, and description text.
 /// Centered Mimick-icon spinner used while library data is fetching. Shares
 /// the `mimick-loader-icon` animation with the lightbox image-load spinner.
-fn build_loading_view() -> gtk::Box {
+pub(super) fn build_loading_view() -> gtk::Box {
     let container = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
@@ -1739,7 +1736,7 @@ fn build_loading_view() -> gtk::Box {
     container
 }
 
-fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
+pub(super) fn build_status_view(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
     let container = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)

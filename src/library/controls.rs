@@ -1,22 +1,24 @@
-//! Header bar button wiring, search, sort, source-mode, timeline, and sidebar/grid handlers.
+//! Header bar button wiring, search, sort, source-mode, timeline, tab-switch, and grid handlers.
 //!
 //! Connects signal handlers for the library header bar controls including
-//! the search entry, sort-mode dropdown, view-source toggle, timeline
-//! scrubber, and sidebar collapse button.
+//! the search entry, sort-mode dropdown, view-source toggle, and timeline
+//! scrubber, plus the bottom-nav tab drill-in that reparents the shared
+//! photos grid into pushed detail pages.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use glib::clone;
 use gtk::prelude::*;
-use libadwaita::prelude::*;
 
 use crate::library::asset_object::AssetObject;
 use crate::library::state::{LibrarySortMode, LibrarySource};
 use crate::settings_window::{build_settings_window_with_parent, show_queue_inspector};
 
+use super::shell;
 use super::{
     LibraryWindowUi, apply_timeline_ui_state, load_albums, load_source_page, load_status,
-    open_lightbox, refresh_albums_view, update_timeline_banner_if_active,
+    open_lightbox, update_timeline_banner_if_active,
 };
 
 pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
@@ -49,21 +51,6 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
         }
     ));
     ui.window.add_action(&action_refresh);
-
-    ui.sidebar.connection_row.connect_activated(clone!(
-        #[strong]
-        ui,
-        move |_| {
-            super::server_stats_dialog::present(ui.ctx.clone(), &ui.window);
-        }
-    ));
-    ui.sidebar.server_row.connect_activated(clone!(
-        #[strong]
-        ui,
-        move |_| {
-            super::server_stats_dialog::present(ui.ctx.clone(), &ui.window);
-        }
-    ));
 
     ui.upload_button.connect_clicked(clone!(
         #[strong]
@@ -123,46 +110,6 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
         }
     ));
     ui.window.add_controller(f5_controller);
-
-    // Rebuild the sort dropdown model when the visible content view changes:
-    // each view has its own sort taxonomy.
-    ui.content_stack.connect_visible_child_notify(clone!(
-        #[strong]
-        ui,
-        move |stack| {
-            let view = stack.visible_child_name();
-            match view.as_deref() {
-                Some("albums") => {
-                    let model = gtk::StringList::new(&["Newest", "Name", "Most assets"]);
-                    ui.sort_mode.set_model(Some(&model));
-                    ui.sort_mode.set_selected(0);
-                    // search_entry is shared across views; clear stale text from
-                    // the previous context before applying it as the album filter.
-                    ui.search_entry.set_placeholder_text(Some("Filter albums"));
-                    ui.search_entry.set_text("");
-                    super::albums_view::set_search_filter(&ui.albums, "");
-                }
-                Some("explore") => {
-                    let model = gtk::StringList::new(&["Default"]);
-                    ui.sort_mode.set_model(Some(&model));
-                    ui.sort_mode.set_selected(0);
-                    ui.search_entry.set_placeholder_text(Some("Filter people"));
-                    ui.search_entry.set_text("");
-                    super::explore_view::set_people_search(&ui.explore, "");
-                }
-                _ => {
-                    let model = gtk::StringList::new(&["Newest", "Filename", "File Type"]);
-                    ui.sort_mode.set_model(Some(&model));
-                    ui.sort_mode.set_selected(0);
-                    ui.search_entry
-                        .set_placeholder_text(Some("Search filenames"));
-                    // Clear list-view filters when leaving Albums/Explore.
-                    super::albums_view::set_search_filter(&ui.albums, "");
-                    super::explore_view::set_people_search(&ui.explore, "");
-                }
-            }
-        }
-    ));
 
     ui.source_mode.connect_selected_notify(clone!(
         #[strong]
@@ -233,21 +180,9 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ui,
         move |entry| {
+            // The search field lives on the Photos tab and drives asset
+            // search. (Albums/Library in-memory filtering is a later stage.)
             let query = entry.text().trim().to_string();
-            // On Albums and Explore pages the search entry filters the
-            // in-memory list rather than hitting the asset-search endpoints.
-            let view = ui.content_stack.visible_child_name();
-            match view.as_deref() {
-                Some("albums") => {
-                    super::albums_view::set_search_filter(&ui.albums, &query);
-                    return;
-                }
-                Some("explore") => {
-                    super::explore_view::set_people_search(&ui.explore, &query);
-                    return;
-                }
-                _ => {}
-            }
             if query.is_empty() {
                 return;
             }
@@ -265,25 +200,6 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
             apply_timeline_ui_state(&ui, &request.1);
             load_source_page(ui.clone(), request, false);
             update_back_button(&ui);
-        }
-    ));
-
-    // Live-filter list views as the user types, without round-tripping the server.
-    ui.search_entry.connect_search_changed(clone!(
-        #[strong]
-        ui,
-        move |entry| {
-            let view = ui.content_stack.visible_child_name();
-            let query = entry.text().to_string();
-            match view.as_deref() {
-                Some("albums") => {
-                    super::albums_view::set_search_filter(&ui.albums, &query);
-                }
-                Some("explore") => {
-                    super::explore_view::set_people_search(&ui.explore, &query);
-                }
-                _ => {}
-            }
         }
     ));
 
@@ -321,19 +237,9 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ui,
         move |dropdown| {
-            // Route sort selection by active view. Albums uses an
-            // album-specific sort taxonomy; Explore intentionally doesn't
-            // sort the people row (curated server order).
-            let view = ui.content_stack.visible_child_name();
-            if view.as_deref() == Some("albums") {
-                let mode = match dropdown.selected() {
-                    1 => super::albums_view::AlbumsSort::Name,
-                    2 => super::albums_view::AlbumsSort::MostAssets,
-                    _ => super::albums_view::AlbumsSort::Newest,
-                };
-                super::albums_view::set_sort_mode(&ui.albums, mode);
-                return;
-            }
+            // The sort dropdown lives on the Photos tab and sorts the asset
+            // grid. (Albums has its own sort taxonomy, applied when that tab
+            // grows its own controls in a later stage.)
             let sort_mode = match dropdown.selected() {
                 1 => LibrarySortMode::Filename,
                 2 => LibrarySortMode::FileType,
@@ -349,19 +255,115 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
     ));
 }
 
+/// Refresh the search/sort context to match the visible tab (called on tab
+/// switch). Stage 1: the shared search/sort controls live on the Photos tab,
+/// so this only resets the placeholder for the Photos context. Albums/Library
+/// filtering wires their own controls in a later stage.
+pub(super) fn sync_tab_controls(ui: &Rc<LibraryWindowUi>) {
+    let tab = ui.view_stack.visible_child_name();
+    if tab.as_deref() == Some(shell::TAB_PHOTOS) {
+        ui.search_entry
+            .set_placeholder_text(Some("Search filenames"));
+    }
+    // Clear any stale in-memory list filters when leaving a landing tab so a
+    // revisit shows the full list.
+    super::albums_view::set_search_filter(&ui.albums, "");
+    super::explore_view::set_people_search(&ui.explore, "");
+}
+
+/// Drill into a filtered/album grid: push a detail page onto `nav`, reparent
+/// the shared photos grid into it, and load `source`. On pop, reparent the
+/// grid back to the Photos tab. Reused by album clicks (Albums tab) and
+/// people/places/things clicks (Library tab).
+pub(super) fn tab_drill_in(
+    ui: Rc<LibraryWindowUi>,
+    nav: libadwaita::NavigationView,
+    title: String,
+    source: LibrarySource,
+) {
+    let drill = shell::DrillPage::new(&title);
+
+    // Move the shared grid scrolled window into the drill page's content slot.
+    shell::unparent_from_slot(&ui.grid_scrolled);
+    drill.content_slot.append(&ui.grid_scrolled);
+    drill.show_loading();
+    *ui.active_drill.borrow_mut() = Some(drill.clone());
+
+    // When this page is popped (swipe-back / header back), return the grid to
+    // the Photos tab and clear the active-drill target.
+    let ui_for_pop = ui.clone();
+    let drill_page = drill.page.clone();
+    let handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
+    let handler_clone = handler.clone();
+    let id = nav.connect_popped(move |nav, page| {
+        if page != &drill_page {
+            return;
+        }
+        // Reparent the grid back onto the Photos tab content.
+        return_grid_to_photos(&ui_for_pop);
+        *ui_for_pop.active_drill.borrow_mut() = None;
+        if let Some(id) = handler_clone.borrow_mut().take() {
+            nav.disconnect(id);
+        }
+    });
+    *handler.borrow_mut() = Some(id);
+
+    nav.push(&drill.page);
+
+    let request = ui.ctx.library_state.lock().navigate_to(source);
+    apply_timeline_ui_state(&ui, &request.1);
+    load_source_page(ui.clone(), request, false);
+    update_back_button(&ui);
+}
+
+/// Return the shared grid scrolled window to the Photos tab's content box.
+fn return_grid_to_photos(ui: &Rc<LibraryWindowUi>) {
+    shell::unparent_from_slot(&ui.grid_scrolled);
+    if let Some(content) = ui
+        .photos_tab
+        .content_slot
+        .first_child()
+        .and_downcast::<gtk::Box>()
+    {
+        // The photos content box: controls, album_link, banner, GRID, bulk,
+        // transfer. Re-insert the grid after the timeline banner (3rd child).
+        insert_grid_into_photos(&content, &ui.grid_scrolled);
+    }
+}
+
+/// Insert the grid scrolled window back into its slot in the photos content
+/// box (after the timeline banner, before the bulk bar).
+fn insert_grid_into_photos(content: &gtk::Box, grid: &gtk::ScrolledWindow) {
+    // The photos content box always has: [controls][album_link][banner]
+    // [<grid slot>][bulk][transfer]. Insert after the 3rd child.
+    let mut anchor = content.first_child();
+    let mut count = 0;
+    while let Some(child) = anchor {
+        count += 1;
+        if count == 3 {
+            content.insert_child_after(grid, Some(&child));
+            return;
+        }
+        anchor = child.next_sibling();
+    }
+    // Fallback: prepend.
+    content.prepend(grid);
+}
+
 pub(super) fn refresh_library_surfaces(ui: Rc<LibraryWindowUi>, include_current_source: bool) {
+    // load_albums repopulates the Albums tab landing on its own schedule.
     load_albums(ui.clone());
     load_status(ui.clone());
 
-    // Clearing `populated` marks the cached explore/albums grids as stale
-    // but, by itself, won't repaint a visible tab. Re-trigger the loader
-    // for whichever grid is currently on-screen so the user sees fresh
-    // content (with spinners) instead of silently-stale tiles.
-    let visible = ui.content_stack.visible_child_name();
+    // Clearing `populated` marks the cached explore grid as stale but, by
+    // itself, won't repaint a visible tab. Re-trigger the loader for whichever
+    // tab is currently on-screen so the user sees fresh content (with
+    // spinners) instead of silently-stale tiles.
+    let tab = ui.view_stack.visible_child_name();
     ui.explore.populated.set(false);
-    match visible.as_deref() {
-        Some("explore") => super::load_explore_landing(ui.clone()),
-        Some("albums") => super::refresh_albums_view(ui.clone()),
+    match tab.as_deref() {
+        Some(shell::TAB_LIBRARY) => super::load_explore_landing(ui.clone()),
+        Some(shell::TAB_ALBUMS) => super::refresh_albums_view(ui.clone()),
         _ => {}
     }
 
@@ -376,72 +378,6 @@ pub(super) fn refresh_library_surfaces(ui: Rc<LibraryWindowUi>, include_current_
 
 pub(super) fn refresh_library_after_mutation(ui: Rc<LibraryWindowUi>, prefer_current_source: bool) {
     refresh_library_surfaces(ui, prefer_current_source);
-}
-
-pub(super) fn connect_sidebar_handlers(ui: Rc<LibraryWindowUi>) {
-    // Photos / Explore (fixed destinations).
-    ui.sidebar.fixed_list.connect_row_selected(clone!(
-        #[strong]
-        ui,
-        move |_, row| {
-            let Some(row) = row else {
-                return;
-            };
-            let key = row.tooltip_text().unwrap_or_default();
-            ui.sidebar.albums_list.unselect_all();
-            match key.as_str() {
-                "photos" => sidebar_dispatch(ui.clone(), LibrarySource::Timeline),
-                "explore" => sidebar_dispatch(ui.clone(), LibrarySource::Explore),
-                "albums" => {
-                    ui.album_link_row.set_visible(false);
-                    if let Some(parent) = ui.album_link_row.parent() {
-                        parent.set_visible(false);
-                    }
-                    // Skip the refetch when the grid is already populated:
-                    // revisits should be instant. The sidebar/grid are kept
-                    // fresh by `load_albums` (mutations, F5) on their own
-                    // schedule. Force refresh still works through the
-                    // window-level refresh action.
-                    if ui.albums.populated.get() {
-                        ui.content_stack.set_visible_child_name("albums");
-                    } else {
-                        ui.content_stack.set_visible_child_name("loading");
-                        refresh_albums_view(ui.clone());
-                    }
-                }
-                _ => {}
-            }
-            auto_hide_sidebar(&ui);
-        }
-    ));
-
-    ui.sidebar.albums_list.connect_row_selected(clone!(
-        #[strong]
-        ui,
-        move |_, row| {
-            if ui.sidebar_suppressed.get() {
-                return;
-            }
-            let Some(row) = row else {
-                return;
-            };
-            let Some(tooltip) = row.tooltip_text() else {
-                return;
-            };
-            let mut parts = tooltip.splitn(2, ':');
-            let id = parts.next().unwrap_or_default().to_string();
-            let name = parts.next().unwrap_or("Album").to_string();
-            ui.sidebar.fixed_list.unselect_all();
-            sidebar_dispatch(ui.clone(), LibrarySource::Album { id, name });
-            auto_hide_sidebar(&ui);
-        }
-    ));
-}
-
-fn auto_hide_sidebar(ui: &Rc<LibraryWindowUi>) {
-    if ui.split.is_collapsed() {
-        ui.split.set_show_sidebar(false);
-    }
 }
 
 pub(super) fn update_back_button(ui: &Rc<LibraryWindowUi>) {
@@ -462,21 +398,6 @@ pub(super) fn navigate_back(ui: Rc<LibraryWindowUi>) -> bool {
     } else {
         false
     }
-}
-
-/// Common path for sidebar selections. Skips redundant dispatches so the
-/// `reload_sidebar` programmatic re-selection doesn't loop into another
-/// fetch -- but only when the content stack is already showing the current
-/// source, since the Albums grid moves the stack without changing source.
-pub(super) fn sidebar_dispatch(ui: Rc<LibraryWindowUi>, source: LibrarySource) {
-    let on_albums_grid = ui.content_stack.visible_child_name().as_deref() == Some("albums");
-    if !on_albums_grid && ui.ctx.library_state.lock().source == source {
-        return;
-    }
-    let request = ui.ctx.library_state.lock().navigate_to(source);
-    apply_timeline_ui_state(&ui, &request.1);
-    load_source_page(ui.clone(), request, false);
-    update_back_button(&ui);
 }
 
 pub(super) fn connect_grid_handlers(ui: Rc<LibraryWindowUi>) {

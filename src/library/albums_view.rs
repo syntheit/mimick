@@ -16,7 +16,12 @@ use crate::app_context::AppContext;
 pub type AlbumClick = Rc<dyn Fn(&str, String)>;
 
 /// Sort modes available for the albums landing page.
+///
+/// TODO(stage-2): `Name`/`MostAssets` are re-wired once the Albums tab grows
+/// its own sort control (the shared header sort dropdown moved to the Photos
+/// tab in the bottom-nav rewrite).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AlbumsSort {
     #[default]
     Newest,
@@ -122,6 +127,9 @@ pub fn set_search_filter(parts: &AlbumsViewParts, query: &str) {
 }
 
 /// Set the current sort mode and re-render.
+///
+/// TODO(stage-2): wired again when the Albums tab gets its own sort control.
+#[allow(dead_code)]
 pub fn set_sort_mode(parts: &AlbumsViewParts, mode: AlbumsSort) {
     parts.sort_mode.set(mode);
     render_albums(parts);
