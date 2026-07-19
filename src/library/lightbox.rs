@@ -10,6 +10,7 @@ use std::rc::Rc;
 use glib::clone;
 use gtk::prelude::*;
 use libadwaita::prelude::*;
+use libadwaita::{CallbackAnimationTarget, TimedAnimation};
 
 use crate::api_client::{ExifInfo, ThumbnailSize};
 use crate::library::asset_object::AssetObject;
@@ -563,7 +564,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
 
     let page = libadwaita::NavigationPage::builder()
         .title("Photo")
-        .can_pop(true)
+        // Disable the AdwNavigationView edge-swipe-back and auto back button so
+        // a horizontal drag navigates prev/next instead of popping the page.
+        // The chrome has its own back button; programmatic `nav.pop()` still
+        // works regardless of `can-pop` (it only gates the gesture/auto-button).
+        .can_pop(false)
         .build();
 
     // Root bottom sheet: content is the black viewer overlay; the sheet is the
@@ -1151,6 +1156,10 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             };
             zoom_level.set(1.0);
             apply_lightbox_zoom(&target, &scrolled_picture, 1.0);
+            // Clear any leftover drag-to-dismiss translation/opacity so the new
+            // photo is centered and fully opaque.
+            pic_stack.set_margin_top(0);
+            pic_stack.set_opacity(1.0);
             pic_stack.set_transition_type(match nav_dir.get() {
                 1 => gtk::StackTransitionType::SlideLeft,
                 -1 => gtk::StackTransitionType::SlideRight,
@@ -1835,24 +1844,62 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
     nav_drag.set_touch_only(false);
     nav_drag.set_propagation_phase(gtk::PropagationPhase::Capture);
     let drag_claimed = Rc::new(Cell::new(false));
+    // Tracks whether the *current* drag is an interactive drag-to-dismiss
+    // (downward-dominant): once set, `drag_update` translates the image with
+    // the finger and `drag_end` decides dismiss-vs-snap-back.
+    let drag_dismissing = Rc::new(Cell::new(false));
+    // Applies a live downward translation + fade to the picture stack.
+    let apply_dismiss_offset = Rc::new(clone!(
+        #[strong]
+        pic_stack,
+        #[strong]
+        scrolled_picture,
+        move |off_y: f64| {
+            let h = scrolled_picture.height().max(1) as f64;
+            let clamped = off_y.max(0.0);
+            pic_stack.set_margin_top(clamped as i32);
+            // Fade toward 0.4 as the image is dragged down; never fully hidden
+            // while still on-screen so the drag reads as interactive.
+            let fade = (clamped / h).min(0.6);
+            pic_stack.set_opacity(1.0 - fade);
+        }
+    ));
+    // Resets the translation/opacity so a freshly loaded photo is centered.
+    let reset_dismiss_offset = Rc::new(clone!(
+        #[strong]
+        pic_stack,
+        move || {
+            pic_stack.set_margin_top(0);
+            pic_stack.set_opacity(1.0);
+        }
+    ));
     nav_drag.connect_drag_update(clone!(
         #[strong]
         zoom_level,
         #[strong]
         drag_claimed,
+        #[strong]
+        drag_dismissing,
+        #[strong]
+        apply_dismiss_offset,
         move |gesture, off_x, off_y| {
             // When zoomed in the pan gesture owns the motion.
             if (zoom_level.get() - 1.0).abs() > 0.01 {
                 return;
             }
-            if drag_claimed.get() {
-                return;
+            if !drag_claimed.get() {
+                // Claim once the motion is clearly a directional swipe so we
+                // pre-empt the NavigationView edge-swipe on horizontal drags.
+                if off_x.abs() > 24.0 || off_y.abs() > 24.0 {
+                    drag_claimed.set(true);
+                    // A downward-dominant drag becomes an interactive dismiss.
+                    drag_dismissing.set(off_y > off_x.abs());
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                }
             }
-            // Claim once the motion is clearly a directional swipe so we
-            // pre-empt the NavigationView edge-swipe on horizontal drags.
-            if off_x.abs() > 24.0 || off_y.abs() > 24.0 {
-                drag_claimed.set(true);
-                gesture.set_state(gtk::EventSequenceState::Claimed);
+            // While dismissing, move the image down with the finger and fade.
+            if drag_dismissing.get() {
+                apply_dismiss_offset(off_y);
             }
         }
     ));
@@ -1869,18 +1916,73 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         zoom_level,
         #[strong]
         drag_claimed,
+        #[strong]
+        drag_dismissing,
+        #[strong]
+        pic_stack,
+        #[strong]
+        scrolled_picture,
+        #[strong]
+        apply_dismiss_offset,
+        #[strong]
+        reset_dismiss_offset,
         move |_, off_x, off_y| {
-            let claimed = drag_claimed.replace(false);
+            let _ = drag_claimed.replace(false);
+            let was_dismissing = drag_dismissing.replace(false);
             if (zoom_level.get() - 1.0).abs() > 0.01 {
                 return;
             }
             const THRESH: f64 = 60.0;
+            const DISMISS_THRESH: f64 = 120.0;
             let ax = off_x.abs();
             let ay = off_y.abs();
+
+            if was_dismissing {
+                // Interactive downward dismiss: past the threshold, continue
+                // the downward fade-out and pop; otherwise snap back to center.
+                let h = scrolled_picture.height().max(1) as f64;
+                if off_y > DISMISS_THRESH {
+                    let target = CallbackAnimationTarget::new(clone!(
+                        #[strong]
+                        apply_dismiss_offset,
+                        move |v| apply_dismiss_offset(v)
+                    ));
+                    let anim =
+                        TimedAnimation::new(&pic_stack, off_y.max(0.0), h, 160, target);
+                    anim.set_easing(libadwaita::Easing::EaseInCubic);
+                    anim.connect_done(clone!(
+                        #[strong]
+                        exit_viewer,
+                        #[strong]
+                        reset_dismiss_offset,
+                        move |_| {
+                            (*exit_viewer)();
+                            reset_dismiss_offset();
+                        }
+                    ));
+                    anim.play();
+                } else {
+                    // Snap back: animate the offset (and thus opacity) to 0.
+                    let target = CallbackAnimationTarget::new(clone!(
+                        #[strong]
+                        apply_dismiss_offset,
+                        move |v| apply_dismiss_offset(v)
+                    ));
+                    let anim = TimedAnimation::new(&pic_stack, off_y.max(0.0), 0.0, 200, target);
+                    anim.set_easing(libadwaita::Easing::EaseOutCubic);
+                    anim.connect_done(clone!(
+                        #[strong]
+                        reset_dismiss_offset,
+                        move |_| reset_dismiss_offset()
+                    ));
+                    anim.play();
+                }
+                return;
+            }
+
             if ax < THRESH && ay < THRESH {
                 return;
             }
-            let _ = claimed;
             if ax > ay {
                 // Horizontal: right drag → prev, left drag → next.
                 if off_x > 0.0 {
@@ -1888,13 +1990,11 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                 } else {
                     (*goto_next)();
                 }
-            } else if off_y > 0.0 {
-                // Downward drag → dismiss.
-                (*exit_viewer)();
-            } else {
+            } else if off_y < 0.0 {
                 // Upward drag → open details sheet.
                 sheet.set_open(true);
             }
+            // Downward drags are handled by the interactive-dismiss branch above.
         }
     ));
     pic_stack.add_controller(nav_drag);
