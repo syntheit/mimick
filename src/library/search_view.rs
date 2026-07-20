@@ -116,6 +116,7 @@ impl QuickLink {
 type SearchSlot = Rc<RefCell<Option<Box<dyn Fn(String)>>>>;
 type QuickLinkSlot = Rc<RefCell<Option<Box<dyn Fn(QuickLink)>>>>;
 type ChipSlot = Rc<RefCell<Option<Box<dyn Fn(SearchChip)>>>>;
+type FilterSlot = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
 /// Widgets and handler slots for the Search tab.
 ///
@@ -131,6 +132,8 @@ pub struct SearchViewParts {
     pub on_quick_link: QuickLinkSlot,
     /// A filter chip was tapped.
     pub on_chip: ChipSlot,
+    /// The leading filter (hamburger) button was tapped.
+    pub on_filter: FilterSlot,
 }
 
 impl SearchViewParts {
@@ -150,6 +153,10 @@ impl SearchViewParts {
     pub fn set_on_chip(&self, f: impl Fn(SearchChip) + 'static) {
         *self.on_chip.borrow_mut() = Some(Box::new(f));
     }
+
+    pub fn set_on_filter(&self, f: impl Fn() + 'static) {
+        *self.on_filter.borrow_mut() = Some(Box::new(f));
+    }
 }
 
 /// Build the Search tab view. Returns the root widget plus unset handler slots.
@@ -157,6 +164,7 @@ pub fn build_search_view() -> SearchViewParts {
     let on_search: SearchSlot = Rc::new(RefCell::new(None));
     let on_quick_link: QuickLinkSlot = Rc::new(RefCell::new(None));
     let on_chip: ChipSlot = Rc::new(RefCell::new(None));
+    let on_filter: FilterSlot = Rc::new(RefCell::new(None));
 
     // Vertical column that scrolls as a whole; the chip row scrolls
     // independently on its own horizontal axis.
@@ -169,14 +177,14 @@ pub fn build_search_view() -> SearchViewParts {
         .margin_end(12)
         .build();
 
-    column.append(&build_search_field(&on_search));
+    column.append(&build_search_field(&on_search, &on_filter));
     column.append(&build_chip_row(&on_chip));
     column.append(&build_empty_state());
     column.append(&build_quick_links_card(&on_quick_link));
 
     let root = gtk::ScrolledWindow::builder()
         .child(&column)
-        .hscrollbar_policy(gtk::PolicyType::Never)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
         .vexpand(true)
         .hexpand(true)
         .build();
@@ -186,27 +194,32 @@ pub fn build_search_view() -> SearchViewParts {
         on_search,
         on_quick_link,
         on_chip,
+        on_filter,
     }
 }
 
 /// Top search field: a filter-config button beside a rounded search entry.
 /// Pressing Enter fires the search slot with the trimmed query.
-fn build_search_field(on_search: &SearchSlot) -> gtk::Widget {
+fn build_search_field(on_search: &SearchSlot, on_filter: &FilterSlot) -> gtk::Widget {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .build();
 
-    // Small filter-config affordance on the left (matches the iOS layout's
-    // leading filter glyph). It re-uses the search slot as a no-op target is
-    // undesirable, so it simply focuses/submits nothing on its own — the
-    // orchestrator can repurpose it later. For now it is a visual peer.
+    // Leading filter-config button (matches the iOS layout's leading glyph).
+    // Fires the filter slot so the orchestrator can open the filter sheet.
     let filter_button = gtk::Button::builder()
         .icon_name("view-more-symbolic")
         .tooltip_text("Search filters")
         .css_classes(["flat"])
         .valign(gtk::Align::Center)
         .build();
+    let filter_slot = on_filter.clone();
+    filter_button.connect_clicked(move |_| {
+        if let Some(cb) = filter_slot.borrow().as_ref() {
+            cb();
+        }
+    });
 
     let entry = gtk::SearchEntry::builder()
         .placeholder_text("Search your photos")

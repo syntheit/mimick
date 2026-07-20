@@ -141,6 +141,8 @@ struct LibraryWindowUi {
     transfer_label: gtk::Label,
     /// Backup/transfer status button in the header (opens server stats).
     status_button: gtk::Button,
+    /// Profile avatar shown in the header menu button.
+    profile_avatar: libadwaita::Avatar,
     search_entry: gtk::SearchEntry,
     search_mode: gtk::DropDown,
     sort_mode: gtk::DropDown,
@@ -520,6 +522,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     // Stage 1: the avatar button opens the existing settings window directly.
     // (Converting settings to a dialog with a real menu is a later stage.)
     let settings_menu = gtk::gio::Menu::new();
+    settings_menu.append(Some("Server statistics"), Some("win.serverstats"));
     settings_menu.append(Some("Settings"), Some("win.settings"));
     settings_menu.append(Some("Refresh"), Some("win.refresh"));
     settings_menu.append(Some("Queue Inspector"), Some("win.queue"));
@@ -527,7 +530,6 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
 
     header.pack_start(&back_button);
     header.pack_end(&profile_button);
-    header.pack_end(&status_button);
     header.pack_end(&upload_button);
 
     // Bottom nav: ViewSwitcherBar, revealed only when narrow.
@@ -639,6 +641,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         transfer_icon,
         transfer_label,
         status_button: status_button.clone(),
+        profile_avatar: profile_avatar.clone(),
         search_entry,
         search_mode,
         sort_mode,
@@ -689,6 +692,18 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
             server_stats_dialog::present(ui.ctx.clone(), &ui.window);
         }
     ));
+
+    // Register win.serverstats action so the profile menu "Server statistics"
+    // item can open the same dialog.
+    let action_serverstats = gtk::gio::SimpleAction::new("serverstats", None);
+    action_serverstats.connect_activate(clone!(
+        #[strong]
+        ui,
+        move |_, _| {
+            server_stats_dialog::present(ui.ctx.clone(), &ui.window);
+        }
+    ));
+    ui.window.add_action(&action_serverstats);
 
     let close_ctx = ui.ctx.clone();
     window.connect_close_request(move |_| {
@@ -822,6 +837,11 @@ fn connect_search(ui: Rc<LibraryWindowUi>) {
     ui.search_view.set_on_chip(move |_chip| {
         filters::present_advanced_filters_dialog(ui_chip.clone());
     });
+
+    let ui_filter = ui.clone();
+    ui.search_view.set_on_filter(move || {
+        filters::present_advanced_filters_dialog(ui_filter.clone());
+    });
 }
 
 /// Wire the Library tab's Favorites / Archived / Trash action cards to
@@ -871,6 +891,29 @@ fn connect_library_actions(ui: Rc<LibraryWindowUi>) {
                     }),
                 },
             );
+        },
+    );
+}
+
+/// Tap a recognized face in the viewer's details drawer → close the viewer and
+/// drill into that person's photos on whichever tab is currently visible.
+pub(super) fn open_person_from_lightbox(ui: Rc<LibraryWindowUi>, person_id: String, name: String) {
+    ui.nav.pop();
+    let nav = match ui.view_stack.visible_child_name().as_deref() {
+        Some(shell::TAB_SEARCH) => ui.search_tab.nav.clone(),
+        Some(shell::TAB_ALBUMS) => ui.albums_tab.nav.clone(),
+        Some(shell::TAB_LIBRARY) => ui.library_tab.nav.clone(),
+        _ => ui.photos_tab.nav.clone(),
+    };
+    tab_drill_in(
+        ui.clone(),
+        nav,
+        name,
+        LibrarySource::AdvancedSearch {
+            filters: Box::new(MetadataSearchFilters {
+                person_ids: Some(vec![person_id]),
+                ..Default::default()
+            }),
         },
     );
 }
@@ -1098,17 +1141,52 @@ fn spawn_transfer_poll_loop(ui: Rc<LibraryWindowUi>) {
     });
 }
 
-/// Fetch current logged-in API user ID and store it in app context.
+/// Fetch current logged-in API user profile and store it in app context.
+///
+/// Sets the user ID in `ctx.current_user_id`, updates the profile avatar
+/// initials (name or email fallback), and lazily fetches the custom profile
+/// image when the server has one.
 fn fetch_current_user(ui: Rc<LibraryWindowUi>) {
     if ui.ctx.current_user_id.lock().is_some() {
         return;
     }
     glib::MainContext::default().spawn_local(async move {
-        match ui.ctx.api_client.fetch_current_user_id().await {
-            Ok(id) => {
-                *ui.ctx.current_user_id.lock() = Some(id);
+        match ui.ctx.api_client.fetch_current_user().await {
+            Ok(user) => {
+                let id = user.id.clone();
+                let profile_image_path = user.profile_image_path.clone();
+
+                // Store the user ID for other code that depends on it.
+                *ui.ctx.current_user_id.lock() = Some(id.clone());
+
+                // Show initials using name, falling back to email.
+                let display = if user.name.is_empty() { &user.email } else { &user.name };
+                if !display.is_empty() {
+                    ui.profile_avatar.set_text(Some(display));
+                    ui.profile_avatar.set_show_initials(true);
+                }
+
+                // If the user has a custom profile image, fetch and apply it.
+                if !profile_image_path.is_empty() {
+                    let avatar = ui.profile_avatar.clone();
+                    let ctx = ui.ctx.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        match ctx.api_client.fetch_profile_image(&id).await {
+                            Ok(bytes) => {
+                                if let Ok(texture) = gtk::gdk::Texture::from_bytes(
+                                    &glib::Bytes::from(&bytes[..]),
+                                ) {
+                                    avatar.set_custom_image(Some(&texture));
+                                }
+                            }
+                            Err(err) => {
+                                log::debug!("Profile image fetch failed (initials shown): {}", err);
+                            }
+                        }
+                    });
+                }
             }
-            Err(err) => log::warn!("Could not fetch current user id: {}", err),
+            Err(err) => log::warn!("Could not fetch current user: {}", err),
         }
     });
 }

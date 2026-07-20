@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use super::errors::{RequestContext, classify_http_issue, classify_network_issue};
 use super::{
-    AssetDetails, ImmichApiClient, LibraryAlbum, LibraryAsset, SortOrder, ThumbnailSize,
-    TransferProgressCallback,
+    AssetDetails, CurrentUser, ImmichApiClient, LibraryAlbum, LibraryAsset, SortOrder,
+    ThumbnailSize, TransferProgressCallback,
 };
 
 impl ImmichApiClient {
@@ -258,6 +258,14 @@ impl ImmichApiClient {
 
     /// Fetch unique user ID of the logged-in API user.
     pub async fn fetch_current_user_id(&self) -> Result<String, String> {
+        self.fetch_current_user().await.map(|u| u.id)
+    }
+
+    /// Fetch profile information for the currently authenticated user.
+    ///
+    /// Returns id, display name, email, and profile image path from
+    /// `GET /api/users/me`. Fields default to empty strings when absent.
+    pub async fn fetch_current_user(&self) -> Result<CurrentUser, String> {
         let base_url = self
             .get_active_url()
             .await
@@ -275,10 +283,55 @@ impl ImmichApiClient {
         {
             Ok(resp) if resp.status().is_success() => {
                 let json: serde_json::Value = resp.json().await.map_err(|err| err.to_string())?;
-                json.get("id")
+                let id = json
+                    .get("id")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
-                    .ok_or_else(|| "Missing id in /users/me response".to_string())
+                    .ok_or_else(|| "Missing id in /users/me response".to_string())?;
+                let name = json
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let email = json
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let profile_image_path = json
+                    .get("profileImagePath")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(CurrentUser { id, name, email, profile_image_path })
+            }
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    /// Fetch the raw bytes of a user's profile image.
+    ///
+    /// Returns an error if the server responds with a non-2xx status (e.g.
+    /// HTTP 404 when the user has no custom profile image set).
+    pub async fn fetch_profile_image(&self, user_id: &str) -> Result<Vec<u8>, String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/users/{}/profile-image", base_url, user_id);
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let bytes = resp.bytes().await.map_err(|err| err.to_string())?;
+                Ok(bytes.to_vec())
             }
             Ok(resp) => Err(format!("HTTP {}", resp.status())),
             Err(err) => Err(err.to_string()),

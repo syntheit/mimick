@@ -1991,7 +1991,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                             .halign(gtk::Align::Center)
                             .build();
                         let avatar = libadwaita::Avatar::new(
-                            48,
+                            64,
                             (!person.name.is_empty()).then_some(person.name.as_str()),
                             true,
                         );
@@ -2000,13 +2000,32 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                             let name_label = gtk::Label::builder()
                                 .label(&person.name)
                                 .ellipsize(gtk::pango::EllipsizeMode::End)
-                                .max_width_chars(8)
+                                .max_width_chars(10)
                                 .halign(gtk::Align::Center)
                                 .css_classes(["caption"])
                                 .build();
                             tile.append(&name_label);
                         }
-                        details_people_row.append(&tile);
+                        // Tapping a face opens that person's photo collection.
+                        let face_button = gtk::Button::builder()
+                            .child(&tile)
+                            .css_classes(["flat"])
+                            .build();
+                        let ui_face = ui_async.clone();
+                        let face_id = person.id.clone();
+                        let face_name = if person.name.is_empty() {
+                            "Person".to_string()
+                        } else {
+                            person.name.clone()
+                        };
+                        face_button.connect_clicked(move |_| {
+                            super::open_person_from_lightbox(
+                                ui_face.clone(),
+                                face_id.clone(),
+                                face_name.clone(),
+                            );
+                        });
+                        details_people_row.append(&face_button);
 
                         // Lazily fetch the real face thumbnail; drop the result
                         // if the user navigated away in the meantime.

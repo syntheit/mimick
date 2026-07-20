@@ -405,6 +405,7 @@ impl ImmichApiClient {
             if !obj.contains_key("visibility")
                 && !obj.contains_key("isArchived")
                 && !obj.contains_key("withDeleted")
+                && !obj.contains_key("isTrashed")
             {
                 obj.insert(
                     "visibility".into(),

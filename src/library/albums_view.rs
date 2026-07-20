@@ -167,7 +167,15 @@ pub fn build_albums_view() -> AlbumsViewParts {
     chip_row.append(&chip_all);
     chip_row.append(&chip_shared);
     chip_row.append(&chip_owned);
-    outer.append(&chip_row);
+    // Wrap in a horizontal scroller so the chips can overflow without forcing
+    // the whole page wide — mirrors the pattern in search_view::build_chip_row.
+    let chip_scroller = gtk::ScrolledWindow::builder()
+        .child(&chip_row)
+        .hscrollbar_policy(gtk::PolicyType::External)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .build();
+    outer.append(&chip_scroller);
 
     // --- Controls row: sort (left) + view toggle (right) ----------------
     let controls_row = gtk::Box::builder()
@@ -222,8 +230,9 @@ pub fn build_albums_view() -> AlbumsViewParts {
 
     let root = gtk::ScrolledWindow::builder()
         .child(&outer)
-        .hscrollbar_policy(gtk::PolicyType::Never)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
         .vexpand(true)
+        .hexpand(true)
         .build();
 
     let parts = AlbumsViewParts {

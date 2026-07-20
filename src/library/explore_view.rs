@@ -89,7 +89,7 @@ pub fn build_explore_view() -> ExploreViewParts {
 
     let root = gtk::ScrolledWindow::builder()
         .child(&outer)
-        .hscrollbar_policy(gtk::PolicyType::Never)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
         .vexpand(true)
         .hexpand(true)
         .build();

@@ -289,6 +289,18 @@ pub struct ServerAbout {
     pub version: String,
 }
 
+/// Basic profile information for the currently authenticated Immich user.
+pub struct CurrentUser {
+    /// Unique user identifier.
+    pub id: String,
+    /// Display name (may be empty if not set on the server).
+    pub name: String,
+    /// Email address.
+    pub email: String,
+    /// Server-relative path to the profile image, empty when none is set.
+    pub profile_image_path: String,
+}
+
 /// Per-user usage row from `/api/server/statistics`.
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
