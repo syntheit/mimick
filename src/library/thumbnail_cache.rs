@@ -375,7 +375,19 @@ impl ThumbnailCache {
     where
         F: Fn() -> bool,
     {
-        let key = cache_key(asset_id, ThumbnailSize::Thumbnail);
+        // MUST match the key the paint/read side resolves. The grid looks local
+        // thumbnails up via `get_cached`/`peek_cached`, which go through
+        // `mem_cache_key(asset_id, Thumbnail, grid_decode_dim(Thumbnail))`
+        // ("thumbnail:<id>@256"). Inserting under the bare `cache_key`
+        // ("thumbnail:<id>") — as this path did before — meant the decode
+        // succeeded but the grid never found the texture, so local screenshots
+        // rendered as blank placeholder tiles even though the lightbox (which
+        // decodes the local file directly) opened them fine.
+        let key = mem_cache_key(
+            asset_id,
+            ThumbnailSize::Thumbnail,
+            grid_decode_dim(ThumbnailSize::Thumbnail),
+        );
         if let Some(texture) = self.memory.lock().get(&key) {
             return Ok(texture);
         }
@@ -434,27 +446,40 @@ impl ThumbnailCache {
         let decode_started = std::time::Instant::now();
         let path = path.to_path_buf();
         let log_path = path.clone();
+        let log_asset_id = asset_id.to_string();
         let cache_dir = self.cache_dir.clone();
         let texture = tokio::task::spawn_blocking(move || -> Result<Texture, String> {
             let pixbuf = decode_local_pixbuf(&path)?;
             std::fs::create_dir_all(&cache_dir).map_err(|err| err.to_string())?;
             let encoded = pixbuf_png_bytes(&pixbuf)?;
             std::fs::write(&cache_file, encoded).map_err(|err| err.to_string())?;
-            let format = if pixbuf.has_alpha() {
-                gdk4::MemoryFormat::R8g8b8a8
-            } else {
-                gdk4::MemoryFormat::R8g8b8
-            };
-            let bytes = pixbuf.read_pixel_bytes();
-            let mem_tex = gdk4::MemoryTexture::new(
+            // Diagnostic (a): decode result — dims, alpha, and buffer sizing so
+            // we can confirm the pixbuf itself is well-formed (not a 1x1/blank).
+            let expected_len =
+                pixbuf.rowstride() as usize * pixbuf.height().max(0) as usize;
+            log::warn!(
+                "local-thumb decode id={} dims={}x{} alpha={} pixels={} rowstride*h={}",
+                log_asset_id,
                 pixbuf.width(),
                 pixbuf.height(),
-                format,
-                &bytes,
-                pixbuf.rowstride() as usize,
+                pixbuf.has_alpha(),
+                pixbuf.read_pixel_bytes().len(),
+                expected_len,
             );
-            use gtk::prelude::Cast;
-            Ok(mem_tex.upcast::<Texture>())
+            // Load the texture back from the PNG we just wrote instead of
+            // hand-constructing a MemoryTexture. This makes the fresh-decode
+            // path and the disk-hit path (Texture::from_filename above) produce
+            // byte-identical textures and sidesteps any pixbuf rowstride /
+            // premultiply mismatch in MemoryTexture construction.
+            let texture = Texture::from_filename(&cache_file).map_err(|err| err.to_string())?;
+            // Diagnostic (b): final texture dims after the from_filename load.
+            log::warn!(
+                "local-thumb texture id={} tex={}x{} (from cache file)",
+                log_asset_id,
+                texture.width(),
+                texture.height(),
+            );
+            Ok(texture)
         })
         .await
         .map_err(|err| err.to_string())??;

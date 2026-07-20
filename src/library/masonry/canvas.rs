@@ -390,6 +390,21 @@ mod imp {
                 }
                 PaintResult::Hit
             } else {
+                // Diagnostic (d): a LOCAL tile that has no cached texture yet is
+                // NOT in flight (pending) and has NOT permanently failed is the
+                // exact signature of the "decoded but paint can't find it" cache
+                // key mismatch. Gate on !pending && !failed so this fires at most
+                // in that steady state instead of every frame while loading.
+                if !local_path.is_empty()
+                    && asset_id.starts_with(crate::library::LOCAL_ID_PREFIX)
+                    && !self.pending.borrow().contains(&asset_id)
+                    && !self.failed.borrow().contains(&asset_id)
+                {
+                    log::warn!(
+                        "masonry paint MISS (local, not pending/failed) id={}",
+                        asset_id
+                    );
+                }
                 snapshot.append_color(&sctx.placeholder, &rect);
                 PaintResult::Miss
             };
@@ -854,12 +869,24 @@ fn finish_masonry_load(
     let imp = widget.imp();
     let dims_changed = match &result {
         Ok(tex) => {
-            log::trace!(
-                "masonry load OK id={} dims=({}x{})",
-                asset_id,
-                tex.width(),
-                tex.height(),
-            );
+            // Diagnostic (c): bump LOCAL-asset success to warn! so a single
+            // default-level deploy shows that the decode landed and produced a
+            // valid texture (the counterpart to the paint-side miss log below).
+            if asset_id.starts_with(crate::library::LOCAL_ID_PREFIX) {
+                log::warn!(
+                    "masonry local load OK id={} dims=({}x{})",
+                    asset_id,
+                    tex.width(),
+                    tex.height(),
+                );
+            } else {
+                log::trace!(
+                    "masonry load OK id={} dims=({}x{})",
+                    asset_id,
+                    tex.width(),
+                    tex.height(),
+                );
+            }
             propagate_dimensions(model, asset_id, tex)
         }
         Err(e) => {
