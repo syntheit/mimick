@@ -13,7 +13,8 @@ use libadwaita::prelude::*;
 use crate::api_client::MetadataSearchFilters;
 use crate::library::state::LibrarySource;
 
-use super::{LibraryWindowUi, load_source_page};
+use super::LibraryWindowUi;
+use super::controls::tab_drill_in;
 
 pub(super) fn connect_filters_button(ui: Rc<LibraryWindowUi>, filters_button: gtk::Button) {
     filters_button.connect_clicked(clone!(
@@ -25,7 +26,7 @@ pub(super) fn connect_filters_button(ui: Rc<LibraryWindowUi>, filters_button: gt
     ));
 }
 
-fn present_advanced_filters_dialog(ui: Rc<LibraryWindowUi>) {
+pub(super) fn present_advanced_filters_dialog(ui: Rc<LibraryWindowUi>) {
     let dialog = libadwaita::Dialog::builder()
         .title("Advanced Filters")
         .content_width(520)
@@ -228,19 +229,23 @@ fn present_advanced_filters_dialog(ui: Rc<LibraryWindowUi>) {
                 is_not_in_album: opt_true(not_in_album_row.is_active()),
                 with_exif: None,
                 with_deleted: None,
+                is_trashed: None,
                 person_ids: None,
                 tag_ids: None,
                 order: None,
             };
-            let request =
-                ui.ctx
-                    .library_state
-                    .lock()
-                    .switch_source(LibrarySource::AdvancedSearch {
-                        filters: Box::new(filters),
-                    });
             dialog.close();
-            load_source_page(ui.clone(), request, false);
+            // Drill into the filtered results on the Search tab (the only
+            // surface this dialog is reachable from), so results are actually
+            // visible instead of loading into the hidden Photos grid.
+            tab_drill_in(
+                ui.clone(),
+                ui.search_tab.nav.clone(),
+                "Filtered".to_string(),
+                LibrarySource::AdvancedSearch {
+                    filters: Box::new(filters),
+                },
+            );
         }
     ));
 

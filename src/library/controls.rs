@@ -70,7 +70,7 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ui,
         move |_| {
-            navigate_back(ui.clone());
+            go_back(&ui);
         }
     ));
 
@@ -81,7 +81,7 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
             #[strong]
             ui,
             move |_, _| {
-                if navigate_back(ui.clone()) {
+                if go_back(&ui) {
                     glib::Propagation::Stop
                 } else {
                     glib::Propagation::Proceed
@@ -283,14 +283,26 @@ pub(super) fn tab_drill_in(
 ) {
     let drill = shell::DrillPage::new(&title);
 
+    // Snapshot the source in effect before drilling. Popping the drill (via
+    // swipe-back, the header back button, or a tab switch) restores it so the
+    // drill's filter never leaks onto the Photos tab — the shared grid/source
+    // is one object, so this is what keeps the two views decoupled in practice.
+    let prev_source = ui.ctx.library_state.lock().source.clone();
+    *ui.pre_drill_source.borrow_mut() = Some(prev_source);
+
     // Move the shared grid scrolled window into the drill page's content slot.
     shell::unparent_from_slot(&ui.grid_scrolled);
     drill.content_slot.append(&ui.grid_scrolled);
     drill.show_loading();
     *ui.active_drill.borrow_mut() = Some(drill.clone());
+    *ui.active_drill_nav.borrow_mut() = Some(nav.clone());
 
-    // When this page is popped (swipe-back / header back), return the grid to
-    // the Photos tab and clear the active-drill target.
+    // The drill name becomes the main header title + reveals the top back
+    // button (the drill page itself carries no header, so there's just one).
+    enter_drill_header(&ui, &title);
+
+    // When this page is popped, return the grid, restore the source, and reset
+    // the header.
     let ui_for_pop = ui.clone();
     let drill_page = drill.page.clone();
     let handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
@@ -299,9 +311,7 @@ pub(super) fn tab_drill_in(
         if page != &drill_page {
             return;
         }
-        // Reparent the grid back onto the Photos tab content.
-        return_grid_to_photos(&ui_for_pop);
-        *ui_for_pop.active_drill.borrow_mut() = None;
+        finish_drill_pop(&ui_for_pop);
         if let Some(id) = handler_clone.borrow_mut().take() {
             nav.disconnect(id);
         }
@@ -310,10 +320,55 @@ pub(super) fn tab_drill_in(
 
     nav.push(&drill.page);
 
-    let request = ui.ctx.library_state.lock().navigate_to(source);
+    // switch_source (not navigate_to): the drill is popped via the nav stack /
+    // pre_drill_source, so we don't want it polluting the source back-history.
+    let request = ui.ctx.library_state.lock().switch_source(source);
     apply_timeline_ui_state(&ui, &request.1);
     load_source_page(ui.clone(), request, false);
-    update_back_button(&ui);
+}
+
+/// Tear down the active drill: return the shared grid to the Photos tab,
+/// restore the pre-drill source, and reset the header. Runs on every pop
+/// (swipe-back, header back, or tab-switch collapse).
+fn finish_drill_pop(ui: &Rc<LibraryWindowUi>) {
+    return_grid_to_photos(ui);
+    *ui.active_drill.borrow_mut() = None;
+    *ui.active_drill_nav.borrow_mut() = None;
+    exit_drill_header(ui);
+
+    let prev = ui.pre_drill_source.borrow_mut().take();
+    if let Some(source) = prev {
+        let request = ui.ctx.library_state.lock().switch_source(source);
+        apply_timeline_ui_state(ui, &request.1);
+        load_source_page(ui.clone(), request, false);
+    }
+}
+
+/// Show the drill name as the header title and reveal the top back button.
+pub(super) fn enter_drill_header(ui: &Rc<LibraryWindowUi>, title: &str) {
+    ui.drill_title.set_label(title);
+    ui.header.set_title_widget(Some(&ui.drill_title));
+    ui.back_button.set_visible(true);
+    ui.back_button.set_sensitive(true);
+}
+
+/// Restore the tab switcher as the header title and hide the back button.
+pub(super) fn exit_drill_header(ui: &Rc<LibraryWindowUi>) {
+    ui.header.set_title_widget(Some(&ui.header_switcher));
+    ui.back_button.set_visible(false);
+}
+
+/// Back action for the header button / Alt+Left: pop the active drill if there
+/// is one, else fall back to source-history navigation. Returns true if it
+/// consumed the action.
+pub(super) fn go_back(ui: &Rc<LibraryWindowUi>) -> bool {
+    let drill_nav = ui.active_drill_nav.borrow().clone();
+    if let Some(nav) = drill_nav {
+        nav.pop();
+        true
+    } else {
+        navigate_back(ui.clone())
+    }
 }
 
 /// Return the shared grid scrolled window to the Photos tab's stable grid host.
@@ -353,6 +408,11 @@ pub(super) fn refresh_library_after_mutation(ui: Rc<LibraryWindowUi>, prefer_cur
 }
 
 pub(super) fn update_back_button(ui: &Rc<LibraryWindowUi>) {
+    // While drilled the back button is visible + managed by
+    // enter/exit_drill_header; don't let source-history state grey it out.
+    if ui.active_drill_nav.borrow().is_some() {
+        return;
+    }
     let can_go_back = ui.ctx.library_state.lock().can_go_back();
     ui.back_button.set_sensitive(can_go_back);
 }

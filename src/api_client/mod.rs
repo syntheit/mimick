@@ -246,6 +246,10 @@ pub struct MetadataSearchFilters {
     /// True to also return deleted assets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_deleted: Option<bool>,
+    /// True to return ONLY trashed assets (the Trash collection). Distinct from
+    /// `with_deleted`, which merely includes deleted assets alongside live ones.
+    #[serde(rename = "isTrashed", skip_serializing_if = "Option::is_none")]
+    pub is_trashed: Option<bool>,
     /// List of person identifiers to match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub person_ids: Option<Vec<String>>,

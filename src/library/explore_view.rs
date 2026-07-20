@@ -17,6 +17,7 @@ use crate::app_context::AppContext;
 
 type ExploreClick = Rc<dyn Fn(&str, String, String)>;
 type PersonClick = Rc<dyn Fn(String, String)>;
+type LibraryAction = Rc<dyn Fn()>;
 
 const INITIAL_TILE_COUNT: usize = 16;
 const RECENTS_EXPANDED_COUNT: usize = 30;
@@ -44,6 +45,9 @@ pub struct ExploreViewParts {
     cached_places_click: Rc<RefCell<Option<ExploreClick>>>,
     pub search_query: Rc<RefCell<String>>,
     cached_ctx: Rc<RefCell<Option<Arc<AppContext>>>>,
+    on_favorites: Rc<RefCell<Option<LibraryAction>>>,
+    on_archived: Rc<RefCell<Option<LibraryAction>>>,
+    on_trash: Rc<RefCell<Option<LibraryAction>>>,
 }
 
 /// Construct the hierarchical panels and containers for the explore dashboard view.
@@ -57,11 +61,27 @@ pub fn build_explore_view() -> ExploreViewParts {
         .margin_end(16)
         .build();
 
+    // Callback slots for the quick-collection action cards. The orchestrator
+    // registers these via `wire_library_actions` after the view is built.
+    let on_favorites: Rc<RefCell<Option<LibraryAction>>> = Rc::new(RefCell::new(None));
+    let on_archived: Rc<RefCell<Option<LibraryAction>>> = Rc::new(RefCell::new(None));
+    let on_trash: Rc<RefCell<Option<LibraryAction>>> = Rc::new(RefCell::new(None));
+
+    // Immich-iOS-style quick-collection grid at the very top. Renders
+    // immediately (no async data). Shared Links is deferred (no API), so the
+    // grid carries Favorites, Archived, Trash only.
+    let library_actions = build_library_actions(
+        on_favorites.clone(),
+        on_archived.clone(),
+        on_trash.clone(),
+    );
+
     let (people_section, people_row, people_spinner, people_filter_button) = build_people_section();
     let (recents_section, recents_grid, recents_spinner) = build_tile_section("Recently Added");
     let (places_section, places_grid, places_spinner) = build_tile_section("Places");
     let (things_section, things_grid, things_spinner) = build_tile_section("Things");
 
+    outer.append(&library_actions);
     outer.append(&people_section);
     outer.append(&places_section);
     outer.append(&recents_section);
@@ -96,7 +116,106 @@ pub fn build_explore_view() -> ExploreViewParts {
         cached_places_click: Rc::new(RefCell::new(None)),
         search_query: Rc::new(RefCell::new(String::new())),
         cached_ctx: Rc::new(RefCell::new(None)),
+        on_favorites,
+        on_archived,
+        on_trash,
     }
+}
+
+/// Build the top-of-page quick-collection grid (Favorites / Archived / Trash),
+/// mirroring Immich iOS's Library landing header. Two cards per row, each a
+/// rounded card with an icon left of its label. Shared Links is deferred.
+///
+/// Each card invokes its matching slot on click, if registered.
+fn build_library_actions(
+    on_favorites: Rc<RefCell<Option<LibraryAction>>>,
+    on_archived: Rc<RefCell<Option<LibraryAction>>>,
+    on_trash: Rc<RefCell<Option<LibraryAction>>>,
+) -> gtk::FlowBox {
+    let grid = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .row_spacing(8)
+        .column_spacing(8)
+        .min_children_per_line(2)
+        .max_children_per_line(2)
+        .homogeneous(true)
+        .build();
+
+    grid.append(&library_action_card(
+        "emblem-favorite-symbolic",
+        "Favorites",
+        on_favorites,
+    ));
+    grid.append(&library_action_card(
+        "folder-symbolic",
+        "Archived",
+        on_archived,
+    ));
+    grid.append(&library_action_card(
+        "user-trash-symbolic",
+        "Trash",
+        on_trash,
+    ));
+
+    grid
+}
+
+/// Build a single rounded quick-collection card: icon left of a label, styled
+/// with Adwaita's built-in `card` class so it reads as a tappable pill.
+fn library_action_card(
+    icon_name: &str,
+    label_text: &str,
+    slot: Rc<RefCell<Option<LibraryAction>>>,
+) -> gtk::Button {
+    let icon = gtk::Image::builder()
+        .icon_name(icon_name)
+        .pixel_size(20)
+        .build();
+    let label = gtk::Label::builder()
+        .label(label_text)
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .build();
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .margin_top(14)
+        .margin_bottom(14)
+        .margin_start(16)
+        .margin_end(16)
+        .build();
+    content.append(&icon);
+    content.append(&label);
+
+    let button = gtk::Button::builder()
+        .child(&content)
+        .css_classes(["card"])
+        .hexpand(true)
+        .build();
+
+    button.connect_clicked(move |_| {
+        if let Some(cb) = slot.borrow().clone() {
+            cb();
+        }
+    });
+    button
+}
+
+/// Register the drill-in callbacks for the quick-collection action cards.
+///
+/// Stores each closure in its shared slot; the corresponding card invokes it on
+/// click. Calling again replaces the previous handler. Safe to call after the
+/// view is built and mounted.
+pub fn wire_library_actions(
+    parts: &ExploreViewParts,
+    on_favorites: impl Fn() + 'static,
+    on_archived: impl Fn() + 'static,
+    on_trash: impl Fn() + 'static,
+) {
+    *parts.on_favorites.borrow_mut() = Some(Rc::new(on_favorites));
+    *parts.on_archived.borrow_mut() = Some(Rc::new(on_archived));
+    *parts.on_trash.borrow_mut() = Some(Rc::new(on_trash));
 }
 
 /// Reveal each section with its spinner active, so the user gets immediate
@@ -368,6 +487,9 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         cached_places_click: parts.cached_places_click.clone(),
         search_query: parts.search_query.clone(),
         cached_ctx: parts.cached_ctx.clone(),
+        on_favorites: parts.on_favorites.clone(),
+        on_archived: parts.on_archived.clone(),
+        on_trash: parts.on_trash.clone(),
     }
 }
 

@@ -175,12 +175,13 @@ impl DrillPage {
         stack.add_named(&content_slot, Some("content"));
         stack.set_visible_child_name("loading");
 
-        let toolbar = libadwaita::ToolbarView::builder().build();
-        toolbar.add_top_bar(&libadwaita::HeaderBar::new());
-        toolbar.set_content(Some(&stack));
-
+        // No per-page HeaderBar: the drill title + back button live on the
+        // main window header (set via enter_drill_header on push). A local
+        // header here would render a redundant second back button below the
+        // main one. Swipe-back still works — AdwNavigationView drives it
+        // regardless of whether the page carries its own header.
         let page = libadwaita::NavigationPage::builder()
-            .child(&toolbar)
+            .child(&stack)
             .title(title)
             .build();
 

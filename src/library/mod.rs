@@ -59,6 +59,7 @@ mod controls;
 mod download;
 mod filters;
 mod lightbox;
+mod search_view;
 mod server_stats_dialog;
 mod shell;
 pub mod staging_view;
@@ -100,14 +101,23 @@ struct LibraryWindowUi {
     nav: libadwaita::NavigationView,
     /// Top-level bottom-nav tab container.
     view_stack: libadwaita::ViewStack,
+    /// Main window header — its title widget swaps between the tab
+    /// `header_switcher` (root) and the `drill_title` label (drilled in).
+    header: libadwaita::HeaderBar,
+    header_switcher: libadwaita::ViewSwitcher,
+    /// Shown as the header title while a drill-in page is active (person /
+    /// album / filtered-collection name).
+    drill_title: gtk::Label,
     /// Per-tab navigation views (own their drill-in stack). The Search tab's
     /// nav lives in `view_stack`; it needs no separate handle in Stage 1.
     photos_tab: TabView,
+    search_tab: TabView,
     albums_tab: TabView,
     library_tab: TabView,
     grid: GridViewParts,
     explore: ExploreViewParts,
     albums: AlbumsViewParts,
+    search_view: search_view::SearchViewParts,
     /// The scrolled window hosting the shared photos grid canvas; re-parented
     /// between the Photos tab and drill-in detail pages.
     grid_scrolled: gtk::ScrolledWindow,
@@ -119,6 +129,12 @@ struct LibraryWindowUi {
     /// (`load_source_page`/`sync_content_state`). `None` = the Photos tab
     /// root; `Some` = a pushed drill-in page.
     active_drill: RefCell<Option<shell::DrillPage>>,
+    /// The NavigationView that owns the active drill page, so a tab switch or
+    /// the header back button can pop it. `None` when no drill is active.
+    active_drill_nav: RefCell<Option<libadwaita::NavigationView>>,
+    /// The library source in effect before the active drill was pushed, so
+    /// popping the drill restores it instead of leaking the drill's filter.
+    pre_drill_source: RefCell<Option<crate::library::state::LibrarySource>>,
     transfer_bar: gtk::Box,
     transfer_progress: gtk::ProgressBar,
     transfer_icon: gtk::Image,
@@ -186,9 +202,15 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .build();
     let back_button = gtk::Button::builder()
         .icon_name("go-previous-symbolic")
-        .tooltip_text("Back (Alt+Left)")
-        .sensitive(false)
+        .tooltip_text("Back")
+        .visible(false)
         .css_classes(["mimick-pressable"])
+        .build();
+    // Header title shown while drilled into a person/album/collection.
+    let drill_title = gtk::Label::builder()
+        .css_classes(["title-4"])
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .single_line_mode(true)
         .build();
     let select_toggle = gtk::ToggleButton::builder()
         .icon_name("checkbox-symbolic")
@@ -433,14 +455,10 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     library_tab.set_content_child(&explore.root);
     library_tab.show_content();
 
-    // Search tab: Stage-1 minimal — a status-page placeholder. Metadata search
-    // continues to route through the Photos tab's search entry.
-    let search_placeholder = libadwaita::StatusPage::builder()
-        .icon_name("system-search-symbolic")
-        .title("Search")
-        .description("Use the search field in Photos to find assets. A dedicated search experience lands in a later stage.")
-        .build();
-    search_tab.set_content_child(&search_placeholder);
+    // Search tab: field + filter chips + quick links (Immich-mobile style).
+    // Callbacks are wired in `connect_search` after `ui` exists.
+    let search_view = search_view::build_search_view();
+    search_tab.set_content_child(&search_view.root);
     search_tab.show_content();
 
     // The bottom-nav ViewStack with the four pages.
@@ -600,15 +618,22 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         window: window.clone(),
         nav: nav.clone(),
         view_stack: view_stack.clone(),
+        header: header.clone(),
+        header_switcher: header_switcher.clone(),
+        drill_title: drill_title.clone(),
         photos_tab,
+        search_tab,
         albums_tab,
         library_tab,
         grid,
         explore,
         albums,
+        search_view,
         grid_scrolled,
         grid_host,
         active_drill: RefCell::new(None),
+        active_drill_nav: RefCell::new(None),
+        pre_drill_source: RefCell::new(None),
         transfer_bar,
         transfer_progress,
         transfer_icon,
@@ -653,6 +678,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     connect_grid_handlers(ui.clone());
     connect_filters_button(ui.clone(), filters_button);
     connect_drop_target(ui.clone());
+    connect_search(ui.clone());
+    connect_library_actions(ui.clone());
 
     // Header backup/transfer status button -> server stats dialog.
     ui.status_button.connect_clicked(clone!(
@@ -697,6 +724,14 @@ fn connect_tab_switch(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ui,
         move |stack| {
+            // Collapse any active drill when leaving its tab: pop it so the
+            // shared grid returns to the Photos host and its source is
+            // restored (finish_drill_pop), instead of stranding the grid in a
+            // now-hidden tab or leaking its filter onto Photos.
+            let drill_nav = ui.active_drill_nav.borrow().clone();
+            if let Some(nav) = drill_nav {
+                nav.pop();
+            }
             let tab = stack.visible_child_name();
             match tab.as_deref() {
                 Some(shell::TAB_ALBUMS) => {
@@ -715,6 +750,129 @@ fn connect_tab_switch(ui: Rc<LibraryWindowUi>) {
             controls::sync_tab_controls(&ui);
         }
     ));
+}
+
+/// Wire the Search tab: submit query (smart search), quick-links (Recently
+/// taken/added, Videos, Favorites), and filter chips. Each drills into a
+/// filtered results grid on the Search tab's own NavigationView.
+fn connect_search(ui: Rc<LibraryWindowUi>) {
+    use crate::api_client::SortOrder;
+    use search_view::QuickLink;
+
+    let ui_search = ui.clone();
+    ui.search_view.set_on_search(move |query| {
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        tab_drill_in(
+            ui_search.clone(),
+            ui_search.search_tab.nav.clone(),
+            query.clone(),
+            LibrarySource::SmartSearch { query },
+        );
+    });
+
+    let ui_ql = ui.clone();
+    ui.search_view.set_on_quick_link(move |link| {
+        let (title, filters) = match link {
+            QuickLink::RecentlyTaken => (
+                "Recently taken",
+                MetadataSearchFilters {
+                    order: Some(SortOrder::Desc),
+                    ..Default::default()
+                },
+            ),
+            QuickLink::RecentlyAdded => (
+                "Recently added",
+                MetadataSearchFilters {
+                    order: Some(SortOrder::Desc),
+                    ..Default::default()
+                },
+            ),
+            QuickLink::Videos => (
+                "Videos",
+                MetadataSearchFilters {
+                    asset_type: Some("VIDEO".to_string()),
+                    order: Some(SortOrder::Desc),
+                    ..Default::default()
+                },
+            ),
+            QuickLink::Favorites => (
+                "Favorites",
+                MetadataSearchFilters {
+                    is_favorite: Some(true),
+                    ..Default::default()
+                },
+            ),
+        };
+        tab_drill_in(
+            ui_ql.clone(),
+            ui_ql.search_tab.nav.clone(),
+            title.to_string(),
+            LibrarySource::AdvancedSearch {
+                filters: Box::new(filters),
+            },
+        );
+    });
+
+    // v1: every chip opens the advanced-filters sheet (People/Location/Camera/
+    // Date/Type are all fields there). Dedicated per-chip pickers are a follow-up.
+    let ui_chip = ui.clone();
+    ui.search_view.set_on_chip(move |_chip| {
+        filters::present_advanced_filters_dialog(ui_chip.clone());
+    });
+}
+
+/// Wire the Library tab's Favorites / Archived / Trash action cards to
+/// pre-filtered drill-in grids.
+fn connect_library_actions(ui: Rc<LibraryWindowUi>) {
+    let uf = ui.clone();
+    let ua = ui.clone();
+    let ut = ui.clone();
+    explore_view::wire_library_actions(
+        &ui.explore,
+        move || {
+            tab_drill_in(
+                uf.clone(),
+                uf.library_tab.nav.clone(),
+                "Favorites".to_string(),
+                LibrarySource::AdvancedSearch {
+                    filters: Box::new(MetadataSearchFilters {
+                        is_favorite: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            );
+        },
+        move || {
+            tab_drill_in(
+                ua.clone(),
+                ua.library_tab.nav.clone(),
+                "Archived".to_string(),
+                LibrarySource::AdvancedSearch {
+                    filters: Box::new(MetadataSearchFilters {
+                        is_archived: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            );
+        },
+        move || {
+            tab_drill_in(
+                ut.clone(),
+                ut.library_tab.nav.clone(),
+                "Trash".to_string(),
+                LibrarySource::AdvancedSearch {
+                    filters: Box::new(MetadataSearchFilters {
+                        is_trashed: Some(true),
+                        with_deleted: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            );
+        },
+    );
 }
 
 /// Build a drop overlay widget and wrap `content` in a `gtk::Overlay`.
