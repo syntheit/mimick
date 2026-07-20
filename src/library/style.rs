@@ -319,6 +319,65 @@ box.mimick-drop-overlay label {
     color: @accent_fg_color;
 }
 
+/* ── iOS-Photos-style multi-select UI ──────────────────────────────
+   A floating top-left "✕ N" pill over the grid, and a bottom action
+   drawer with icon+label buttons. */
+
+box.mimick-select-pill {
+    background: alpha(@window_bg_color, 0.82);
+    border-radius: 999px;
+    padding: 4px 12px 4px 4px;
+    box-shadow: 0 2px 8px alpha(black, 0.28);
+    border: 1px solid alpha(@window_fg_color, 0.08);
+}
+
+button.mimick-pill-clear {
+    min-width: 26px;
+    min-height: 26px;
+    padding: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+label.mimick-pill-count {
+    font-weight: 700;
+    font-size: 1.05em;
+    padding-right: 4px;
+}
+
+/* Bottom action drawer: sits at the bottom ~15-18% of the screen. */
+box.mimick-select-drawer {
+    background: @window_bg_color;
+    border-top: 1px solid alpha(@window_fg_color, 0.10);
+    padding: 6px 4px;
+}
+
+button.mimick-drawer-action {
+    padding: 8px 4px;
+    border-radius: 12px;
+    min-height: 60px;
+}
+
+button.mimick-drawer-action image {
+    -gtk-icon-size: 24px;
+    opacity: 0.95;
+}
+
+button.mimick-drawer-action label {
+    font-size: 0.78em;
+    opacity: 0.85;
+}
+
+button.mimick-drawer-action.destructive image {
+    color: @error_color;
+}
+
+button.mimick-drawer-link {
+    padding: 8px 12px;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
 /* ── Drag badge (multi-file count) ─────────────────────────────── */
 
 box.mimick-drag-badge {

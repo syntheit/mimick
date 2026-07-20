@@ -342,8 +342,8 @@ impl ImmichApiClient {
     ///
     /// `patch` is the JSON body; Immich accepts partial updates (e.g.
     /// `{"description": "..."}` or `{"isFavorite": true}`). Shared by the
-    /// description and favorite helpers below.
-    async fn update_asset(
+    /// description, favorite, and archive helpers below.
+    pub async fn update_asset(
         &self,
         asset_id: &str,
         patch: serde_json::Value,
@@ -391,6 +391,16 @@ impl ImmichApiClient {
         is_favorite: bool,
     ) -> Result<(), String> {
         self.update_asset(asset_id, serde_json::json!({ "isFavorite": is_favorite }))
+            .await
+    }
+
+    /// Set or clear an asset's archived flag via `PUT /api/assets/{id}`.
+    pub async fn set_asset_archived(
+        &self,
+        asset_id: &str,
+        is_archived: bool,
+    ) -> Result<(), String> {
+        self.update_asset(asset_id, serde_json::json!({ "isArchived": is_archived }))
             .await
     }
 

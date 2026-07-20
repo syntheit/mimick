@@ -120,8 +120,12 @@ struct LibraryWindowUi {
     albums: AlbumsViewParts,
     search_view: search_view::SearchViewParts,
     /// The scrolled window hosting the shared photos grid canvas; re-parented
-    /// between the Photos tab and drill-in detail pages.
+    /// (inside `grid_overlay`) between the Photos tab and drill-in detail pages.
     grid_scrolled: gtk::ScrolledWindow,
+    /// Overlay wrapping `grid_scrolled` that carries the top-left selection
+    /// pill. This (not the bare scrolled window) is what gets reparented on
+    /// drill-in, so the pill floats over drill grids too.
+    grid_overlay: gtk::Overlay,
     /// Stable slot inside the Photos tab that owns `grid_scrolled` when no
     /// drill-in is active. The grid is reparented in/out of this box so
     /// pop-back always restores it to a known position.
@@ -160,8 +164,23 @@ struct LibraryWindowUi {
     source_mode_suppressed: Cell<bool>,
     back_button: gtk::Button,
     select_toggle: gtk::ToggleButton,
+    /// Bottom action drawer (iOS-Photos style): a revealer holding icon+label
+    /// action buttons. Shown only while in select mode with ≥1 item selected.
     bulk_bar: gtk::Revealer,
+    /// Live "N" count shown inside the top-left selection pill.
     bulk_count_label: gtk::Label,
+    /// Top-left "✕ N" selection pill (clear + count), overlaid on the grid.
+    pill: gtk::Box,
+    /// The "✕" clear button inside the pill (clears selection + exits mode).
+    pill_clear: gtk::Button,
+    /// Drawer action buttons (each icon+label). Trash / Download-share /
+    /// Favorite / Archive / Add-to-album / Create-new-album.
+    bulk_delete: gtk::Button,
+    bulk_download: gtk::Button,
+    bulk_favorite: gtk::Button,
+    bulk_archive: gtk::Button,
+    bulk_add_album: gtk::Button,
+    bulk_create_album: gtk::Button,
     album_link_row: libadwaita::ActionRow,
     album_link_button: gtk::Button,
     album_sync_button: gtk::Button,
@@ -392,52 +411,38 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .build();
     album_link_listbox.append(&album_link_row);
 
-    let bulk_count_label = gtk::Label::builder().xalign(0.0).hexpand(true).build();
-    let bulk_delete = gtk::Button::builder()
-        .icon_name("user-trash-symbolic")
-        .tooltip_text("Delete selected")
-        .css_classes(vec!["destructive-action".to_string()])
-        .build();
-    let bulk_download = gtk::Button::builder()
-        .icon_name("mimick-download-symbolic")
-        .tooltip_text("Download selected")
-        .build();
-    let bulk_clear = gtk::Button::builder()
-        .icon_name("edit-clear-symbolic")
-        .tooltip_text("Clear selection")
-        .css_classes(vec!["flat".to_string()])
-        .build();
-    let bulk_inner = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .margin_top(8)
-        .margin_bottom(16)
-        .margin_start(12)
-        .margin_end(12)
-        .css_classes(vec!["toolbar".to_string()])
-        .build();
-    bulk_inner.append(&bulk_count_label);
-    bulk_inner.append(&bulk_clear);
-    bulk_inner.append(&bulk_download);
-    bulk_inner.append(&bulk_delete);
-    let bulk_bar = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideUp)
-        .reveal_child(false)
-        .child(&bulk_inner)
-        .build();
+    // iOS-Photos-style selection UI: a top-left "✕ N" pill (clear + count)
+    // overlaid on the grid, and a bottom action drawer. `bulk_count_label`
+    // now lives inside the pill; the drawer holds the action buttons.
+    let SelectionUi {
+        pill,
+        bulk_count_label,
+        pill_clear,
+        bulk_bar,
+        bulk_delete,
+        bulk_download,
+        bulk_favorite,
+        bulk_archive,
+        bulk_add_album,
+        bulk_create_album,
+    } = build_selection_ui();
 
     // Photos tab content: a pure chronological grid (Immich mobile style). The
     // search/sort/timeline controls bar is intentionally NOT shown here — the
     // Photos tab is timeline-only and the dedicated Search tab owns search.
     // Upload lives in the header. `grid_host` is a stable slot the shared grid
-    // is reparented in/out of on drill-in.
+    // is reparented in/out of on drill-in. The grid is wrapped in an overlay so
+    // the selection pill floats over its top-left corner.
     let grid_scrolled = grid.scrolled.clone();
+    let grid_overlay = gtk::Overlay::builder().vexpand(true).hexpand(true).build();
+    grid_overlay.set_child(Some(&grid_scrolled));
+    grid_overlay.add_overlay(&pill);
     let grid_host = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .vexpand(true)
         .hexpand(true)
         .build();
-    grid_host.append(&grid_scrolled);
+    grid_host.append(&grid_overlay);
     let photos_content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
@@ -651,6 +656,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         albums,
         search_view,
         grid_scrolled,
+        grid_overlay: grid_overlay.clone(),
         grid_host,
         active_drill: RefCell::new(None),
         active_drill_nav: RefCell::new(None),
@@ -676,6 +682,14 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         select_toggle: select_toggle.clone(),
         bulk_bar: bulk_bar.clone(),
         bulk_count_label: bulk_count_label.clone(),
+        pill: pill.clone(),
+        pill_clear: pill_clear.clone(),
+        bulk_delete: bulk_delete.clone(),
+        bulk_download: bulk_download.clone(),
+        bulk_favorite: bulk_favorite.clone(),
+        bulk_archive: bulk_archive.clone(),
+        bulk_add_album: bulk_add_album.clone(),
+        bulk_create_album: bulk_create_album.clone(),
         album_link_row: album_link_row.clone(),
         album_link_button: album_link_button.clone(),
         album_sync_button: album_sync_button.clone(),
@@ -694,7 +708,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     connect_album_link_row(ui.clone(), album_link_listbox);
 
     connect_select_mode(ui.clone(), select_toggle.clone());
-    connect_bulk_actions(ui.clone(), bulk_delete, bulk_download, bulk_clear);
+    connect_bulk_actions(ui.clone());
 
     connect_tab_switch(ui.clone());
     connect_controls(ui.clone());
@@ -1114,6 +1128,158 @@ pub(super) fn open_person_from_lightbox(ui: Rc<LibraryWindowUi>, person_id: Stri
             }),
         },
     );
+}
+
+/// Widgets for the iOS-Photos-style multi-select UI, built by
+/// [`build_selection_ui`] and stored on [`LibraryWindowUi`].
+struct SelectionUi {
+    /// Top-left floating pill: "✕ N".
+    pill: gtk::Box,
+    /// The live "N" count label inside the pill.
+    bulk_count_label: gtk::Label,
+    /// The "✕" clear button inside the pill.
+    pill_clear: gtk::Button,
+    /// Bottom action drawer revealer.
+    bulk_bar: gtk::Revealer,
+    bulk_delete: gtk::Button,
+    bulk_download: gtk::Button,
+    bulk_favorite: gtk::Button,
+    bulk_archive: gtk::Button,
+    bulk_add_album: gtk::Button,
+    bulk_create_album: gtk::Button,
+}
+
+/// Build a vertical icon-over-label action button for the selection drawer,
+/// matching the /tmp/sel2.png reference (Share · Move to trash · Favorite · …).
+fn drawer_action(icon: &str, label: &str, extra_class: Option<&str>) -> gtk::Button {
+    let img = gtk::Image::from_icon_name(icon);
+    img.set_pixel_size(24);
+    let lbl = gtk::Label::builder()
+        .label(label)
+        .justify(gtk::Justification::Center)
+        .wrap(true)
+        .max_width_chars(8)
+        .css_classes(["caption"])
+        .build();
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    content.append(&img);
+    content.append(&lbl);
+
+    let mut classes = vec!["flat", "mimick-drawer-action", "mimick-pressable"];
+    if let Some(c) = extra_class {
+        classes.push(c);
+    }
+    gtk::Button::builder()
+        .child(&content)
+        .hexpand(true)
+        .tooltip_text(label)
+        .css_classes(classes)
+        .build()
+}
+
+/// Build the selection pill (top-left "✕ N") and the bottom action drawer.
+///
+/// The drawer mirrors /tmp/sel2.png: a top row of icon+label actions
+/// (Share/Download · Move to trash · Favorite · Archive) and a bottom row with
+/// Add to album / Create new album. "Share link" is intentionally omitted —
+/// Immich's `/api/shared-links` isn't wired into mimick's client yet.
+fn build_selection_ui() -> SelectionUi {
+    // ── Top-left "✕ N" pill ───────────────────────────────────────────
+    let bulk_count_label = gtk::Label::builder()
+        .css_classes(["mimick-pill-count"])
+        .build();
+    let pill_clear = gtk::Button::builder()
+        .icon_name("window-close-symbolic")
+        .css_classes(["flat", "circular", "mimick-pill-clear", "mimick-pressable"])
+        .tooltip_text("Clear selection")
+        .build();
+    let pill = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::Start)
+        .margin_start(12)
+        .margin_top(12)
+        .css_classes(["mimick-select-pill"])
+        .visible(false)
+        .build();
+    pill.append(&pill_clear);
+    pill.append(&bulk_count_label);
+    // The pill must not eat scroll/press events on the grid behind it beyond
+    // its own bounds; a Box only targets its own area, so this is fine.
+
+    // ── Bottom action drawer ──────────────────────────────────────────
+    // Row 1: primary actions (icon over label).
+    let bulk_download = drawer_action("send-to-symbolic", "Share", None);
+    let bulk_delete = drawer_action("user-trash-symbolic", "Move to trash", Some("destructive"));
+    let bulk_favorite = drawer_action("emblem-favorite-symbolic", "Favorite", None);
+    let bulk_archive = drawer_action("view-list-symbolic", "Archive", None);
+
+    let action_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(4)
+        .homogeneous(true)
+        .build();
+    action_row.append(&bulk_download);
+    action_row.append(&bulk_delete);
+    action_row.append(&bulk_favorite);
+    action_row.append(&bulk_archive);
+
+    // Row 2: album actions, list-style like the reference's bottom strip.
+    let bulk_add_album = gtk::Button::builder()
+        .label("Add to album")
+        .halign(gtk::Align::Start)
+        .css_classes(["flat", "mimick-drawer-link", "mimick-pressable"])
+        .build();
+    let bulk_create_album = gtk::Button::builder()
+        .label("Create new album")
+        .halign(gtk::Align::End)
+        .hexpand(true)
+        .css_classes(["flat", "mimick-drawer-link", "mimick-pressable"])
+        .build();
+    let album_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    album_row.append(&bulk_add_album);
+    album_row.append(&bulk_create_album);
+
+    let drawer = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .margin_top(10)
+        .margin_bottom(14)
+        .margin_start(8)
+        .margin_end(8)
+        .css_classes(["mimick-select-drawer"])
+        .build();
+    drawer.append(&action_row);
+    drawer.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    drawer.append(&album_row);
+
+    let bulk_bar = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideUp)
+        .reveal_child(false)
+        .child(&drawer)
+        .build();
+
+    SelectionUi {
+        pill,
+        bulk_count_label,
+        pill_clear,
+        bulk_bar,
+        bulk_delete,
+        bulk_download,
+        bulk_favorite,
+        bulk_archive,
+        bulk_add_album,
+        bulk_create_album,
+    }
 }
 
 /// Build a drop overlay widget and wrap `content` in a `gtk::Overlay`.

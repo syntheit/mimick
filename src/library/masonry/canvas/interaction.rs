@@ -1,7 +1,9 @@
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::ObjectSubclassIsExt;
 
@@ -165,6 +167,204 @@ impl MasonryCanvas {
     fn install_gestures(&self) {
         self.add_controller(primary_click_controller(self));
         self.add_controller(secondary_click_controller(self));
+        // Touch multi-select: long-press to enter select mode + anchor a tile,
+        // then a drag from that same press range-selects with edge auto-scroll.
+        // The long-press and drag gestures share a group so only one wins the
+        // sequence; the drag defers to normal scrolling unless a long-press has
+        // armed `range_drag_active`.
+        let long_press = long_press_controller(self);
+        let range_drag = range_drag_controller(self);
+        long_press.group_with(&range_drag);
+        self.add_controller(long_press);
+        self.add_controller(range_drag);
+    }
+
+    /// Enter select mode (if needed) and select the tile under (x, y), arming a
+    /// range-select drag anchored there. Called from the long-press handler.
+    fn begin_range_select(&self, x: f64, y: f64) {
+        let Some(pos) = self.hit_test(x, y) else {
+            return;
+        };
+        let imp = self.imp();
+        let Some(sel) = imp.selection.get() else {
+            return;
+        };
+        enable_select_mode_if_needed(imp, pos);
+        // Anchor the range at the long-pressed tile and select it.
+        sel.select_item(pos, false);
+        imp.last_selected.set(Some(pos));
+        imp.range_anchor.set(Some(pos));
+        imp.range_drag_active.set(true);
+        imp.range_pointer_y.set(y);
+        imp.range_pointer_x.set(x);
+    }
+
+    /// Update the live range selection to span [anchor..=tile-under-pointer].
+    /// Coordinates are widget-space; the tile is resolved against the current
+    /// scroll offset so scrolled-in rows are covered.
+    fn update_range_select(&self, x: f64, y: f64) {
+        let imp = self.imp();
+        if !imp.range_drag_active.get() {
+            return;
+        }
+        imp.range_pointer_y.set(y);
+        imp.range_pointer_x.set(x);
+        let Some(anchor) = imp.range_anchor.get() else {
+            return;
+        };
+        let Some(pos) = self.hit_test_clamped(x, y) else {
+            return;
+        };
+        let Some(sel) = imp.selection.get() else {
+            return;
+        };
+        let lo = anchor.min(pos);
+        let hi = anchor.max(pos);
+        // Replace with the fresh anchor→pointer range so back-tracking the finger
+        // deselects tiles overshot earlier (iOS/Google-Photos behaviour).
+        sel.unselect_all();
+        sel.select_range(lo, hi - lo + 1, false);
+        imp.last_selected.set(Some(pos));
+    }
+
+    /// End the range-select drag, tearing down any auto-scroll timer.
+    fn end_range_select(&self) {
+        let imp = self.imp();
+        imp.range_drag_active.set(false);
+        imp.range_anchor.set(None);
+        self.stop_autoscroll();
+    }
+
+    /// Hit-test but clamp the pointer into the widget bounds first, so a finger
+    /// dragged past the top/bottom edge still resolves to the first/last row
+    /// instead of missing. Empty gaps between tiles fall back to the nearest row.
+    fn hit_test_clamped(&self, x: f64, y: f64) -> Option<u32> {
+        let h = self.height() as f64;
+        let w = self.width() as f64;
+        let cy = y.clamp(1.0, (h - 1.0).max(1.0));
+        let cx = x.clamp(1.0, (w - 1.0).max(1.0));
+        if let Some(pos) = self.hit_test(cx, cy) {
+            return Some(pos);
+        }
+        // Fell in a gap (e.g. a date-header row or past the last item of a
+        // short row): snap to the nearest tile on the row at this y.
+        self.nearest_item_on_row(cx as f32, cy as f32)
+    }
+
+    fn nearest_item_on_row(&self, x: f32, y: f32) -> Option<u32> {
+        let rows = self.imp().rows.borrow();
+        let r = row_at_y(&rows, y)?;
+        let row = &rows[r];
+        // Nearest item by horizontal centre distance.
+        row.items
+            .iter()
+            .min_by(|a, b| {
+                let da = (a.x + a.w * 0.5 - x).abs();
+                let db = (b.x + b.w * 0.5 - x).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|it| it.asset_index)
+    }
+
+    /// Given the pointer y (widget-space) during a range drag, arm/adjust the
+    /// edge auto-scroll. Within ~10% of the top/bottom viewport edge the grid
+    /// scrolls, with speed ramping toward the very edge; outside the zone the
+    /// timer is stopped.
+    fn update_autoscroll(&self, y: f64) {
+        let Some(adj) = self.find_scroll_adjustment() else {
+            return;
+        };
+        let viewport_h = adj.page_size();
+        if viewport_h <= 0.0 {
+            return;
+        }
+        // Pointer y is widget-space; convert to viewport-space (relative to the
+        // scrolled top) by subtracting the current scroll offset.
+        let view_y = y - adj.value();
+        let zone = (viewport_h * 0.12).max(48.0);
+        const MAX_SPEED: f64 = 26.0; // px per tick (~60fps → ~1560 px/s)
+
+        let velocity = if view_y < zone {
+            let t = ((zone - view_y) / zone).clamp(0.0, 1.0);
+            -MAX_SPEED * t
+        } else if view_y > viewport_h - zone {
+            let t = ((view_y - (viewport_h - zone)) / zone).clamp(0.0, 1.0);
+            MAX_SPEED * t
+        } else {
+            0.0
+        };
+
+        self.imp().autoscroll_velocity.set(velocity);
+        if velocity == 0.0 {
+            self.stop_autoscroll();
+        } else {
+            self.start_autoscroll();
+        }
+    }
+
+    fn start_autoscroll(&self) {
+        let imp = self.imp();
+        if imp.autoscroll_source.borrow().is_some() {
+            return; // already running; velocity cell drives the speed
+        }
+        let weak = self.downgrade();
+        let source = glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            let Some(canvas) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let imp = canvas.imp();
+            if !imp.range_drag_active.get() {
+                *imp.autoscroll_source.borrow_mut() = None;
+                return glib::ControlFlow::Break;
+            }
+            let velocity = imp.autoscroll_velocity.get();
+            let Some(adj) = canvas.find_scroll_adjustment() else {
+                return glib::ControlFlow::Continue;
+            };
+            let max = (adj.upper() - adj.page_size()).max(0.0);
+            let next = (adj.value() + velocity).clamp(0.0, max);
+            if (next - adj.value()).abs() > f64::EPSILON {
+                adj.set_value(next);
+                // Extend the selection to the row now at the leading edge we're
+                // scrolling toward, so rows revealed under the stationary finger
+                // get covered. `x` is held at the pointer's last column.
+                let viewport_h = adj.page_size();
+                let edge_y = if velocity < 0.0 {
+                    next + 1.0
+                } else {
+                    next + viewport_h - 1.0
+                };
+                let px = imp.range_pointer_x.get();
+                canvas.update_range_select(px, edge_y);
+            }
+            glib::ControlFlow::Continue
+        });
+        *imp.autoscroll_source.borrow_mut() = Some(source);
+    }
+
+    fn stop_autoscroll(&self) {
+        let imp = self.imp();
+        imp.autoscroll_velocity.set(0.0);
+        if let Some(source) = imp.autoscroll_source.borrow_mut().take() {
+            source.remove();
+        }
+    }
+
+    /// Resolve the ScrolledWindow's vertical adjustment for auto-scroll. Reuses
+    /// the cached `vadjustment` (populated lazily by the snapshot path); falls
+    /// back to a parent-tree walk if the snapshot hasn't run yet.
+    fn find_scroll_adjustment(&self) -> Option<gtk::Adjustment> {
+        if let Some(adj) = self.imp().vadjustment.borrow().clone() {
+            return Some(adj);
+        }
+        let mut node: Option<gtk::Widget> = self.parent();
+        while let Some(w) = node {
+            if let Some(sw) = w.downcast_ref::<gtk::ScrolledWindow>() {
+                return Some(sw.vadjustment());
+            }
+            node = w.parent();
+        }
+        None
     }
 
     /// Install a `DragSource` for exporting original asset files via drag.
@@ -374,6 +574,90 @@ fn secondary_click_controller(canvas: &MasonryCanvas) -> gtk::GestureClick {
         }
     });
     secondary
+}
+
+/// Long-press (touch/mouse hold) → enter select mode + anchor a range at the
+/// pressed tile. On `pressed` we arm `range_drag_active`; the paired drag
+/// gesture then extends the selection as the finger moves. A short delay gives
+/// the press-and-lift = single-tap path room to win instead.
+fn long_press_controller(canvas: &MasonryCanvas) -> gtk::GestureLongPress {
+    let long_press = gtk::GestureLongPress::new();
+    long_press.set_touch_only(false);
+    // Snappy but distinct from a tap. Default ~500ms feels sluggish on a phone.
+    long_press.set_delay_factor(0.6);
+    let weak = canvas.downgrade();
+    long_press.connect_pressed(move |gesture, x, y| {
+        let Some(canvas) = weak.upgrade() else {
+            return;
+        };
+        // Long-press claims the sequence so the tap gesture won't ALSO fire a
+        // toggle/lightbox on release, and the ScrolledWindow won't treat the
+        // subsequent motion as a scroll.
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        canvas.begin_range_select(x, y);
+        canvas.queue_draw();
+    });
+    long_press
+}
+
+/// Drag gesture paired with the long-press. It only acts once `range_drag_active`
+/// has been armed by a long-press — otherwise it stays passive so a plain
+/// touch-drag scrolls the grid as before (the ScrolledWindow owns it). When
+/// active it claims the sequence, live-updates the range selection, and drives
+/// edge auto-scroll.
+fn range_drag_controller(canvas: &MasonryCanvas) -> gtk::GestureDrag {
+    let drag = gtk::GestureDrag::new();
+    drag.set_button(gtk::gdk::BUTTON_PRIMARY);
+
+    // Capture the press point so drag deltas map back to widget coordinates.
+    let start = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+
+    let weak = canvas.downgrade();
+    let start_begin = start.clone();
+    drag.connect_drag_begin(move |gesture, x, y| {
+        start_begin.set((x, y));
+        let Some(canvas) = weak.upgrade() else {
+            return;
+        };
+        if canvas.imp().range_drag_active.get() {
+            // A long-press already armed us: own this sequence.
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        }
+    });
+
+    let weak = canvas.downgrade();
+    let start_update = start.clone();
+    drag.connect_drag_update(move |gesture, ox, oy| {
+        let Some(canvas) = weak.upgrade() else {
+            return;
+        };
+        if !canvas.imp().range_drag_active.get() {
+            return; // not our sequence — let the ScrolledWindow scroll.
+        }
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        let (sx, sy) = start_update.get();
+        let (x, y) = (sx + ox, sy + oy);
+        canvas.update_range_select(x, y);
+        canvas.update_autoscroll(y);
+        canvas.queue_draw();
+    });
+
+    let weak = canvas.downgrade();
+    drag.connect_drag_end(move |_gesture, _ox, _oy| {
+        if let Some(canvas) = weak.upgrade() {
+            canvas.end_range_select();
+        }
+    });
+
+    // Also tear down if the sequence is cancelled (e.g. touch lifted off-window).
+    let weak = canvas.downgrade();
+    drag.connect_cancel(move |_gesture, _seq| {
+        if let Some(canvas) = weak.upgrade() {
+            canvas.end_range_select();
+        }
+    });
+
+    drag
 }
 
 fn toggle_selection(sel: &gtk::MultiSelection, pos: u32) {

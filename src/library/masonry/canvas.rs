@@ -112,6 +112,26 @@ mod imp {
         pub cloud_off_icon: OnceCell<gdk4::Paintable>,
         /// True while a drag-out operation is in progress; suppresses click-to-activate.
         pub drag_active: Cell<bool>,
+        /// True while a long-press-initiated range-select drag is in progress.
+        /// Set by the long-press handler once it enters select mode, cleared when
+        /// the drag gesture ends. While set, the drag gesture owns the pointer
+        /// sequence (range-select + auto-scroll) instead of scrolling the grid.
+        pub range_drag_active: Cell<bool>,
+        /// Anchor asset index for the active range-select drag (the tile that was
+        /// long-pressed). Selection spans [anchor..=current] as the finger moves.
+        pub range_anchor: Cell<Option<u32>>,
+        /// Running auto-scroll timer source id during an edge-drag, so it can be
+        /// removed when the drag ends or leaves the edge zone.
+        pub autoscroll_source: RefCell<Option<glib::SourceId>>,
+        /// Current auto-scroll velocity in px/tick (signed: negative = up). Read
+        /// by the timer callback; updated as the pointer nears an edge.
+        pub autoscroll_velocity: Cell<f64>,
+        /// Latest pointer y (widget-space) during a range drag, so the auto-scroll
+        /// timer can recompute the hit-target row against freshly-scrolled content.
+        pub range_pointer_y: Cell<f64>,
+        /// Latest pointer x (widget-space) during a range drag; used by the
+        /// auto-scroll timer to pick the column on the freshly-revealed edge row.
+        pub range_pointer_x: Cell<f64>,
         /// The drag-export controller, retained so it can be detached on mobile.
         /// On a touchscreen a DragSource captures touch drags to start a DnD
         /// export, which steals them from the ScrolledWindow and makes the grid

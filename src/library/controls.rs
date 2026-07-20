@@ -296,9 +296,10 @@ pub(super) fn tab_drill_in(
     let prev_source = ui.ctx.library_state.lock().source.clone();
     *ui.pre_drill_source.borrow_mut() = Some(prev_source);
 
-    // Move the shared grid scrolled window into the drill page's content slot.
-    shell::unparent_from_slot(&ui.grid_scrolled);
-    drill.content_slot.append(&ui.grid_scrolled);
+    // Move the shared grid (scrolled window + selection-pill overlay) into the
+    // drill page's content slot so the pill floats over drill grids too.
+    shell::unparent_from_slot(&ui.grid_overlay);
+    drill.content_slot.append(&ui.grid_overlay);
     drill.show_loading();
     *ui.active_drill.borrow_mut() = Some(drill.clone());
     *ui.active_drill_nav.borrow_mut() = Some(nav.clone());
@@ -377,10 +378,11 @@ pub(super) fn go_back(ui: &Rc<LibraryWindowUi>) -> bool {
     }
 }
 
-/// Return the shared grid scrolled window to the Photos tab's stable grid host.
+/// Return the shared grid (scrolled window + pill overlay) to the Photos tab's
+/// stable grid host.
 fn return_grid_to_photos(ui: &Rc<LibraryWindowUi>) {
-    shell::unparent_from_slot(&ui.grid_scrolled);
-    ui.grid_host.append(&ui.grid_scrolled);
+    shell::unparent_from_slot(&ui.grid_overlay);
+    ui.grid_host.append(&ui.grid_overlay);
 }
 
 pub(super) fn refresh_library_surfaces(ui: Rc<LibraryWindowUi>, include_current_source: bool) {
