@@ -51,6 +51,29 @@ pub async fn enumerate_local(ctx: Arc<AppContext>) -> Vec<LocalAsset> {
         .unwrap_or_default()
 }
 
+/// Walk the user's DISPLAY-ONLY gallery folders and return matching media
+/// files.
+///
+/// Galleries (`config.galleries`) are the folders whose local photos are shown
+/// in the Photos timeline. This is intentionally SEPARATE from `watch_paths`
+/// (backup): `enumerate_local` above enumerates backup folders, this one
+/// enumerates display folders. Each gallery path is treated as a rules-free
+/// `WatchPathEntry::Simple`, so the same supported-media/temporary-file
+/// filtering (via `enumerate_blocking`) applies. Does NOT hash on enumeration.
+pub async fn enumerate_galleries(ctx: Arc<AppContext>) -> Vec<LocalAsset> {
+    let entries: Vec<WatchPathEntry> = ctx
+        .config
+        .read()
+        .gallery_paths()
+        .into_iter()
+        .map(WatchPathEntry::Simple)
+        .collect();
+
+    tokio::task::spawn_blocking(move || enumerate_blocking(&entries))
+        .await
+        .unwrap_or_default()
+}
+
 /// Enumerate only the watch entries matching `entry_path`. Used by the
 /// album-scoped Local/Unified views so a linked album's view stays bounded
 /// to its own folder instead of spilling assets from sibling albums.

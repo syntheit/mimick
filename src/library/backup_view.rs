@@ -73,6 +73,37 @@ fn build_backup_home(ui: Rc<LibraryWindowUi>) -> libadwaita::NavigationPage {
     counters_group.add(&remaining_row);
     prefs.add(&counters_group);
 
+    // --- Live upload status group -----------------------------------------
+    // Reflects the same `TransferSnapshot` the header backup icon uses. Hidden
+    // while idle; shown with a summary row + overall bar + a per-item list while
+    // an upload session is running. Driven by a `glib::timeout_add_local` tick
+    // that self-cancels once the page is dropped (see below).
+    let status_group = libadwaita::PreferencesGroup::builder()
+        .title("Backing up")
+        .visible(false)
+        .build();
+    let status_row = libadwaita::ActionRow::builder()
+        .title("Uploading")
+        .subtitle("")
+        .build();
+    let status_progress = gtk::ProgressBar::builder()
+        .valign(gtk::Align::Center)
+        .hexpand(true)
+        .width_request(96)
+        .build();
+    status_row.add_suffix(&status_progress);
+    status_group.add(&status_row);
+    let items_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .visible(false)
+        .build();
+    status_group.add(&items_list);
+    prefs.add(&status_group);
+    // One-shot guard so re-`shown` events (e.g. returning from the folder-select
+    // sub-page) don't stack duplicate status-tick timers on the same widgets.
+    let tick_started = Rc::new(std::cell::Cell::new(false));
+
     // --- Enable + action group --------------------------------------------
     let toggle_group = libadwaita::PreferencesGroup::builder().build();
     let enable_row = libadwaita::SwitchRow::builder()
@@ -127,6 +158,16 @@ fn build_backup_home(ui: Rc<LibraryWindowUi>) -> libadwaita::NavigationPage {
         backed_label,
         #[strong]
         remaining_label,
+        #[strong]
+        status_group,
+        #[strong]
+        status_row,
+        #[strong]
+        status_progress,
+        #[strong]
+        items_list,
+        #[strong]
+        tick_started,
         move |_| {
             folders_row.set_subtitle(&selected_folders_subtitle(&ui));
             spawn_counter_compute(
@@ -135,6 +176,24 @@ fn build_backup_home(ui: Rc<LibraryWindowUi>) -> libadwaita::NavigationPage {
                 backed_label.clone(),
                 remaining_label.clone(),
             );
+            if !tick_started.replace(true) {
+                start_status_tick(
+                    ui.clone(),
+                    status_group.clone(),
+                    status_row.clone(),
+                    status_progress.clone(),
+                    items_list.clone(),
+                );
+            } else {
+                // Timer already running; just repaint immediately.
+                refresh_backup_status(
+                    &ui,
+                    &status_group,
+                    &status_row,
+                    &status_progress,
+                    &items_list,
+                );
+            }
         }
     ));
 
@@ -285,6 +344,115 @@ fn spawn_counter_compute(
         backed_label.set_text(&backed_up.to_string());
         remaining_label.set_text(&remaining.to_string());
     });
+}
+
+// ---------------------------------------------------------------------------
+// Live upload status (mirrors the header backup icon)
+// ---------------------------------------------------------------------------
+
+/// Start a 250 ms tick that repaints the live upload-status group from the
+/// shared `TransferSnapshot`. Self-cancels once the page is dropped: `status_group`
+/// loses its `root()` when the owning page is popped-and-dropped, so a stale tick
+/// becomes a no-op and returns `ControlFlow::Break`.
+fn start_status_tick(
+    ui: Rc<LibraryWindowUi>,
+    status_group: libadwaita::PreferencesGroup,
+    status_row: libadwaita::ActionRow,
+    status_progress: gtk::ProgressBar,
+    items_list: gtk::ListBox,
+) {
+    // Paint once immediately so the section is correct on first reveal.
+    refresh_backup_status(&ui, &status_group, &status_row, &status_progress, &items_list);
+    glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+        if status_group.root().is_none() {
+            return glib::ControlFlow::Break;
+        }
+        refresh_backup_status(&ui, &status_group, &status_row, &status_progress, &items_list);
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Repaint the live upload-status group from the current transfer snapshot.
+fn refresh_backup_status(
+    ui: &LibraryWindowUi,
+    status_group: &libadwaita::PreferencesGroup,
+    status_row: &libadwaita::ActionRow,
+    status_progress: &gtk::ProgressBar,
+    items_list: &gtk::ListBox,
+) {
+    use crate::state_manager::TransferDirection;
+
+    let transfer = ui.ctx.state.lock().transfer.clone();
+    let uploading =
+        transfer.active && matches!(transfer.direction, TransferDirection::Upload);
+    if !uploading {
+        status_group.set_visible(false);
+        return;
+    }
+    status_group.set_visible(true);
+
+    let n = transfer.active_uploads;
+    status_row.set_title(&format!(
+        "Uploading {n} item{}",
+        if n == 1 { "" } else { "s" }
+    ));
+    status_row.set_subtitle(
+        transfer
+            .active_item_label
+            .as_deref()
+            .unwrap_or("queued asset"),
+    );
+
+    match transfer.total_bytes {
+        Some(total) if total > 0 => {
+            status_progress.set_fraction(
+                (transfer.current_bytes as f64 / total as f64).clamp(0.0, 1.0),
+            );
+        }
+        _ => status_progress.pulse(),
+    }
+
+    // Per-item list: one row per active item with its own progress bar. Rebuilt
+    // each tick — the active set is small (a few parallel workers), so clearing
+    // and re-appending is cheap and keeps the code simple.
+    while let Some(child) = items_list.first_child() {
+        items_list.remove(&child);
+    }
+    let mut items: Vec<(&String, u64)> = transfer
+        .active_item_bytes
+        .iter()
+        .map(|(id, bytes)| (id, *bytes))
+        .collect();
+    items.sort_by(|a, b| a.0.cmp(b.0));
+    for (id, bytes) in items {
+        let total = transfer.active_item_totals.get(id).copied().unwrap_or(0);
+        let bar = gtk::ProgressBar::builder()
+            .valign(gtk::Align::Center)
+            .hexpand(true)
+            .width_request(96)
+            .build();
+        if total > 0 {
+            bar.set_fraction((bytes as f64 / total as f64).clamp(0.0, 1.0));
+        } else {
+            bar.pulse();
+        }
+        let row = libadwaita::ActionRow::builder()
+            .title(&item_display_name(id))
+            .title_lines(1)
+            .build();
+        row.add_suffix(&bar);
+        items_list.append(&row);
+    }
+    items_list.set_visible(items_list.first_child().is_some());
+}
+
+/// Best-effort display name for a per-item transfer key (a path or id).
+fn item_display_name(id: &str) -> String {
+    Path::new(id)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| id.to_string())
 }
 
 // ---------------------------------------------------------------------------

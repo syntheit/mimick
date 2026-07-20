@@ -156,7 +156,13 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
                 return;
             }
             let current = ui.ctx.library_state.lock().source.clone();
-            if !matches!(current, LibrarySource::AllAssets | LibrarySource::Timeline) {
+            // The Photos landing (`Galleries`) and `AllAssets` both allow the
+            // timeline toggle; toggling off returns to the `Galleries` merged
+            // landing (remote + local galleries).
+            if !matches!(
+                current,
+                LibrarySource::AllAssets | LibrarySource::Galleries | LibrarySource::Timeline
+            ) {
                 toggle.set_active(false);
                 return;
             }
@@ -167,7 +173,7 @@ pub(super) fn connect_controls(ui: Rc<LibraryWindowUi>) {
             let next_source = if toggle.is_active() {
                 LibrarySource::Timeline
             } else {
-                LibrarySource::AllAssets
+                LibrarySource::Galleries
             };
             let request = ui.ctx.library_state.lock().navigate_to(next_source);
             apply_timeline_ui_state(&ui, &request.1);

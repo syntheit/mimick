@@ -40,6 +40,12 @@ pub enum LibrarySource {
     },
     /// Remote assets overlayed with sync state from local SyncIndex.
     Unified,
+    /// Default Photos timeline: remote server assets merged with local photos
+    /// from the DISPLAY-ONLY gallery folders (`config.galleries`), deduped by
+    /// checksum against the remote set. Each row carries its cloud sync-state
+    /// badge. This is the app's landing view; it is driven by `galleries`, not
+    /// `watch_paths`, and is unrelated to backup.
+    Galleries,
     /// Local filename filter applied over a unified view.
     UnifiedSearch {
         query: String,
@@ -156,7 +162,10 @@ impl LibraryState {
     }
 
     pub fn load_initial_source(&mut self) -> (u64, LibrarySource, u32) {
-        self.switch_source(LibrarySource::AllAssets)
+        // The Photos landing view shows remote assets merged with local photos
+        // from the gallery folders (each with its cloud sync-state badge),
+        // rather than remote-only `AllAssets`.
+        self.switch_source(LibrarySource::Galleries)
     }
 
     pub fn switch_source(&mut self, source: LibrarySource) -> (u64, LibrarySource, u32) {

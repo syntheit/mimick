@@ -22,7 +22,7 @@ use crate::library::albums_view::{
 };
 use crate::library::explore_view::{ExploreViewParts, build_explore_view};
 use crate::library::local_source::{
-    LocalAsset, enumerate_local, enumerate_local_for_entry, filter_by_filename,
+    LocalAsset, enumerate_galleries, enumerate_local, enumerate_local_for_entry, filter_by_filename,
 };
 use crate::library::masonry::{GridViewParts, build_grid_view};
 use crate::library::state::{LibraryLoadState, LibrarySource};
@@ -136,12 +136,16 @@ struct LibraryWindowUi {
     /// The library source in effect before the active drill was pushed, so
     /// popping the drill restores it instead of leaking the drill's filter.
     pre_drill_source: RefCell<Option<crate::library::state::LibrarySource>>,
-    transfer_bar: gtk::Box,
     transfer_progress: gtk::ProgressBar,
     transfer_icon: gtk::Image,
     transfer_label: gtk::Label,
     /// Backup/transfer status button in the header (opens server stats).
     status_button: gtk::Button,
+    /// Header backup status icon (Photos tab). Live-updated from the transfer
+    /// poll loop; tapping it opens the full-screen backup page.
+    backup_button: gtk::Button,
+    /// Header "New album" button (Albums tab). Mirrors the in-view create button.
+    new_album_button: gtk::Button,
     /// Profile avatar shown in the header menu button.
     profile_avatar: libadwaita::Avatar,
     search_entry: gtk::SearchEntry,
@@ -354,18 +358,10 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(vec!["caption".to_string(), "dim-label".to_string()])
         .build();
-    let transfer_bar = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(12)
-        .margin_top(8)
-        .margin_bottom(16)
-        .margin_start(12)
-        .margin_end(12)
-        .css_classes(vec!["mimick-transfer-shell".to_string()])
-        .build();
-    transfer_bar.append(&transfer_progress);
-    transfer_bar.append(&transfer_icon);
-    transfer_bar.append(&transfer_label);
+    // `transfer_progress`/`transfer_icon`/`transfer_label` are retained so the
+    // transfer poll loop (`update_transfer_ui`) has stable widgets to drive, but
+    // the old bottom `transfer_bar` is gone — backup/upload status now lives in
+    // the header `backup_button` (Photos tab) and the backup page.
 
     let album_link_row = libadwaita::ActionRow::builder()
         .title("No local folder linked")
@@ -448,7 +444,6 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     photos_content.append(&album_link_listbox);
     photos_content.append(&grid_host);
     photos_content.append(&bulk_bar);
-    photos_content.append(&transfer_bar);
     photos_tab.set_content_child(&photos_content);
     photos_tab.show_content();
 
@@ -511,6 +506,22 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .css_classes(["flat", "mimick-pressable"])
         .build();
 
+    // Header backup status icon (Photos tab): idle shows a cloud, updated live
+    // from the transfer poll loop to reflect an in-progress backup. Tapping it
+    // opens the full-screen backup page.
+    let backup_button = gtk::Button::builder()
+        .icon_name("mimick-cloud-symbolic")
+        .tooltip_text("Backup")
+        .css_classes(["flat", "mimick-pressable"])
+        .build();
+
+    // Header "New album" button (Albums tab): mirrors the in-view create button.
+    let new_album_button = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("New album")
+        .css_classes(["flat", "mimick-pressable"])
+        .build();
+
     let profile_avatar = libadwaita::Avatar::builder()
         .size(24)
         .show_initials(false)
@@ -530,8 +541,16 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     profile_button.set_menu_model(Some(&settings_menu));
 
     header.pack_start(&back_button);
+    // End side, contextual per tab. `pack_end` packs right-to-left, so the
+    // first-packed widget sits rightmost: profile is always rightmost, then
+    // (Photos) backup then upload to its left; (Albums) the new-album "+".
+    // Per-tab `visible` is toggled in `connect_tab_switch`; the initial startup
+    // tab is Photos, so upload + backup start visible and new-album hidden.
     header.pack_end(&profile_button);
+    header.pack_end(&backup_button);
+    header.pack_end(&new_album_button);
     header.pack_end(&upload_button);
+    new_album_button.set_visible(false);
 
     // Bottom nav: ViewSwitcherBar, revealed only when narrow.
     let switcher_bar = libadwaita::ViewSwitcherBar::builder()
@@ -573,8 +592,6 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     );
     narrow_bp.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
     narrow_bp.add_setter(&header_switcher, "visible", Some(&false.to_value()));
-    // The transfer/progress bar stays visible on the mobile breakpoint so
-    // backup/upload progress is shown while backing up (§6).
     let narrow_apply = narrow_flag.clone();
     let canvas_for_apply = grid.canvas.clone();
     narrow_bp.connect_apply(move |_| {
@@ -638,11 +655,12 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         active_drill: RefCell::new(None),
         active_drill_nav: RefCell::new(None),
         pre_drill_source: RefCell::new(None),
-        transfer_bar,
         transfer_progress,
         transfer_icon,
         transfer_label,
         status_button: status_button.clone(),
+        backup_button: backup_button.clone(),
+        new_album_button: new_album_button.clone(),
         profile_avatar: profile_avatar.clone(),
         search_entry,
         search_mode,
@@ -694,6 +712,26 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
             server_stats_dialog::present(ui.ctx.clone(), &ui.window);
         }
     ));
+
+    // Header backup icon (Photos tab) -> full-screen backup page.
+    ui.backup_button.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            backup_view::present_backup(ui.clone());
+        }
+    ));
+
+    // Header "New album" button (Albums tab) -> the same create flow the
+    // in-view create button drives.
+    ui.new_album_button.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| prompt_create_album(ui.clone())
+    ));
+
+    // Set the header end-buttons to match the startup tab (Photos).
+    sync_header_actions(&ui);
 
     // Register win.serverstats action so the profile menu "Server statistics"
     // item can open the same dialog.
@@ -764,9 +802,22 @@ fn connect_tab_switch(ui: Rc<LibraryWindowUi>) {
                 }
                 _ => {}
             }
+            sync_header_actions(&ui);
             controls::sync_tab_controls(&ui);
         }
     ));
+}
+
+/// Toggle the header end-side buttons to match the active tab (iOS-style
+/// contextual header). Profile is always shown (packed separately). Photos:
+/// upload + backup. Albums: the "New album" +. Search/Library: neither.
+fn sync_header_actions(ui: &LibraryWindowUi) {
+    let tab = ui.view_stack.visible_child_name();
+    let is_photos = tab.as_deref() == Some(shell::TAB_PHOTOS);
+    let is_albums = tab.as_deref() == Some(shell::TAB_ALBUMS);
+    ui.upload_button.set_visible(is_photos);
+    ui.backup_button.set_visible(is_photos);
+    ui.new_album_button.set_visible(is_albums);
 }
 
 /// Wire the Search tab: submit query (smart search), quick-links (Recently
@@ -852,7 +903,6 @@ fn connect_library_actions(ui: Rc<LibraryWindowUi>) {
     let uf = ui.clone();
     let ua = ui.clone();
     let ut = ui.clone();
-    let ub = ui.clone();
     explore_view::wire_library_actions(
         &ui.explore,
         move || {
@@ -894,9 +944,6 @@ fn connect_library_actions(ui: Rc<LibraryWindowUi>) {
                     }),
                 },
             );
-        },
-        move || {
-            backup_view::present_backup(ub.clone());
         },
     );
 }
@@ -1293,7 +1340,10 @@ fn album_click_handler(ui: Rc<LibraryWindowUi>) -> AlbumClick {
 
 /// Apply header control layout adjustments when switching view modes.
 fn apply_timeline_ui_state(ui: &LibraryWindowUi, source: &LibrarySource) {
-    let timeline_allowed = matches!(source, LibrarySource::AllAssets | LibrarySource::Timeline);
+    let timeline_allowed = matches!(
+        source,
+        LibrarySource::AllAssets | LibrarySource::Galleries | LibrarySource::Timeline
+    );
     let timeline_active = matches!(source, LibrarySource::Timeline);
     ui.ctx
         .library_timeline_active
@@ -1734,6 +1784,14 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                         .await;
                     merge_unified_page(remote, page, &ui, Some(&query)).await
                 }
+                LibrarySource::Galleries => {
+                    let remote = ui
+                        .ctx
+                        .api_client
+                        .search_metadata("", page, PAGE_SIZE, order)
+                        .await;
+                    merge_galleries_page(remote, page, &ui).await
+                }
                 LibrarySource::AlbumLocal { name, .. } => {
                     if page > 1 {
                         Ok((Vec::new(), false))
@@ -1910,7 +1968,6 @@ fn update_transfer_ui(ui: &LibraryWindowUi) {
         state.transfer.clone()
     };
     if !transfer.active {
-        ui.transfer_bar.remove_css_class("active");
         ui.transfer_progress.set_fraction(0.0);
         ui.transfer_icon.set_visible(false);
         let idle_summary =
@@ -1924,9 +1981,12 @@ fn update_transfer_ui(ui: &LibraryWindowUi) {
                 "Idle  No recent transfer session".to_string()
             };
         ui.transfer_label.set_label(&idle_summary);
+        // Header backup icon back to its resting state.
+        ui.backup_button.remove_css_class("mimick-backup-active");
+        ui.backup_button.set_icon_name("mimick-cloud-symbolic");
+        ui.backup_button.set_tooltip_text(Some("Backup"));
         return;
     }
-    ui.transfer_bar.add_css_class("active");
 
     let icon_name = match transfer.direction {
         TransferDirection::Upload => "mimick-upload-symbolic",
@@ -1947,15 +2007,39 @@ fn update_transfer_ui(ui: &LibraryWindowUi) {
     ui.transfer_label
         .set_label(&format!("{detail}  {live_speed}  avg {avg_speed}"));
 
-    match transfer.total_bytes {
+    let fraction = match transfer.total_bytes {
         Some(total) if total > 0 => {
+            let frac = (transfer.current_bytes as f64 / total as f64).clamp(0.0, 1.0);
             ui.transfer_progress.set_show_text(false);
-            ui.transfer_progress
-                .set_fraction((transfer.current_bytes as f64 / total as f64).clamp(0.0, 1.0));
+            ui.transfer_progress.set_fraction(frac);
+            Some(frac)
         }
         _ => {
             ui.transfer_progress.pulse();
+            None
         }
+    };
+
+    // Drive the header backup icon (Photos tab) from the same snapshot.
+    if matches!(transfer.direction, TransferDirection::Upload) {
+        ui.backup_button.set_icon_name(icon_name);
+        ui.backup_button.add_css_class("mimick-backup-active");
+        let n = transfer.active_uploads;
+        let tip = match fraction {
+            Some(frac) if n > 0 => {
+                format!("Backing up {n}…  {}%", (frac * 100.0).round() as u32)
+            }
+            Some(frac) => format!("Backing up…  {}%", (frac * 100.0).round() as u32),
+            None if n > 0 => format!("Backing up {n}…"),
+            None => "Backing up…".to_string(),
+        };
+        ui.backup_button.set_tooltip_text(Some(&tip));
+    } else {
+        // A download session is running — keep the backup icon at rest so it
+        // only ever reflects uploads (backups).
+        ui.backup_button.remove_css_class("mimick-backup-active");
+        ui.backup_button.set_icon_name("mimick-cloud-symbolic");
+        ui.backup_button.set_tooltip_text(Some("Backup"));
     }
 }
 
@@ -2089,6 +2173,60 @@ async fn merge_unified_page(
 
     local_rows.append(&mut remote);
     Ok((local_rows, has_more))
+}
+
+/// Merge a page of remote API assets with local photos from the DISPLAY-ONLY
+/// gallery folders (`config.galleries`).
+///
+/// This is the default Photos landing (`LibrarySource::Galleries`). It mirrors
+/// `merge_unified_page` — same checksum-based dedup so a photo that is both
+/// local and backed-up is shown once (as its remote row, which carries
+/// `sync_state == 2`) rather than twice — but the local side is driven by
+/// `enumerate_galleries` (display folders) instead of `enumerate_local`
+/// (backup watch paths).
+///
+/// Local files are only enumerated on the first page (they are unpaginated);
+/// subsequent remote pages append as usual, keeping scroll/pagination working.
+/// On page 1 the combined set is sorted newest-first by `created_at` so local
+/// photos interleave chronologically with remote ones rather than clumping at
+/// the top. Both remote (Immich `...Z`) and local (`to_rfc3339_opts(Millis,
+/// true)` → `...Z`) timestamps are UTC ISO-8601, so a reverse lexicographic
+/// sort is a correct newest-first order.
+async fn merge_galleries_page(
+    remote: Result<(Vec<LibraryAsset>, bool), String>,
+    page: u32,
+    ui: &Rc<LibraryWindowUi>,
+) -> Result<(Vec<LibraryAsset>, bool), String> {
+    let (remote, has_more) = remote?;
+    if page > 1 {
+        return Ok((remote, has_more));
+    }
+
+    let locals = enumerate_galleries(ui.ctx.clone()).await;
+
+    // Local files whose checksum is already present on the server (i.e. a
+    // remote row on this page maps back to them via the sync index) are
+    // dropped so the photo is not shown twice; the surviving remote row will
+    // itself resolve to `sync_state == 2` (backed-up) in `build_asset_objects`.
+    let synced_paths: std::collections::HashSet<String> = remote
+        .iter()
+        .filter_map(|a| a.checksum.as_deref())
+        .filter_map(immich_checksum_to_hex)
+        .filter_map(|hex| ui.ctx.sync_index.local_path_for_checksum(&hex))
+        .collect();
+
+    let local_rows: Vec<LibraryAsset> = locals
+        .into_iter()
+        .filter(|l| !synced_paths.contains(&l.path.display().to_string()))
+        .map(local_to_library_asset)
+        .collect();
+
+    let mut merged = remote;
+    merged.extend(local_rows);
+    // Newest-first across the merged set (see doc comment for why lexicographic
+    // reverse == chronological here).
+    merged.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok((merged, has_more))
 }
 
 /// Return the path of the watch entry linked to `album_name`, if any.

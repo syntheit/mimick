@@ -25,6 +25,7 @@ use crate::app_context::AppContext;
 mod actions_ui;
 mod behavior;
 mod connectivity;
+mod galleries;
 mod library;
 mod queue_inspector;
 mod status;
@@ -1044,6 +1045,9 @@ pub fn build_settings_window_with_parent(
             },
         );
     });
+
+    // --- GALLERIES GROUP (display-only timeline folders; separate from backup) ---
+    galleries::build_galleries_group(&settings_page, &ctx, &window);
 
     let actions_ui::ActionsWidgets {
         sync_now_btn,

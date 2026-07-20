@@ -224,6 +224,14 @@ pub struct ConfigData {
     /// List of watched local directory entries.
     #[serde(default)]
     pub watch_paths: Vec<WatchPathEntry>,
+    /// Folders whose local photos are DISPLAYED in the Photos timeline
+    /// (alongside remote server assets, each with its cloud sync-state badge).
+    ///
+    /// This is intentionally SEPARATE from `watch_paths` (backup): seeing a
+    /// folder in the timeline does not mean it is backed up. Seeded on first
+    /// run with `~/Pictures/Camera` and `~/Pictures/Screenshots` when present.
+    #[serde(default)]
+    pub galleries: Vec<String>,
     /// True if application should launch automatically at user login.
     #[serde(default)]
     pub run_on_startup: bool,
@@ -329,6 +337,7 @@ impl Default for ConfigData {
             show_hidden_faces: false,
             upload_xmp_sidecars: true,
             backup_enabled: false,
+            galleries: Vec::new(),
         }
     }
 }
@@ -387,7 +396,42 @@ impl Config {
         };
 
         config.load();
+        // Seed the display-only gallery folders on first run (or whenever the
+        // list is empty) so local Camera/Screenshots photos appear in the
+        // timeline out of the box. This is SEPARATE from `watch_paths` (backup).
+        if config.seed_default_galleries() {
+            config.save();
+        }
         config
+    }
+
+    /// Populate `galleries` with `~/Pictures/Camera` and `~/Pictures/Screenshots`
+    /// when the list is empty and those directories exist on disk.
+    ///
+    /// Returns true if any entry was added (so the caller can persist). This is
+    /// intentionally idempotent-once: once the user has any galleries (or has
+    /// removed the seeds down to empty and we re-seed only from an empty list),
+    /// we don't force the defaults back — the empty check runs at load time.
+    fn seed_default_galleries(&mut self) -> bool {
+        if !self.data.galleries.is_empty() {
+            return false;
+        }
+        let pictures = dirs::picture_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join("Pictures")));
+        let Some(pictures) = pictures else {
+            return false;
+        };
+        let mut added = false;
+        for name in ["Camera", "Screenshots"] {
+            let candidate = pictures.join(name);
+            if candidate.is_dir() {
+                self.data
+                    .galleries
+                    .push(candidate.to_string_lossy().to_string());
+                added = true;
+            }
+        }
+        added
     }
 
     /// Load or parse configuration state from standard path source.
@@ -511,6 +555,33 @@ impl Config {
             .iter()
             .map(|e| e.path().to_string())
             .collect()
+    }
+
+    /// Return the display-only gallery folder paths (timeline sources).
+    ///
+    /// Mirrors `watch_path_strings` but reads the separate `galleries` list.
+    /// These folders are DISPLAYED in the Photos timeline and are unrelated to
+    /// backup (`watch_paths`).
+    pub fn gallery_paths(&self) -> Vec<String> {
+        self.data.galleries.clone()
+    }
+
+    /// Append a gallery folder if not already present. Returns true if added.
+    /// Caller is responsible for persisting via `save()`.
+    pub fn add_gallery(&mut self, path: &str) -> bool {
+        if self.data.galleries.iter().any(|p| p == path) {
+            return false;
+        }
+        self.data.galleries.push(path.to_string());
+        true
+    }
+
+    /// Remove a gallery folder by exact path. Returns true if removed.
+    /// Caller is responsible for persisting via `save()`.
+    pub fn remove_gallery(&mut self, path: &str) -> bool {
+        let before = self.data.galleries.len();
+        self.data.galleries.retain(|p| p != path);
+        self.data.galleries.len() != before
     }
 }
 

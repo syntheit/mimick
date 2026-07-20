@@ -48,7 +48,6 @@ pub struct ExploreViewParts {
     on_favorites: Rc<RefCell<Option<LibraryAction>>>,
     on_archived: Rc<RefCell<Option<LibraryAction>>>,
     on_trash: Rc<RefCell<Option<LibraryAction>>>,
-    on_backup: Rc<RefCell<Option<LibraryAction>>>,
 }
 
 /// Construct the hierarchical panels and containers for the explore dashboard view.
@@ -67,16 +66,15 @@ pub fn build_explore_view() -> ExploreViewParts {
     let on_favorites: Rc<RefCell<Option<LibraryAction>>> = Rc::new(RefCell::new(None));
     let on_archived: Rc<RefCell<Option<LibraryAction>>> = Rc::new(RefCell::new(None));
     let on_trash: Rc<RefCell<Option<LibraryAction>>> = Rc::new(RefCell::new(None));
-    let on_backup: Rc<RefCell<Option<LibraryAction>>> = Rc::new(RefCell::new(None));
 
     // Immich-iOS-style quick-collection grid at the very top. Renders
     // immediately (no async data). Shared Links is deferred (no API), so the
-    // grid carries Favorites, Archived, Trash, Backup.
+    // grid carries Favorites, Archived, Trash. (Backup is reached from the
+    // header backup icon on the Photos tab, not from here.)
     let library_actions = build_library_actions(
         on_favorites.clone(),
         on_archived.clone(),
         on_trash.clone(),
-        on_backup.clone(),
     );
 
     let (people_section, people_row, people_spinner, people_filter_button) = build_people_section();
@@ -122,7 +120,6 @@ pub fn build_explore_view() -> ExploreViewParts {
         on_favorites,
         on_archived,
         on_trash,
-        on_backup,
     }
 }
 
@@ -135,7 +132,6 @@ fn build_library_actions(
     on_favorites: Rc<RefCell<Option<LibraryAction>>>,
     on_archived: Rc<RefCell<Option<LibraryAction>>>,
     on_trash: Rc<RefCell<Option<LibraryAction>>>,
-    on_backup: Rc<RefCell<Option<LibraryAction>>>,
 ) -> gtk::FlowBox {
     let grid = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
@@ -160,11 +156,6 @@ fn build_library_actions(
         "user-trash-symbolic",
         "Trash",
         on_trash,
-    ));
-    grid.append(&library_action_card(
-        "weather-overcast-symbolic",
-        "Backup",
-        on_backup,
     ));
 
     grid
@@ -222,12 +213,10 @@ pub fn wire_library_actions(
     on_favorites: impl Fn() + 'static,
     on_archived: impl Fn() + 'static,
     on_trash: impl Fn() + 'static,
-    on_backup: impl Fn() + 'static,
 ) {
     *parts.on_favorites.borrow_mut() = Some(Rc::new(on_favorites));
     *parts.on_archived.borrow_mut() = Some(Rc::new(on_archived));
     *parts.on_trash.borrow_mut() = Some(Rc::new(on_trash));
-    *parts.on_backup.borrow_mut() = Some(Rc::new(on_backup));
 }
 
 /// Reveal each section with its spinner active, so the user gets immediate
@@ -502,7 +491,6 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         on_favorites: parts.on_favorites.clone(),
         on_archived: parts.on_archived.clone(),
         on_trash: parts.on_trash.clone(),
-        on_backup: parts.on_backup.clone(),
     }
 }
 
