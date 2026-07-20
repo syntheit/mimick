@@ -293,6 +293,10 @@ pub struct ConfigData {
     /// rules can override this global default.
     #[serde(default = "default_true")]
     pub upload_xmp_sidecars: bool,
+    /// Master switch for the photo-backup feature (backup home page). When on,
+    /// the selected `watch_paths` folders are treated as backup sources.
+    #[serde(default)]
+    pub backup_enabled: bool,
 }
 
 impl Default for ConfigData {
@@ -324,6 +328,7 @@ impl Default for ConfigData {
             show_unnamed_faces: true,
             show_hidden_faces: false,
             upload_xmp_sidecars: true,
+            backup_enabled: false,
         }
     }
 }

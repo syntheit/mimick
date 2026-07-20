@@ -10,6 +10,12 @@
     <file alias="scalable/actions/mimick-cloud-symbolic.svg"
           compressed="true"
           preprocess="xml-stripblanks">scalable/actions/mimick-cloud-symbolic.svg</file>
+    <file alias="scalable/actions/mimick-cloud-done-symbolic.svg"
+          compressed="true"
+          preprocess="xml-stripblanks">scalable/actions/mimick-cloud-done-symbolic.svg</file>
+    <file alias="scalable/actions/mimick-cloud-off-symbolic.svg"
+          compressed="true"
+          preprocess="xml-stripblanks">scalable/actions/mimick-cloud-off-symbolic.svg</file>
     <file alias="scalable/actions/mimick-computer-symbolic.svg"
           compressed="true"
           preprocess="xml-stripblanks">scalable/actions/mimick-computer-symbolic.svg</file>

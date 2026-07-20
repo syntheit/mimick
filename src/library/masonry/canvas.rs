@@ -104,6 +104,12 @@ mod imp {
         pub check_icon: OnceCell<gdk4::Paintable>,
         /// Cached checkbox icon (unselected state).
         pub uncheck_icon: OnceCell<gdk4::Paintable>,
+        /// Cached cloud badge icon for sync_state=0 (server-only, outline cloud).
+        pub cloud_icon: OnceCell<gdk4::Paintable>,
+        /// Cached cloud badge icon for sync_state=2 (local + backed up, cloud with check).
+        pub cloud_done_icon: OnceCell<gdk4::Paintable>,
+        /// Cached cloud badge icon for sync_state=1 (local not backed up, cloud with slash).
+        pub cloud_off_icon: OnceCell<gdk4::Paintable>,
         /// True while a drag-out operation is in progress; suppresses click-to-activate.
         pub drag_active: Cell<bool>,
         /// The drag-export controller, retained so it can be detached on mobile.
@@ -409,6 +415,13 @@ mod imp {
                 self.paint_video_badge(snapshot, it.x, row.y, it.w, row.h);
             }
 
+            // Cloud backup-status badge in the bottom-right corner.
+            // Skipped in select mode: the checkbox owns the tile corners.
+            if !self.select_mode.get() {
+                let sync_state = asset.property::<u32>("sync-state");
+                self.paint_cloud_badge(snapshot, it.x, row.y, it.w, row.h, sync_state);
+            }
+
             if clipped {
                 snapshot.pop();
             }
@@ -452,6 +465,61 @@ mod imp {
             let icon_y = cell_y + (cell_h - icon_size) * 0.5;
             snapshot.save();
             snapshot.translate(&gtk::graphene::Point::new(icon_x, icon_y));
+            icon.snapshot(
+                snapshot.upcast_ref::<gdk4::Snapshot>(),
+                icon_size as f64,
+                icon_size as f64,
+            );
+            snapshot.restore();
+        }
+
+        /// Paint the cloud backup-status badge in the bottom-right corner of a tile.
+        ///
+        /// Three states driven by `sync_state`:
+        ///   0 = server-only        → `mimick-cloud-symbolic`      (outline cloud)
+        ///   1 = local, not backed up → `mimick-cloud-off-symbolic` (cloud with slash)
+        ///   2 = local + backed up  → `mimick-cloud-done-symbolic` (cloud with check)
+        fn paint_cloud_badge(
+            &self,
+            snapshot: &gtk::Snapshot,
+            cell_x: f32,
+            cell_y: f32,
+            cell_w: f32,
+            cell_h: f32,
+            sync_state: u32,
+        ) {
+            let icon = match sync_state {
+                0 => self
+                    .cloud_icon
+                    .get_or_init(|| resolve_symbolic_icon(&self.obj(), "mimick-cloud-symbolic")),
+                2 => self
+                    .cloud_done_icon
+                    .get_or_init(|| resolve_symbolic_icon(&self.obj(), "mimick-cloud-done-symbolic")),
+                _ => self
+                    .cloud_off_icon
+                    .get_or_init(|| resolve_symbolic_icon(&self.obj(), "mimick-cloud-off-symbolic")),
+            };
+
+            let box_size = (cell_h * 0.14).clamp(16.0, 26.0);
+            let margin = 6.0_f32;
+            let bx = cell_x + cell_w - box_size - margin;
+            let by = cell_y + cell_h - box_size - margin;
+
+            // Semi-transparent dark rounded pill behind the icon for contrast.
+            let r = 4.0_f32;
+            let corner = Size::new(r, r);
+            let bg_rect = Rect::new(bx, by, box_size, box_size);
+            let rounded = RoundedRect::new(bg_rect, corner, corner, corner, corner);
+            let bg_color = gdk4::RGBA::new(0.0, 0.0, 0.0, 0.55);
+            snapshot.push_rounded_clip(&rounded);
+            snapshot.append_color(&bg_color, &bg_rect);
+            snapshot.pop();
+
+            // Icon centred on the pill.
+            let inset = 2.0_f32;
+            let icon_size = box_size - inset * 2.0;
+            snapshot.save();
+            snapshot.translate(&gtk::graphene::Point::new(bx + inset, by + inset));
             icon.snapshot(
                 snapshot.upcast_ref::<gdk4::Snapshot>(),
                 icon_size as f64,

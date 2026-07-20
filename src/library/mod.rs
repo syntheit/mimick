@@ -54,6 +54,7 @@ pub mod thumbnail_cache;
 
 mod actions;
 mod album_link;
+mod backup_view;
 mod context_menu;
 mod controls;
 mod download;
@@ -572,7 +573,8 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     );
     narrow_bp.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
     narrow_bp.add_setter(&header_switcher, "visible", Some(&false.to_value()));
-    narrow_bp.add_setter(&transfer_bar, "visible", Some(&false.to_value()));
+    // The transfer/progress bar stays visible on the mobile breakpoint so
+    // backup/upload progress is shown while backing up (§6).
     let narrow_apply = narrow_flag.clone();
     let canvas_for_apply = grid.canvas.clone();
     narrow_bp.connect_apply(move |_| {
@@ -850,6 +852,7 @@ fn connect_library_actions(ui: Rc<LibraryWindowUi>) {
     let uf = ui.clone();
     let ua = ui.clone();
     let ut = ui.clone();
+    let ub = ui.clone();
     explore_view::wire_library_actions(
         &ui.explore,
         move || {
@@ -891,6 +894,9 @@ fn connect_library_actions(ui: Rc<LibraryWindowUi>) {
                     }),
                 },
             );
+        },
+        move || {
+            backup_view::present_backup(ub.clone());
         },
     );
 }
