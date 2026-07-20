@@ -2204,10 +2204,17 @@ async fn merge_galleries_page(
 
     let locals = enumerate_galleries(ui.ctx.clone()).await;
 
-    // Local files whose checksum is already present on the server (i.e. a
-    // remote row on this page maps back to them via the sync index) are
-    // dropped so the photo is not shown twice; the surviving remote row will
-    // itself resolve to `sync_state == 2` (backed-up) in `build_asset_objects`.
+    // Only surface local photos that are NOT yet backed up. A backed-up local
+    // (in the sync index → `local_sync_state == 2`, or whose checksum matches a
+    // remote row on this page) is already represented by its server row, which
+    // resolves to `sync_state == 2` (check badge) in `build_asset_objects`.
+    // Showing the local copy too would DUPLICATE it — and because locals are
+    // enumerated unpaginated while remote is paged, that duplicate can land on
+    // a different page than its twin (the earlier per-page-only dedup missed
+    // exactly those). Filtering to unbacked locals keeps the timeline
+    // remote-primary (full server library, paginated) plus the handful of
+    // not-yet-uploaded photos, shown with a slash badge. This matches Immich:
+    // a local photo appears as "local, not backed up" only until it's uploaded.
     let synced_paths: std::collections::HashSet<String> = remote
         .iter()
         .filter_map(|a| a.checksum.as_deref())
@@ -2217,7 +2224,10 @@ async fn merge_galleries_page(
 
     let local_rows: Vec<LibraryAsset> = locals
         .into_iter()
-        .filter(|l| !synced_paths.contains(&l.path.display().to_string()))
+        .filter(|l| {
+            crate::library::local_source::local_sync_state(&ui.ctx.sync_index, &l.path) == 1
+                && !synced_paths.contains(&l.path.display().to_string())
+        })
         .map(local_to_library_asset)
         .collect();
 
