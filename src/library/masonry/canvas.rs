@@ -136,6 +136,22 @@ mod imp {
             gtk::SizeRequestMode::HeightForWidth
         }
 
+        fn map(&self) {
+            self.parent_map();
+            // The canvas is a single shared widget that gets reparented into
+            // freshly-pushed navigation pages on album / person drill-in. When
+            // it is torn out of one subtree and mapped into a just-pushed page
+            // that is still mid-transition, its first allocation can land at
+            // zero width — `snapshot` early-returns at `canvas_w <= 0.0` and the
+            // data-arrival `queue_draw` (from `items_changed`) paints nothing,
+            // with nothing re-arming another draw once a real width finally
+            // arrives. That is the "first tap shows an empty grid, retry works"
+            // race. Re-arm a relayout + redraw every time we are mapped into a
+            // new subtree so the grid paints on the first drill-in.
+            self.invalidate_layout();
+            self.obj().queue_draw();
+        }
+
         fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
             match orientation {
                 gtk::Orientation::Horizontal => (200, 200, -1, -1),

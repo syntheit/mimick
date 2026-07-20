@@ -111,6 +111,10 @@ struct LibraryWindowUi {
     /// The scrolled window hosting the shared photos grid canvas; re-parented
     /// between the Photos tab and drill-in detail pages.
     grid_scrolled: gtk::ScrolledWindow,
+    /// Stable slot inside the Photos tab that owns `grid_scrolled` when no
+    /// drill-in is active. The grid is reparented in/out of this box so
+    /// pop-back always restores it to a known position.
+    grid_host: gtk::Box,
     /// Whichever tab currently owns `grid_scrolled` for status updates
     /// (`load_source_page`/`sync_content_state`). `None` = the Photos tab
     /// root; `Some` = a pushed drill-in page.
@@ -242,7 +246,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     let upload_button = gtk::Button::builder()
         .icon_name("document-send-symbolic")
         .tooltip_text("Upload to library")
-        .css_classes(["suggested-action", "mimick-pressable"])
+        .css_classes(["flat", "mimick-pressable"])
         .build();
 
     // Source mode (Remote/Local/Unified) is meaningful only inside a linked
@@ -275,7 +279,6 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .spacing(8)
         .build();
     sort_group.append(&sort_mode);
-    sort_group.append(&upload_button);
 
     let controls = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -402,16 +405,23 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         .child(&bulk_inner)
         .build();
 
-    // Photos tab content: the controls bar + shared masonry grid + select/bulk
-    // /transfer chrome all live here (the default tab).
+    // Photos tab content: a pure chronological grid (Immich mobile style). The
+    // search/sort/timeline controls bar is intentionally NOT shown here — the
+    // Photos tab is timeline-only and the dedicated Search tab owns search.
+    // Upload lives in the header. `grid_host` is a stable slot the shared grid
+    // is reparented in/out of on drill-in.
     let grid_scrolled = grid.scrolled.clone();
+    let grid_host = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    grid_host.append(&grid_scrolled);
     let photos_content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
-    photos_content.append(&controls);
     photos_content.append(&album_link_listbox);
-    photos_content.append(&timeline_banner);
-    photos_content.append(&grid_scrolled);
+    photos_content.append(&grid_host);
     photos_content.append(&bulk_bar);
     photos_content.append(&transfer_bar);
     photos_tab.set_content_child(&photos_content);
@@ -458,7 +468,12 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         Some(shell::TAB_LIBRARY),
         "Library",
     );
-    library_page.set_icon_name(Some("view-app-grid-symbolic"));
+    library_page.set_icon_name(Some("mimick-library-symbolic"));
+
+    // Explicitly anchor the initial visible child. Without this, the
+    // ViewSwitcher/ViewSwitcherBar selection state can desync from the stack
+    // on startup (a tab other than the first-added page renders as selected).
+    view_stack.set_visible_child_name(shell::TAB_PHOTOS);
 
     // Header: back button (start), ViewSwitcher title (wide only),
     // backup/transfer status + profile-avatar menu (end).
@@ -495,6 +510,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     header.pack_start(&back_button);
     header.pack_end(&profile_button);
     header.pack_end(&status_button);
+    header.pack_end(&upload_button);
 
     // Bottom nav: ViewSwitcherBar, revealed only when narrow.
     let switcher_bar = libadwaita::ViewSwitcherBar::builder()
@@ -591,6 +607,7 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
         explore,
         albums,
         grid_scrolled,
+        grid_host,
         active_drill: RefCell::new(None),
         transfer_bar,
         transfer_progress,

@@ -17,19 +17,25 @@ use libadwaita as adw;
 use crate::queue_manager::QueueManager;
 use crate::state_manager::QueueEvent;
 
-/// Construct and present the modal Queue Inspector window.
+/// Construct and present the Queue Inspector as a swipe-dismissable dialog.
+///
+/// The `parent` bound is `IsA<gtk::Widget>` (not `IsA<gtk::Window>`) because
+/// `adw::Dialog::present` is presented relative to any widget: the settings
+/// surface is itself an `adw::Dialog` (a Widget, not a Window), while the
+/// library caller passes its `adw::ApplicationWindow` (also a Widget). Both
+/// satisfy this bound.
 pub fn show_queue_inspector(
-    parent: &impl gtk::prelude::IsA<gtk::Window>,
+    parent: &impl gtk::prelude::IsA<gtk::Widget>,
     queue_manager: Arc<QueueManager>,
 ) {
-    let dialog = adw::Window::builder()
-        .transient_for(parent)
-        .modal(true)
+    // adw::Dialog renders as a bottom-sheet-ish full dialog on mobile that the
+    // shell can swipe-dismiss. Content sizing is via content-width/height (the
+    // shell clamps to the screen); no transient/modal/default-size — those are
+    // Window-only.
+    let dialog = adw::Dialog::builder()
         .title("Queue Inspector")
-        .default_width(900)
-        .default_height(680)
-        .width_request(360)
-        .height_request(480)
+        .content_width(900)
+        .content_height(680)
         .build();
 
     let header = adw::HeaderBar::builder().show_title(true).build();
@@ -51,7 +57,9 @@ pub fn show_queue_inspector(
     let toolbar = adw::ToolbarView::builder().build();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&main_scroll));
-    dialog.set_content(Some(&toolbar));
+    // adw::Dialog hosts content via set_child (set_content is Window-only). The
+    // HeaderBar inside the ToolbarView renders the Dialog's own close button.
+    dialog.set_child(Some(&toolbar));
 
     let actions = Box::builder()
         .orientation(Orientation::Horizontal)
@@ -144,7 +152,7 @@ pub fn show_queue_inspector(
 
     dialog.add_breakpoint(bp);
 
-    dialog.present();
+    dialog.present(Some(parent));
 }
 
 /// Detect whether event statuses differ from what's currently displayed.

@@ -1375,6 +1375,34 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .wrap(true)
         .css_classes(["title-4"])
         .build();
+    // ── People / recognized faces row ────────────────────────────────
+    // A "People" heading plus a horizontally-scrolling strip of circular
+    // avatars (one per non-hidden recognized person). Built once here and
+    // repopulated per-asset; hidden entirely when the current asset has no
+    // people.
+    let details_people = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .visible(false)
+        .build();
+    let details_people_title = gtk::Label::builder()
+        .xalign(0.0)
+        .label("People")
+        .css_classes(["title-4"])
+        .build();
+    // Horizontal strip that holds the per-person avatar+name tiles.
+    let details_people_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .build();
+    let details_people_scroll = gtk::ScrolledWindow::builder()
+        .child(&details_people_row)
+        .hscrollbar_policy(gtk::PolicyType::External)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .build();
+    details_people.append(&details_people_title);
+    details_people.append(&details_people_scroll);
     let description_group = libadwaita::PreferencesGroup::builder()
         .title("Description")
         .build();
@@ -1396,6 +1424,7 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         .build();
     details_inner.append(&sheet_grabber);
     details_inner.append(&details_timestamp);
+    details_inner.append(&details_people);
     details_inner.append(&description_group);
     details_inner.append(&details_map_box);
     details_inner.append(&details_loading);
@@ -1742,6 +1771,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
         let description_row = description_row.clone();
         let details_map_box = details_map_box.clone();
         let details_exif = details_exif.clone();
+        let details_people = details_people.clone();
+        let details_people_row = details_people_row.clone();
         let details_loading = details_loading.clone();
         move || {
             let pos = pos_cell.get();
@@ -1765,6 +1796,12 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             while let Some(c) = details_map_box.first_child() {
                 details_map_box.remove(&c);
             }
+            // Clear + hide the people strip so a remote→local (or empty)
+            // navigation never leaves stale faces from the previous asset.
+            while let Some(c) = details_people_row.first_child() {
+                details_people_row.remove(&c);
+            }
+            details_people.set_visible(false);
             description_row.set_text("");
             favorite_btn.set_active(false);
             favorite_btn.set_icon_name("non-starred-symbolic");
@@ -1894,6 +1931,8 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
             let details_loading = details_loading.clone();
             let details_exif = details_exif.clone();
             let details_map_box = details_map_box.clone();
+            let details_people = details_people.clone();
+            let details_people_row = details_people_row.clone();
             let description_row = description_row.clone();
             let favorite_btn = favorite_btn.clone();
             let cur_favorite = cur_favorite.clone();
@@ -1931,6 +1970,66 @@ pub(super) fn open_lightbox(ui: Rc<LibraryWindowUi>, position: u32) {
                     }
                     fill_exif_box(&details_exif, &exif, "Taken");
                     details_exif.set_visible(true);
+                }
+
+                // ── Recognized people/faces ──────────────────────────────
+                // Show every non-hidden person (named or not). Each tile is a
+                // circular avatar (initials fallback until the real thumbnail
+                // arrives) over an ellipsized name label. The avatar
+                // thumbnails load lazily and re-check the position guard so a
+                // fast swipe never paints a face onto the wrong photo.
+                let visible_people: Vec<crate::api_client::Person> = details
+                    .people
+                    .into_iter()
+                    .filter(|p| !p.is_hidden)
+                    .collect();
+                if !visible_people.is_empty() {
+                    for person in visible_people {
+                        let tile = gtk::Box::builder()
+                            .orientation(gtk::Orientation::Vertical)
+                            .spacing(4)
+                            .halign(gtk::Align::Center)
+                            .build();
+                        let avatar = libadwaita::Avatar::new(
+                            48,
+                            (!person.name.is_empty()).then_some(person.name.as_str()),
+                            true,
+                        );
+                        tile.append(&avatar);
+                        if !person.name.is_empty() {
+                            let name_label = gtk::Label::builder()
+                                .label(&person.name)
+                                .ellipsize(gtk::pango::EllipsizeMode::End)
+                                .max_width_chars(8)
+                                .halign(gtk::Align::Center)
+                                .css_classes(["caption"])
+                                .build();
+                            tile.append(&name_label);
+                        }
+                        details_people_row.append(&tile);
+
+                        // Lazily fetch the real face thumbnail; drop the result
+                        // if the user navigated away in the meantime.
+                        let ctx = ui_async.ctx.clone();
+                        let pos_cell_person = pos_cell_async.clone();
+                        let person_id = person.id.clone();
+                        glib::MainContext::default().spawn_local(async move {
+                            let bytes = match ctx.api_client.fetch_person_thumbnail(&person_id).await
+                            {
+                                Ok(b) => b,
+                                Err(_) => return,
+                            };
+                            if pos_cell_person.get() != pos {
+                                return;
+                            }
+                            if let Ok(texture) = gtk::gdk::Texture::from_bytes(
+                                &glib::Bytes::from(&bytes[..]),
+                            ) {
+                                avatar.set_custom_image(Some(&texture));
+                            }
+                        });
+                    }
+                    details_people.set_visible(true);
                 }
             });
         }

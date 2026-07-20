@@ -316,38 +316,10 @@ pub(super) fn tab_drill_in(
     update_back_button(&ui);
 }
 
-/// Return the shared grid scrolled window to the Photos tab's content box.
+/// Return the shared grid scrolled window to the Photos tab's stable grid host.
 fn return_grid_to_photos(ui: &Rc<LibraryWindowUi>) {
     shell::unparent_from_slot(&ui.grid_scrolled);
-    if let Some(content) = ui
-        .photos_tab
-        .content_slot
-        .first_child()
-        .and_downcast::<gtk::Box>()
-    {
-        // The photos content box: controls, album_link, banner, GRID, bulk,
-        // transfer. Re-insert the grid after the timeline banner (3rd child).
-        insert_grid_into_photos(&content, &ui.grid_scrolled);
-    }
-}
-
-/// Insert the grid scrolled window back into its slot in the photos content
-/// box (after the timeline banner, before the bulk bar).
-fn insert_grid_into_photos(content: &gtk::Box, grid: &gtk::ScrolledWindow) {
-    // The photos content box always has: [controls][album_link][banner]
-    // [<grid slot>][bulk][transfer]. Insert after the 3rd child.
-    let mut anchor = content.first_child();
-    let mut count = 0;
-    while let Some(child) = anchor {
-        count += 1;
-        if count == 3 {
-            content.insert_child_after(grid, Some(&child));
-            return;
-        }
-        anchor = child.next_sibling();
-    }
-    // Fallback: prepend.
-    content.prepend(grid);
+    ui.grid_host.append(&ui.grid_scrolled);
 }
 
 pub(super) fn refresh_library_surfaces(ui: Rc<LibraryWindowUi>, include_current_source: bool) {

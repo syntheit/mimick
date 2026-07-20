@@ -14,7 +14,7 @@ pub struct ConnectivityWidgets {
 
 pub fn build_connectivity_group(
     settings_page: &adw::PreferencesPage,
-    window: &adw::ApplicationWindow,
+    window: &adw::Dialog,
 ) -> ConnectivityWidgets {
     let conn_group = adw::PreferencesGroup::builder()
         .title("Connectivity")
@@ -105,7 +105,7 @@ fn add_group_button(
 }
 
 fn add_connectivity_breakpoint(
-    window: &adw::ApplicationWindow,
+    window: &adw::Dialog,
     internal_row: &adw::ActionRow,
     external_row: &adw::ActionRow,
     internal_entry: &Entry,

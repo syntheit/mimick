@@ -460,6 +460,12 @@ pub struct AssetDetails {
     /// `description`; Immich stores the edited value here).
     #[serde(default)]
     pub description: Option<String>,
+    /// Recognized people/faces detected in this asset. The `Person`
+    /// deserializer tolerates the extra fields Immich returns
+    /// (`isHidden`, `withFaces`, etc.). Hidden-face filtering is done in
+    /// the UI layer, not here.
+    #[serde(default)]
+    pub people: Vec<Person>,
 }
 
 /// Type of asset thumbnails requested.

@@ -102,21 +102,19 @@ pub fn build_settings_window_with_parent(
     let sync_now_tx = ctx.sync_now_tx.clone();
     let thumbnail_cache = ctx.thumbnail_cache.clone();
     let shared_config = ctx.config.clone();
-    // Use an application window with a Libadwaita header switcher and two pages.
-    let mut window_builder = adw::ApplicationWindow::builder()
-        .application(app)
+    // NOTE: `app` is no longer used to *own* this surface (an adw::Dialog is
+    // presented relative to a parent widget, not owned by the application), but
+    // it is still cloned below for the quit action and the on-close teardown.
+    // Use an adw::Dialog so on mobile it renders as a swipe-dismissable sheet.
+    // Dialogs host their content via set_child (NOT set_content) and are shown
+    // via present(Some(parent)); content sizing is via content-width/height,
+    // which the shell clamps to the screen on small displays.
+    let window = adw::Dialog::builder()
         .title("Mimick")
         .name("mimick-settings-window")
-        .default_width(520)
-        .default_height(780);
-    if let Some(parent) = parent {
-        window_builder = window_builder
-            .transient_for(parent)
-            .modal(true)
-            .destroy_with_parent(true);
-    }
-    let window = window_builder.build();
-    window.set_size_request(360, 480);
+        .content_width(520)
+        .content_height(780)
+        .build();
 
     let view_stack = adw::ViewStack::builder()
         .vexpand(true)
@@ -139,7 +137,10 @@ pub fn build_settings_window_with_parent(
     let toolbar_view = adw::ToolbarView::builder().build();
     toolbar_view.add_top_bar(&header_bar);
     toolbar_view.set_content(Some(&view_stack));
-    window.set_content(Some(&toolbar_view));
+    // adw::Dialog hosts its content via set_child (not set_content, which is
+    // Window-only). The HeaderBar inside the ToolbarView automatically renders
+    // the Dialog's own close button.
+    window.set_child(Some(&toolbar_view));
 
     let status_scroll = ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -517,7 +518,10 @@ pub fn build_settings_window_with_parent(
             let dialog = gtk::FileDialog::builder()
                 .title("Choose Download Folder")
                 .build();
-            dialog.select_folder(Some(&window), gtk::gio::Cancellable::NONE, move |res| {
+            // FileDialog needs a gtk::Window parent, not a Widget. adw::Dialog is
+            // not a Window, so resolve the toplevel window hosting the dialog.
+            let file_parent = window.root().and_downcast::<gtk::Window>();
+            dialog.select_folder(file_parent.as_ref(), gtk::gio::Cancellable::NONE, move |res| {
                 if let Some(path) = res.ok().and_then(|f| f.path()) {
                     let path_str = path.to_string_lossy().to_string();
                     row.set_subtitle(&path_str);
@@ -769,7 +773,17 @@ pub fn build_settings_window_with_parent(
                 shared_config,
                 async move {
                     if run_on_startup != previous_startup {
-                        match autostart::apply(&window, run_on_startup).await {
+                        // autostart::apply needs a gtk::Window (for the Flatpak
+                        // background-portal WindowIdentifier). adw::Dialog is not a
+                        // Window, so resolve the toplevel window hosting the dialog.
+                        // The dialog is always rooted while presented; on the
+                        // unreachable un-rooted path we synthesize an empty window so
+                        // the call remains sound (the portal simply gets no parent).
+                        let autostart_parent = window
+                            .root()
+                            .and_downcast::<gtk::Window>()
+                            .unwrap_or_else(gtk::Window::new);
+                        match autostart::apply(&autostart_parent, run_on_startup).await {
                             Ok(granted) if granted == run_on_startup => {}
                             Ok(_) => {
                                 startup_row.set_active(previous_startup);
@@ -1004,8 +1018,10 @@ pub fn build_settings_window_with_parent(
         let apply_settings_for_add = apply_settings_for_add.clone();
         let folder_default_catchup_for_add = folder_default_catchup_for_add.clone();
 
+        // FileDialog needs a gtk::Window parent; resolve it from the dialog's root.
+        let file_parent = window_clone.root().and_downcast::<gtk::Window>();
         dialog.select_folder(
-            Some(&window_clone),
+            file_parent.as_ref(),
             gtk::gio::Cancellable::NONE,
             move |res| {
                 if let Ok(file) = res
@@ -1081,8 +1097,10 @@ pub fn build_settings_window_with_parent(
                 .build();
             let state = shared_state.clone();
             let config_ref = shared_config.clone();
+            // FileDialog needs a gtk::Window parent; resolve it from the dialog's root.
+            let file_parent = window.root().and_downcast::<gtk::Window>();
             dialog.select_folder(
-                Some(&window),
+                file_parent.as_ref(),
                 gtk::gio::Cancellable::NONE,
                 clone!(
                     #[weak]
@@ -1337,11 +1355,21 @@ pub fn build_settings_window_with_parent(
         }
     ));
 
-    // If background sync is disabled AND this is the only open window, closing
-    // settings should exit the app. When the library window is also open we
-    // must not quit — the user explicitly opened settings *from* the library
-    // and expects the library to stay around after dismissing settings.
-    window.connect_close_request(clone!(
+    // If background sync is disabled AND no real application window remains,
+    // dismissing settings should exit the app. When the library window is also
+    // open we must not quit — the user explicitly opened settings *from* the
+    // library and expects the library to stay around after dismissing settings.
+    //
+    // adw::Dialog has no connect_close_request; the equivalent teardown hook is
+    // connect_closed, which fires *after* the dialog is dismissed and takes a
+    // |dialog| closure with no propagation return value.
+    //
+    // NOTE the counting change: as a Dialog this settings surface is NOT an
+    // adw::Application window, so it never appears in app.windows(). Previously
+    // (as an ApplicationWindow) the closing window was still counted, so the
+    // "only window left" test was `<= 1`. Now the settings surface is uncounted,
+    // so the equivalent "nothing else is open" test is an empty window list.
+    window.connect_closed(clone!(
         #[strong]
         app_clone,
         #[strong]
@@ -1349,18 +1377,12 @@ pub fn build_settings_window_with_parent(
         move |_| {
             // Read current background-sync state directly from config rather
             // than from a shadow RefCell, so any code path that mutates the
-            // config (apply_settings, future autosave, etc.) is reflected
-            // here without a separate book-keeping step.
-            // The closing window is still in app.windows() at this point, so
-            // a count of 1 means we're the only window left — quit the app.
-            // > 1 means another window (typically the library) is open and
-            // should keep running.
+            // config (apply_settings, future autosave, etc.) is reflected here
+            // without a separate book-keeping step.
             let bg_sync = ctx.config.read().data.background_sync_enabled;
-            if !bg_sync && app_clone.windows().len() <= 1 {
+            if !bg_sync && app_clone.windows().is_empty() {
                 app_clone.quit();
-                return glib::Propagation::Stop;
             }
-            glib::Propagation::Proceed
         }
     ));
 
@@ -1518,7 +1540,12 @@ pub fn build_settings_window_with_parent(
             }
         ),
     );
-    window.present();
+    // adw::Dialog is presented relative to a parent widget (the library window
+    // when opened from it, otherwise no parent) rather than owned by the app.
+    match parent {
+        Some(parent) => window.present(Some(parent)),
+        None => window.present(None::<&gtk::Widget>),
+    }
 }
 
 #[cfg(test)]
