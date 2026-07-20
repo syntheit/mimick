@@ -816,6 +816,14 @@ fn connect_tab_switch(ui: Rc<LibraryWindowUi>) {
                 }
                 Some(shell::TAB_SEARCH) => {
                     load_search_landing(ui.clone());
+                    // The SearchEntry auto-grabs focus when the tab maps, which
+                    // pops the OSK immediately. Schedule a focus-clear on the next
+                    // idle tick (after the page finishes mapping) so the keyboard
+                    // only appears when the user explicitly taps the entry.
+                    let win = ui.window.clone();
+                    glib::idle_add_local_once(move || {
+                        gtk::prelude::GtkWindowExt::set_focus(&win, None::<&gtk::Widget>);
+                    });
                 }
                 _ => {}
             }
@@ -970,85 +978,6 @@ fn load_search_landing(ui: Rc<LibraryWindowUi>) {
                                 ..Default::default()
                             }),
                         },
-                    );
-                },
-            );
-        }
-    ));
-
-    // Places → drill into AdvancedSearch { city }. Slow paginated scan; fetch
-    // only if not already cached on this tab's browse view.
-    if !explore_view::has_cached_places(browse) {
-        mctx.spawn_local(clone!(
-            #[strong]
-            ui,
-            #[strong]
-            ctx,
-            async move {
-                let places_res = ctx.api_client.fetch_all_places().await;
-                if let Err(e) = &places_res
-                    && (e.contains("HTTP 401") || e.contains("HTTP 403"))
-                {
-                    show_library_permission_error(&ui.window);
-                }
-                let places = places_res.unwrap_or_default();
-                let click_ui = ui.clone();
-                explore_view::populate_places(
-                    &ui.search_view.browse,
-                    ctx.clone(),
-                    places,
-                    move |_kind, value, _asset_id| {
-                        tab_drill_in(
-                            click_ui.clone(),
-                            click_ui.search_tab.nav.clone(),
-                            value.clone(),
-                            LibrarySource::AdvancedSearch {
-                                filters: Box::new(MetadataSearchFilters {
-                                    city: Some(value),
-                                    ..Default::default()
-                                }),
-                            },
-                        );
-                    },
-                );
-            }
-        ));
-    } else {
-        explore_view::render_cached_places(browse, ctx.clone());
-    }
-
-    // Categories / Things → drill into SmartSearch { query: value }.
-    mctx.spawn_local(clone!(
-        #[strong]
-        ui,
-        #[strong]
-        ctx,
-        async move {
-            let sections_res = ctx.api_client.fetch_explore().await;
-            if let Err(e) = &sections_res
-                && (e.contains("HTTP 401") || e.contains("HTTP 403"))
-            {
-                show_library_permission_error(&ui.window);
-            }
-            let sections = sections_res.unwrap_or_default();
-            let click_ui = ui.clone();
-            explore_view::populate_explore(
-                &ui.search_view.browse,
-                ctx.clone(),
-                sections,
-                move |kind, value, asset_id| {
-                    if kind == "recent" {
-                        // The Search landing omits the Recently-Added section, so
-                        // this branch is unreachable in practice; keep it lightbox-
-                        // safe in case a recents tile is ever surfaced here.
-                        open_asset_in_lightbox(click_ui.clone(), asset_id);
-                        return;
-                    }
-                    tab_drill_in(
-                        click_ui.clone(),
-                        click_ui.search_tab.nav.clone(),
-                        value.clone(),
-                        LibrarySource::SmartSearch { query: value },
                     );
                 },
             );

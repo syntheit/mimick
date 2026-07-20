@@ -79,6 +79,12 @@ pub struct BrowseOptions {
     /// Optional widget appended below every section (e.g. the Search tab's
     /// media-type quick-chip row).
     pub trail: Option<gtk::Widget>,
+    /// Include the "Places" city-tile section. The Search tab omits it to keep
+    /// the landing lean; the Library tab includes it.
+    pub include_places: bool,
+    /// Include the "Things" tag-tile section. The Search tab omits it for the
+    /// same reason; the Library tab includes it.
+    pub include_things: bool,
 }
 
 /// Construct the hierarchical panels and containers for the explore dashboard
@@ -90,6 +96,8 @@ pub fn build_explore_view() -> ExploreViewParts {
         include_recents: true,
         lead: None,
         trail: None,
+        include_places: true,
+        include_things: true,
     })
 }
 
@@ -137,11 +145,15 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
     }
 
     outer.append(&people_section);
-    outer.append(&places_section);
+    if opts.include_places {
+        outer.append(&places_section);
+    }
     if opts.include_recents {
         outer.append(&recents_section);
     }
-    outer.append(&things_section);
+    if opts.include_things {
+        outer.append(&things_section);
+    }
 
     // Optional trail widget (media-type chip row) below the sections.
     if let Some(trail) = &opts.trail {

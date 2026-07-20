@@ -127,6 +127,8 @@ pub fn build_search_view() -> SearchViewParts {
         include_recents: false,
         lead: Some(search_bar),
         trail: Some(media_row),
+        include_places: false,
+        include_things: false,
     });
 
     let root = browse.root.clone().upcast::<gtk::Widget>();
