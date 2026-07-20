@@ -800,6 +800,9 @@ fn connect_tab_switch(ui: Rc<LibraryWindowUi>) {
                 Some(shell::TAB_LIBRARY) => {
                     load_explore_landing(ui.clone());
                 }
+                Some(shell::TAB_SEARCH) => {
+                    load_search_landing(ui.clone());
+                }
                 _ => {}
             }
             sync_header_actions(&ui);
@@ -820,12 +823,13 @@ fn sync_header_actions(ui: &LibraryWindowUi) {
     ui.new_album_button.set_visible(is_albums);
 }
 
-/// Wire the Search tab: submit query (smart search), quick-links (Recently
-/// taken/added, Videos, Favorites), and filter chips. Each drills into a
-/// filtered results grid on the Search tab's own NavigationView.
+/// Wire the Search tab's chrome: the search bar (Enter → smart search), the
+/// Filters button (advanced-filters dialog), and the media-type quick chips.
+/// Each drills into a filtered results grid on the Search tab's own
+/// NavigationView. The browse sections (People / Places / Things) are wired
+/// lazily in [`load_search_landing`] on first Search-tab visit.
 fn connect_search(ui: Rc<LibraryWindowUi>) {
-    use crate::api_client::SortOrder;
-    use search_view::QuickLink;
+    use search_view::MediaChip;
 
     let ui_search = ui.clone();
     ui.search_view.set_on_search(move |query| {
@@ -841,60 +845,201 @@ fn connect_search(ui: Rc<LibraryWindowUi>) {
         );
     });
 
-    let ui_ql = ui.clone();
-    ui.search_view.set_on_quick_link(move |link| {
-        let (title, filters) = match link {
-            QuickLink::RecentlyTaken => (
-                "Recently taken",
-                MetadataSearchFilters {
-                    order: Some(SortOrder::Desc),
-                    ..Default::default()
+    // Slim media-type quick chips: one-tap drill-ins into a filtered grid.
+    let ui_media = ui.clone();
+    ui.search_view.set_on_media_chip(move |chip| {
+        match chip {
+            MediaChip::Videos => tab_drill_in(
+                ui_media.clone(),
+                ui_media.search_tab.nav.clone(),
+                "Videos".to_string(),
+                LibrarySource::AdvancedSearch {
+                    filters: Box::new(MetadataSearchFilters {
+                        asset_type: Some("VIDEO".to_string()),
+                        ..Default::default()
+                    }),
                 },
             ),
-            QuickLink::RecentlyAdded => (
-                "Recently added",
-                MetadataSearchFilters {
-                    order: Some(SortOrder::Desc),
-                    ..Default::default()
+            MediaChip::Favorites => tab_drill_in(
+                ui_media.clone(),
+                ui_media.search_tab.nav.clone(),
+                "Favorites".to_string(),
+                LibrarySource::AdvancedSearch {
+                    filters: Box::new(MetadataSearchFilters {
+                        is_favorite: Some(true),
+                        ..Default::default()
+                    }),
                 },
             ),
-            QuickLink::Videos => (
-                "Videos",
-                MetadataSearchFilters {
-                    asset_type: Some("VIDEO".to_string()),
-                    order: Some(SortOrder::Desc),
-                    ..Default::default()
+            MediaChip::NotInAlbum => tab_drill_in(
+                ui_media.clone(),
+                ui_media.search_tab.nav.clone(),
+                "Not in an album".to_string(),
+                LibrarySource::AdvancedSearch {
+                    filters: Box::new(MetadataSearchFilters {
+                        is_not_in_album: Some(true),
+                        ..Default::default()
+                    }),
                 },
             ),
-            QuickLink::Favorites => (
-                "Favorites",
-                MetadataSearchFilters {
-                    is_favorite: Some(true),
-                    ..Default::default()
+            // No dedicated "screenshot" facet in Immich; a smart-search query is
+            // the simplest robust match (CLIP finds screenshot-like frames).
+            MediaChip::Screenshots => tab_drill_in(
+                ui_media.clone(),
+                ui_media.search_tab.nav.clone(),
+                "Screenshots".to_string(),
+                LibrarySource::SmartSearch {
+                    query: "screenshot".to_string(),
                 },
             ),
-        };
-        tab_drill_in(
-            ui_ql.clone(),
-            ui_ql.search_tab.nav.clone(),
-            title.to_string(),
-            LibrarySource::AdvancedSearch {
-                filters: Box::new(filters),
-            },
-        );
+        }
     });
 
-    // v1: every chip opens the advanced-filters sheet (People/Location/Camera/
-    // Date/Type are all fields there). Dedicated per-chip pickers are a follow-up.
-    let ui_chip = ui.clone();
-    ui.search_view.set_on_chip(move |_chip| {
-        filters::present_advanced_filters_dialog(ui_chip.clone());
-    });
-
+    // One honest Filters entry → the existing advanced-filters dialog. Phase 2
+    // replaces this dialog with a grouped bottom sheet.
     let ui_filter = ui.clone();
     ui.search_view.set_on_filter(move || {
         filters::present_advanced_filters_dialog(ui_filter.clone());
     });
+}
+
+/// Populate the Search tab's browse sections (People / Places / Things) on first
+/// visit. Mirrors [`load_explore_landing`]: a `populated` guard prevents
+/// refetching on every revisit, per-section spinners show while data is in
+/// flight, and each section drills into a filtered grid on the **Search** tab's
+/// nav. Uses its own independent `ExploreViewParts` (`ui.search_view.browse`),
+/// so the Library tab's explore view is untouched.
+///
+/// TODO(phase-later): the Library tab still carries its own People/Places cards
+/// too; this duplicates the browse surface. Leaving that redundancy in place for
+/// now — the user will decide whether to trim the Library tab later.
+fn load_search_landing(ui: Rc<LibraryWindowUi>) {
+    let browse = &ui.search_view.browse;
+    if browse.populated.get() {
+        log::debug!("Search landing: populated=true, reusing cached widgets");
+        return;
+    }
+    browse.populated.set(true);
+    let ctx = ui.ctx.clone();
+    explore_view::wire_people_filter(browse, ctx.clone(), || {});
+    explore_view::show_loading(browse);
+
+    let mctx = glib::MainContext::default();
+
+    // People → drill into AdvancedSearch { person_ids: [id] } on the Search tab.
+    mctx.spawn_local(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        ctx,
+        async move {
+            let people_res = ctx.api_client.fetch_people(false).await;
+            if let Err(e) = &people_res
+                && (e.contains("HTTP 401") || e.contains("HTTP 403"))
+            {
+                show_library_permission_error(&ui.window);
+            }
+            let people = people_res.unwrap_or_default();
+            let click_ui = ui.clone();
+            explore_view::populate_people(
+                &ui.search_view.browse,
+                ctx.clone(),
+                people,
+                move |id, name| {
+                    tab_drill_in(
+                        click_ui.clone(),
+                        click_ui.search_tab.nav.clone(),
+                        name,
+                        LibrarySource::AdvancedSearch {
+                            filters: Box::new(MetadataSearchFilters {
+                                person_ids: Some(vec![id]),
+                                ..Default::default()
+                            }),
+                        },
+                    );
+                },
+            );
+        }
+    ));
+
+    // Places → drill into AdvancedSearch { city }. Slow paginated scan; fetch
+    // only if not already cached on this tab's browse view.
+    if !explore_view::has_cached_places(browse) {
+        mctx.spawn_local(clone!(
+            #[strong]
+            ui,
+            #[strong]
+            ctx,
+            async move {
+                let places_res = ctx.api_client.fetch_all_places().await;
+                if let Err(e) = &places_res
+                    && (e.contains("HTTP 401") || e.contains("HTTP 403"))
+                {
+                    show_library_permission_error(&ui.window);
+                }
+                let places = places_res.unwrap_or_default();
+                let click_ui = ui.clone();
+                explore_view::populate_places(
+                    &ui.search_view.browse,
+                    ctx.clone(),
+                    places,
+                    move |_kind, value, _asset_id| {
+                        tab_drill_in(
+                            click_ui.clone(),
+                            click_ui.search_tab.nav.clone(),
+                            value.clone(),
+                            LibrarySource::AdvancedSearch {
+                                filters: Box::new(MetadataSearchFilters {
+                                    city: Some(value),
+                                    ..Default::default()
+                                }),
+                            },
+                        );
+                    },
+                );
+            }
+        ));
+    } else {
+        explore_view::render_cached_places(browse, ctx.clone());
+    }
+
+    // Categories / Things → drill into SmartSearch { query: value }.
+    mctx.spawn_local(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        ctx,
+        async move {
+            let sections_res = ctx.api_client.fetch_explore().await;
+            if let Err(e) = &sections_res
+                && (e.contains("HTTP 401") || e.contains("HTTP 403"))
+            {
+                show_library_permission_error(&ui.window);
+            }
+            let sections = sections_res.unwrap_or_default();
+            let click_ui = ui.clone();
+            explore_view::populate_explore(
+                &ui.search_view.browse,
+                ctx.clone(),
+                sections,
+                move |kind, value, asset_id| {
+                    if kind == "recent" {
+                        // The Search landing omits the Recently-Added section, so
+                        // this branch is unreachable in practice; keep it lightbox-
+                        // safe in case a recents tile is ever surfaced here.
+                        open_asset_in_lightbox(click_ui.clone(), asset_id);
+                        return;
+                    }
+                    tab_drill_in(
+                        click_ui.clone(),
+                        click_ui.search_tab.nav.clone(),
+                        value.clone(),
+                        LibrarySource::SmartSearch { query: value },
+                    );
+                },
+            );
+        }
+    ));
 }
 
 /// Wire the Library tab's Favorites / Archived / Trash action cards to

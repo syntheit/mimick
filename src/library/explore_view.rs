@@ -57,8 +57,47 @@ pub struct ExploreViewParts {
     on_trash: Rc<RefCell<Option<LibraryAction>>>,
 }
 
-/// Construct the hierarchical panels and containers for the explore dashboard view.
+/// How to compose a browse-sections view. The Library (Explore) tab and the
+/// Search tab both render the same People / Places / Things machinery; they
+/// differ only in the chrome that brackets those sections. Rather than fork the
+/// section builders (and drift), both tabs call [`build_browse_view`] with the
+/// options below and get their own independent [`ExploreViewParts`] (own
+/// widgets, own caches, own `populated` guard). Populate/render/drill-in logic
+/// is 100% shared.
+#[derive(Default)]
+pub struct BrowseOptions {
+    /// Prepend the iOS-style Favorites / Archived / Trash quick-collection card
+    /// at the very top (Library tab only). The Search tab omits it.
+    pub include_library_actions: bool,
+    /// Include the "Recently Added" tile section (Library tab only). The Search
+    /// landing does not surface recents — the Photos tab is already
+    /// recency-ordered.
+    pub include_recents: bool,
+    /// Optional widget inserted above every section (e.g. the Search tab's
+    /// search bar). Stays at the top of the scroll column.
+    pub lead: Option<gtk::Widget>,
+    /// Optional widget appended below every section (e.g. the Search tab's
+    /// media-type quick-chip row).
+    pub trail: Option<gtk::Widget>,
+}
+
+/// Construct the hierarchical panels and containers for the explore dashboard
+/// view (Library tab): quick-collection card, People, Places, Recently Added,
+/// Things. Thin wrapper over [`build_browse_view`].
 pub fn build_explore_view() -> ExploreViewParts {
+    build_browse_view(BrowseOptions {
+        include_library_actions: true,
+        include_recents: true,
+        lead: None,
+        trail: None,
+    })
+}
+
+/// Construct a browse-sections view (People / Places / Things) with optional
+/// chrome per [`BrowseOptions`]. Both the Library tab (via [`build_explore_view`])
+/// and the Search tab call this, each receiving its own independent
+/// [`ExploreViewParts`] that shares all the populate/render code below.
+pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
     let outer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(24)
@@ -74,26 +113,40 @@ pub fn build_explore_view() -> ExploreViewParts {
     let on_archived: Rc<RefCell<Option<LibraryAction>>> = Rc::new(RefCell::new(None));
     let on_trash: Rc<RefCell<Option<LibraryAction>>> = Rc::new(RefCell::new(None));
 
-    // Immich-iOS-style quick-collection grid at the very top. Renders
-    // immediately (no async data). Shared Links is deferred (no API), so the
-    // grid carries Favorites, Archived, Trash. (Backup is reached from the
-    // header backup icon on the Photos tab, not from here.)
-    let library_actions = build_library_actions(
-        on_favorites.clone(),
-        on_archived.clone(),
-        on_trash.clone(),
-    );
-
     let (people_section, people_row, people_spinner, people_filter_button) = build_people_section();
     let (recents_section, recents_grid, recents_spinner) = build_tile_section("Recently Added");
     let (places_section, places_grid, places_spinner) = build_tile_section("Places");
     let (things_section, things_grid, things_spinner) = build_tile_section("Things");
 
-    outer.append(&library_actions);
+    // Optional lead widget (search bar) sits above everything.
+    if let Some(lead) = &opts.lead {
+        outer.append(lead);
+    }
+
+    // Immich-iOS-style quick-collection grid at the very top (Library tab only).
+    // Renders immediately (no async data). Shared Links is deferred (no API), so
+    // the grid carries Favorites, Archived, Trash. (Backup is reached from the
+    // header backup icon on the Photos tab, not from here.)
+    if opts.include_library_actions {
+        let library_actions = build_library_actions(
+            on_favorites.clone(),
+            on_archived.clone(),
+            on_trash.clone(),
+        );
+        outer.append(&library_actions);
+    }
+
     outer.append(&people_section);
     outer.append(&places_section);
-    outer.append(&recents_section);
+    if opts.include_recents {
+        outer.append(&recents_section);
+    }
     outer.append(&things_section);
+
+    // Optional trail widget (media-type chip row) below the sections.
+    if let Some(trail) = &opts.trail {
+        outer.append(trail);
+    }
 
     let root = gtk::ScrolledWindow::builder()
         .child(&outer)
