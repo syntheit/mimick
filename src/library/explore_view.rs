@@ -5,6 +5,7 @@
 //! caller-provided closures so dispatch lives in `mod.rs`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -41,6 +42,12 @@ pub struct ExploreViewParts {
     pub people_filter_button: gtk::MenuButton,
     cached_people: Rc<RefCell<Vec<Person>>>,
     cached_people_click: Rc<RefCell<Option<PersonClick>>>,
+    /// Decoded avatar textures keyed by person id. `render_people` rebuilds the
+    /// row on every explore revisit / face-filter toggle; without this cache
+    /// each rebuild re-downloaded every avatar from the server (the visible
+    /// "faces reload for 1-2 s on every Library visit" bug). Populated the first
+    /// time an avatar decodes; reused instantly on every subsequent tile build.
+    person_thumbs: Rc<RefCell<HashMap<String, Texture>>>,
     cached_places: Rc<RefCell<Vec<PlaceItem>>>,
     cached_places_click: Rc<RefCell<Option<ExploreClick>>>,
     pub search_query: Rc<RefCell<String>>,
@@ -113,6 +120,7 @@ pub fn build_explore_view() -> ExploreViewParts {
         people_filter_button,
         cached_people: Rc::new(RefCell::new(Vec::new())),
         cached_people_click: Rc::new(RefCell::new(None)),
+        person_thumbs: Rc::new(RefCell::new(HashMap::new())),
         cached_places: Rc::new(RefCell::new(Vec::new())),
         cached_places_click: Rc::new(RefCell::new(None)),
         search_query: Rc::new(RefCell::new(String::new())),
@@ -349,6 +357,14 @@ pub fn populate_people<F>(
 /// to disable filtering. Caller drives this from the header-bar search entry
 /// when the Explore view is the active content stack child.
 pub fn set_people_search(parts: &ExploreViewParts, query: &str) {
+    // No-op when the query is unchanged. `sync_tab_controls` clears the filter
+    // ("") on every tab switch; without this guard that rebuilt the entire
+    // people row (tearing down and re-appending every tile) on each switch even
+    // when nothing changed. Avatar textures are cached now so a rebuild no
+    // longer re-downloads, but skipping the churn entirely is still correct.
+    if *parts.search_query.borrow() == query {
+        return;
+    }
     *parts.search_query.borrow_mut() = query.to_string();
     let Some(ctx) = parts.cached_ctx.borrow().clone() else {
         return;
@@ -378,7 +394,12 @@ fn render_people(parts: &ExploreViewParts, ctx: Arc<AppContext>) {
         return;
     };
     for person in filtered.into_iter().take(40) {
-        let tile = person_tile(ctx.clone(), person, on_click.clone());
+        let tile = person_tile(
+            ctx.clone(),
+            person,
+            on_click.clone(),
+            parts.person_thumbs.clone(),
+        );
         parts.people_row.append(&tile);
     }
 }
@@ -484,6 +505,7 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         people_filter_button: parts.people_filter_button.clone(),
         cached_people: parts.cached_people.clone(),
         cached_people_click: parts.cached_people_click.clone(),
+        person_thumbs: parts.person_thumbs.clone(),
         cached_places: parts.cached_places.clone(),
         cached_places_click: parts.cached_places_click.clone(),
         search_query: parts.search_query.clone(),
@@ -826,6 +848,7 @@ fn person_tile(
     ctx: Arc<AppContext>,
     person: &Person,
     on_click: Rc<dyn Fn(String, String)>,
+    thumb_cache: Rc<RefCell<HashMap<String, Texture>>>,
 ) -> gtk::Button {
     let avatar = gtk::Picture::builder()
         .width_request(96)
@@ -864,7 +887,7 @@ fn person_tile(
     };
     button.connect_clicked(move |_| on_click(id.clone(), name.clone()));
 
-    spawn_person_thumbnail(ctx, person.id.clone(), avatar);
+    spawn_person_thumbnail(ctx, person.id.clone(), avatar, thumb_cache);
     button
 }
 
@@ -944,9 +967,29 @@ fn spawn_asset_thumbnail(ctx: Arc<AppContext>, asset_id: String, picture: gtk::P
 }
 
 /// Helper to asynchronously request and render a round avatar person face thumbnail.
-fn spawn_person_thumbnail(ctx: Arc<AppContext>, person_id: String, picture: gtk::Picture) {
+///
+/// Decoded avatar textures are cached in `thumb_cache` (person id → texture) for
+/// the lifetime of the explore view. A cache hit paints synchronously and skips
+/// the network entirely, so rebuilding the people row (every Library revisit or
+/// face-filter toggle) is instant instead of re-downloading every avatar.
+fn spawn_person_thumbnail(
+    ctx: Arc<AppContext>,
+    person_id: String,
+    picture: gtk::Picture,
+    thumb_cache: Rc<RefCell<HashMap<String, Texture>>>,
+) {
+    if let Some(texture) = thumb_cache.borrow().get(&person_id) {
+        picture.set_paintable(Some(texture));
+        return;
+    }
     glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
         glib::MainContext::default().spawn_local(async move {
+            // Re-check the cache: another tile for the same person (or a rebuild
+            // that raced this timeout) may have populated it while we waited.
+            if let Some(texture) = thumb_cache.borrow().get(&person_id) {
+                picture.set_paintable(Some(texture));
+                return;
+            }
             let bytes = match ctx.api_client.fetch_person_thumbnail(&person_id).await {
                 Ok(b) => b,
                 Err(_) => return,
@@ -958,6 +1001,9 @@ fn spawn_person_thumbnail(ctx: Arc<AppContext>, person_id: String, picture: gtk:
             .ok()
             .flatten();
             if let Some(texture) = texture {
+                thumb_cache
+                    .borrow_mut()
+                    .insert(person_id, texture.clone());
                 picture.set_paintable(Some(&texture));
             }
         });

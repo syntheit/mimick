@@ -446,40 +446,18 @@ impl ThumbnailCache {
         let decode_started = std::time::Instant::now();
         let path = path.to_path_buf();
         let log_path = path.clone();
-        let log_asset_id = asset_id.to_string();
         let cache_dir = self.cache_dir.clone();
         let texture = tokio::task::spawn_blocking(move || -> Result<Texture, String> {
             let pixbuf = decode_local_pixbuf(&path)?;
             std::fs::create_dir_all(&cache_dir).map_err(|err| err.to_string())?;
             let encoded = pixbuf_png_bytes(&pixbuf)?;
             std::fs::write(&cache_file, encoded).map_err(|err| err.to_string())?;
-            // Diagnostic (a): decode result — dims, alpha, and buffer sizing so
-            // we can confirm the pixbuf itself is well-formed (not a 1x1/blank).
-            let expected_len =
-                pixbuf.rowstride() as usize * pixbuf.height().max(0) as usize;
-            log::warn!(
-                "local-thumb decode id={} dims={}x{} alpha={} pixels={} rowstride*h={}",
-                log_asset_id,
-                pixbuf.width(),
-                pixbuf.height(),
-                pixbuf.has_alpha(),
-                pixbuf.read_pixel_bytes().len(),
-                expected_len,
-            );
             // Load the texture back from the PNG we just wrote instead of
             // hand-constructing a MemoryTexture. This makes the fresh-decode
             // path and the disk-hit path (Texture::from_filename above) produce
             // byte-identical textures and sidesteps any pixbuf rowstride /
             // premultiply mismatch in MemoryTexture construction.
-            let texture = Texture::from_filename(&cache_file).map_err(|err| err.to_string())?;
-            // Diagnostic (b): final texture dims after the from_filename load.
-            log::warn!(
-                "local-thumb texture id={} tex={}x{} (from cache file)",
-                log_asset_id,
-                texture.width(),
-                texture.height(),
-            );
-            Ok(texture)
+            Texture::from_filename(&cache_file).map_err(|err| err.to_string())
         })
         .await
         .map_err(|err| err.to_string())??;

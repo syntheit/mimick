@@ -78,9 +78,17 @@ impl ImmichApiClient {
         }
     }
 
-    /// Fetch all unique cities that have at least one asset with EXIF city data.
+    /// Fetch unique cities that have at least one asset with EXIF city data.
     /// Pages through `/api/search/metadata` collecting one representative asset
-    /// per city. Caps at 500 pages to bound runtime on very large libraries.
+    /// per city.
+    ///
+    /// The scan is **bounded** so the Places section always resolves to content
+    /// or an empty state rather than spinning while a whole huge library is
+    /// walked: it stops at `MAX_PAGES` pages or once `TIME_BUDGET` elapses,
+    /// whichever comes first. A mid-scan network/parse error returns the cities
+    /// gathered so far (partial results) instead of discarding everything and
+    /// leaving the section blank — the goal is "never an infinite spinner",
+    /// and a partial city list is strictly better than none.
     pub async fn fetch_all_places(&self) -> Result<Vec<PlaceItem>, String> {
         let base_url = self
             .get_active_url()
@@ -92,7 +100,12 @@ impl ImmichApiClient {
         let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut page: u32 = 1;
         const PAGE_SIZE: u32 = 250;
-        const MAX_PAGES: u32 = 500;
+        // Bounded scan: cap the number of pages and the wall-clock time so the
+        // spinner can never spin indefinitely on a very large library. 40 pages
+        // × 250 = up to 10k assets sampled, which surfaces essentially every
+        // distinct city in practice while keeping first paint quick.
+        const MAX_PAGES: u32 = 40;
+        const TIME_BUDGET: Duration = Duration::from_secs(12);
         let start = std::time::Instant::now();
 
         loop {
@@ -113,12 +126,33 @@ impl ImmichApiClient {
                 .await
             {
                 Ok(r) if r.status().is_success() => r,
-                Ok(r) => return Err(format!("HTTP {}", r.status())),
-                Err(e) => return Err(e.to_string()),
+                // A hard auth error on the very first page has no partial result
+                // to salvage — propagate it so the caller can surface the
+                // permission dialog. Otherwise keep what we have.
+                Ok(r) => {
+                    if page == 1 {
+                        return Err(format!("HTTP {}", r.status()));
+                    }
+                    log::warn!("fetch_all_places: stopping at page {page} (HTTP {})", r.status());
+                    break;
+                }
+                Err(e) => {
+                    if page == 1 {
+                        return Err(e.to_string());
+                    }
+                    log::warn!("fetch_all_places: stopping at page {page} ({e})");
+                    break;
+                }
             };
             let parsed: ExifSearchResponse = match resp.json().await {
                 Ok(p) => p,
-                Err(e) => return Err(e.to_string()),
+                Err(e) => {
+                    if page == 1 {
+                        return Err(e.to_string());
+                    }
+                    log::warn!("fetch_all_places: parse error at page {page} ({e})");
+                    break;
+                }
             };
             let has_more = parsed.assets.next_page.is_some();
             for asset in parsed.assets.items {
@@ -126,7 +160,7 @@ impl ImmichApiClient {
                     seen.entry(city).or_insert(asset.id);
                 }
             }
-            if !has_more || page >= MAX_PAGES {
+            if !has_more || page >= MAX_PAGES || start.elapsed() >= TIME_BUDGET {
                 break;
             }
             page += 1;
