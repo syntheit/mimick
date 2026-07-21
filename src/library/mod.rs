@@ -868,16 +868,28 @@ fn connect_search(ui: Rc<LibraryWindowUi>) {
 
     let ui_search = ui.clone();
     ui.search_view.set_on_search(move |query| {
-        let query = query.trim().to_string();
-        if query.is_empty() {
-            return;
-        }
-        tab_drill_in(
-            ui_search.clone(),
-            ui_search.search_tab.nav.clone(),
-            query.clone(),
-            LibrarySource::SmartSearch { query },
-        );
+        run_search_query(&ui_search, query);
+    });
+
+    // Tapping a recent-search row re-runs it (respecting the current mode) and
+    // re-records it so it bubbles back to the top.
+    let ui_recent = ui.clone();
+    ui.search_view.set_on_recent(move |query| {
+        run_search_query(&ui_recent, query);
+    });
+
+    // The inline ✕ forgets a single recent; refresh the list in place.
+    let ui_rm = ui.clone();
+    ui.search_view.set_on_recent_removed(move |query| {
+        ui_rm.ctx.config.write().remove_recent_search(&query);
+        refresh_recents(&ui_rm);
+    });
+
+    // "Clear" forgets all recents.
+    let ui_clear = ui.clone();
+    ui.search_view.set_on_recents_cleared(move || {
+        ui_clear.ctx.config.write().clear_recent_searches();
+        refresh_recents(&ui_clear);
     });
 
     // Slim media-type quick chips: one-tap drill-ins into a filtered grid.
@@ -938,6 +950,44 @@ fn connect_search(ui: Rc<LibraryWindowUi>) {
     ui.search_view.set_on_filter(move || {
         search_filters::present_search_filters_sheet(ui_filter.clone());
     });
+
+    // Seed the recents list from persisted config so it's ready on first focus.
+    refresh_recents(&ui);
+}
+
+/// Run a submitted (or re-run) text query on the Search tab: record it in the
+/// recents store, refresh the recents list, then drill into the results grid
+/// using the currently-selected search mode (Smart / Text-OCR / Filename).
+fn run_search_query(ui: &Rc<LibraryWindowUi>, query: String) {
+    use search_view::SearchMode;
+
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return;
+    }
+
+    // Persist as the most-recent search, then re-render the list.
+    ui.ctx.config.write().push_recent_search(&query);
+    refresh_recents(ui);
+
+    let source = match ui.search_view.search_mode() {
+        SearchMode::Smart => LibrarySource::SmartSearch {
+            query: query.clone(),
+        },
+        SearchMode::Text => LibrarySource::OcrSearch {
+            query: query.clone(),
+        },
+        SearchMode::Filename => LibrarySource::MetadataSearch {
+            query: query.clone(),
+        },
+    };
+    tab_drill_in(ui.clone(), ui.search_tab.nav.clone(), query, source);
+}
+
+/// Re-render the Search bar's recents list from the persisted config snapshot.
+fn refresh_recents(ui: &Rc<LibraryWindowUi>) {
+    let recents = ui.ctx.config.read().recent_searches();
+    ui.search_view.set_recents(&recents);
 }
 
 /// Populate the Search tab's browse sections (People / Places / Things) on first

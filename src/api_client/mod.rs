@@ -536,6 +536,12 @@ pub(super) struct SearchAssetSection {
     /// presence — has_more is computed as `next_page.is_some()`.
     #[serde(rename = "nextPage", default)]
     pub(super) next_page: Option<String>,
+    /// Total number of assets matching the search across all pages. Immich
+    /// includes this on `/search/metadata`; kept `Option` so a server that
+    /// omits it degrades gracefully (the filter sheet then shows "Show photos"
+    /// instead of a wrong count) rather than failing to parse.
+    #[serde(default)]
+    pub(super) total: Option<u64>,
 }
 
 /// Asynchronous Immich API client with failover and request serialization.
@@ -972,6 +978,23 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(response.assets.next_page.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn test_search_response_parses_total_for_live_count() {
+        // The Filters sheet's live "Show N photos" count reads this field.
+        let response: SearchResponse = serde_json::from_value(serde_json::json!({
+            "assets": { "items": [], "total": 4207 }
+        }))
+        .unwrap();
+        assert_eq!(response.assets.total, Some(4207));
+
+        // A server that omits `total` must still parse (count degrades to None).
+        let missing: SearchResponse = serde_json::from_value(serde_json::json!({
+            "assets": { "items": [] }
+        }))
+        .unwrap();
+        assert_eq!(missing.assets.total, None);
     }
 
     #[test]

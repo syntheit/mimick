@@ -49,6 +49,16 @@ use super::filters::normalise_iso_date;
 /// Shared, mutable filter model threaded through the sheet and its pickers.
 type Filters = Rc<RefCell<MetadataSearchFilters>>;
 
+/// A debounced "recount matches" trigger. Calling it (re)arms a short timer;
+/// when the timer fires it runs a count query and updates the Apply button's
+/// label. Threaded into every facet-mutating control so the button's
+/// "Show N photos" tracks the live filter model without spamming the server.
+type Recount = Rc<dyn Fn()>;
+
+/// Debounce window for the live count query. Long enough that rapid facet edits
+/// (dragging a segment, typing in a filename field) collapse into one request.
+const COUNT_DEBOUNCE_MS: u32 = 350;
+
 /// Open the grouped Filters sheet for the Search tab. Seeds an empty
 /// [`MetadataSearchFilters`]; the root page's rows push pickers that mutate it,
 /// and **Apply** drills into the filtered results grid on the Search nav.
@@ -93,6 +103,29 @@ fn build_root_page(
     toolbar.add_top_bar(&header);
 
     let page = libadwaita::PreferencesPage::new();
+
+    // The two Apply controls (header action + full-width bottom button) are
+    // created up-front so the live-count trigger can update their labels; they
+    // are placed into the toolbar and wired to drill-in further below.
+    let apply_btn = gtk::Button::builder()
+        .label("Apply")
+        .css_classes(["suggested-action"])
+        .valign(gtk::Align::Center)
+        .build();
+    let bottom = gtk::Button::builder()
+        .label("Show photos")
+        .css_classes(["suggested-action", "pill"])
+        .margin_start(16)
+        .margin_end(16)
+        .margin_top(8)
+        .margin_bottom(12)
+        .build();
+
+    // Live "Show N photos" count: a debounced count query keeps the bottom
+    // apply button's label in step with the filter model as facets change. The
+    // header "Apply" stays a stable action label. Threaded into every
+    // facet-mutating control below and fired whenever a picker pops.
+    let recount = make_recount(ui.ctx.clone(), filters.clone(), bottom.clone());
 
     // --- Who → People ---
     let who_group = libadwaita::PreferencesGroup::builder().title("Who").build();
@@ -141,7 +174,7 @@ fn build_root_page(
         .title("Media type")
         .activatable(false)
         .build();
-    let segmented = build_media_segment(filters.clone());
+    let segmented = build_media_segment(filters.clone(), recount.clone());
     media_row.add_suffix(&segmented);
     what_group.add(&media_row);
 
@@ -177,42 +210,30 @@ fn build_root_page(
     more.add_row(&description_row);
 
     // Reflect the switch/entry state into the shared model on change.
-    wire_switch(&favorite_sw, filters.clone(), |f, on| {
+    wire_switch(&favorite_sw, filters.clone(), recount.clone(), |f, on| {
         f.is_favorite = on.then_some(true)
     });
-    wire_switch(&not_in_album_sw, filters.clone(), |f, on| {
+    wire_switch(&not_in_album_sw, filters.clone(), recount.clone(), |f, on| {
         f.is_not_in_album = on.then_some(true)
     });
-    wire_switch(&archived_sw, filters.clone(), |f, on| {
+    wire_switch(&archived_sw, filters.clone(), recount.clone(), |f, on| {
         f.is_archived = on.then_some(true)
     });
-    wire_switch(&motion_sw, filters.clone(), |f, on| {
+    wire_switch(&motion_sw, filters.clone(), recount.clone(), |f, on| {
         f.is_motion = on.then_some(true)
     });
-    wire_entry(&filename_row, filters.clone(), |f, v| {
+    wire_entry(&filename_row, filters.clone(), recount.clone(), |f, v| {
         f.original_file_name = v
     });
-    wire_entry(&description_row, filters.clone(), |f, v| f.description = v);
+    wire_entry(&description_row, filters.clone(), recount.clone(), |f, v| {
+        f.description = v
+    });
 
     more_group.add(&more);
     page.add(&more_group);
 
     // --- Apply action (primary; also mirrored as a full-width bottom button) ---
-    let apply_btn = gtk::Button::builder()
-        .label("Apply")
-        .css_classes(["suggested-action"])
-        .valign(gtk::Align::Center)
-        .build();
     header.pack_end(&apply_btn);
-
-    let bottom = gtk::Button::builder()
-        .label("Show photos")
-        .css_classes(["suggested-action", "pill"])
-        .margin_start(16)
-        .margin_end(16)
-        .margin_top(8)
-        .margin_bottom(12)
-        .build();
     toolbar.add_bottom_bar(&bottom);
 
     let apply: Rc<dyn Fn()> = Rc::new(clone!(
@@ -308,12 +329,118 @@ fn build_root_page(
         }
     ));
 
+    // Complex-facet pickers (People / Location / Date / Camera) mutate the model
+    // then pop back to this root page. Recount on every pop so their selections
+    // are reflected in the "Show N photos" label too.
+    nav.connect_popped(clone!(
+        #[strong]
+        recount,
+        move |_, _| recount()
+    ));
+
+    // Seed the count for the empty (all-photos) filter set so the button shows a
+    // number immediately rather than a bare "Show photos".
+    recount();
+
     toolbar.set_content(Some(&page));
 
     libadwaita::NavigationPage::builder()
         .title("Filters")
         .child(&toolbar)
         .build()
+}
+
+/// Build the debounced live-count trigger for the bottom Apply button.
+///
+/// The returned closure, when called, (re)arms a [`COUNT_DEBOUNCE_MS`] timer.
+/// When the timer fires it snapshots the current filter model, runs
+/// [`count_metadata_matches`](crate::api_client::ImmichApiClient::count_metadata_matches),
+/// and writes the result into the button label:
+///
+/// - a known total → **"Show N photos"** (singular for 1),
+/// - server omitted the total, or the probe failed → **"Show photos"** (never a
+///   guessed number),
+/// - while a probe is in flight the label is left as-is (no flicker).
+///
+/// A monotonically increasing generation guards against out-of-order responses
+/// (a slow early probe landing after a newer one), and a weak button reference
+/// makes a fired timer a no-op once the sheet is gone.
+fn make_recount(ctx: std::sync::Arc<AppContext>, filters: Filters, bottom: gtk::Button) -> Recount {
+    // The armed debounce timer (cancelled + replaced on every call). `Cell`
+    // mirrors the debounce idiom used elsewhere (settings disk-cache save).
+    let pending: Rc<std::cell::Cell<Option<glib::SourceId>>> = Rc::new(std::cell::Cell::new(None));
+    // Generation of the most recently *dispatched* count query; a landing
+    // response only updates the label if it still matches.
+    let generation: Rc<std::cell::Cell<u64>> = Rc::new(std::cell::Cell::new(0));
+
+    Rc::new(move || {
+        // Cancel any timer that hasn't fired yet, then arm a fresh one.
+        if let Some(id) = pending.take() {
+            id.remove();
+        }
+
+        let id = glib::timeout_add_local_once(
+            std::time::Duration::from_millis(COUNT_DEBOUNCE_MS as u64),
+            clone!(
+                #[strong]
+                ctx,
+                #[strong]
+                filters,
+                #[strong]
+                generation,
+                #[weak]
+                bottom,
+                move || {
+                    let snapshot = filters.borrow().clone();
+                    let gen_id = generation.get().wrapping_add(1);
+                    generation.set(gen_id);
+                    let generation = generation.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        let result = ctx.api_client.count_metadata_matches(&snapshot).await;
+                        // Drop stale responses: only the newest dispatched probe
+                        // may paint the label.
+                        if generation.get() != gen_id {
+                            return;
+                        }
+                        let label = match result {
+                            Ok(Some(n)) => count_label(n),
+                            // Server didn't report a total, or the probe errored —
+                            // show a neutral label rather than a wrong number.
+                            Ok(None) | Err(_) => "Show photos".to_string(),
+                        };
+                        bottom.set_label(&label);
+                    });
+                }
+            ),
+        );
+        pending.set(Some(id));
+    })
+}
+
+/// "Show N photos" label for a known match count (singular at 1, grouped
+/// thousands for readability).
+fn count_label(n: u64) -> String {
+    match n {
+        0 => "No matching photos".to_string(),
+        1 => "Show 1 photo".to_string(),
+        n => format!("Show {} photos", group_thousands(n)),
+    }
+}
+
+/// Insert thin separators into a large number ("12345" → "12,345") so big
+/// libraries read cleanly on the button.
+fn group_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    let len = bytes.len();
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
 }
 
 /// A trailing chevron (`›`) suffix marking an activatable row that pushes a page.
@@ -327,7 +454,7 @@ fn chevron() -> gtk::Image {
 /// Inline segmented Any / Photos / Videos control writing `asset_type`.
 /// Linked toggle buttons (`.linked`) give the standard segmented look without
 /// AdwToggleGroup (which needs libadwaita 1.7 — the mimick pin is 1.6).
-fn build_media_segment(filters: Filters) -> gtk::Box {
+fn build_media_segment(filters: Filters, recount: Recount) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .css_classes(["linked"])
@@ -350,27 +477,36 @@ fn build_media_segment(filters: Filters) -> gtk::Box {
     any.connect_toggled(clone!(
         #[strong]
         filters,
+        #[strong]
+        recount,
         move |b| {
             if b.is_active() {
                 filters.borrow_mut().asset_type = None;
+                recount();
             }
         }
     ));
     photos.connect_toggled(clone!(
         #[strong]
         filters,
+        #[strong]
+        recount,
         move |b| {
             if b.is_active() {
                 filters.borrow_mut().asset_type = Some("IMAGE".to_string());
+                recount();
             }
         }
     ));
     videos.connect_toggled(clone!(
         #[strong]
         filters,
+        #[strong]
+        recount,
         move |b| {
             if b.is_active() {
                 filters.borrow_mut().asset_type = Some("VIDEO".to_string());
+                recount();
             }
         }
     ));
@@ -388,18 +524,22 @@ fn switch_expander_row(
     row
 }
 
-/// Wire a switch row so flipping it writes into the shared filter model.
-fn wire_switch<F>(row: &libadwaita::SwitchRow, filters: Filters, apply: F)
+/// Wire a switch row so flipping it writes into the shared filter model and
+/// re-triggers the live count.
+fn wire_switch<F>(row: &libadwaita::SwitchRow, filters: Filters, recount: Recount, apply: F)
 where
     F: Fn(&mut MetadataSearchFilters, bool) + 'static,
 {
     row.connect_active_notify(move |r| {
         apply(&mut filters.borrow_mut(), r.is_active());
+        recount();
     });
 }
 
-/// Wire a text entry row so edits write a trimmed `Option<String>` into the model.
-fn wire_entry<F>(row: &libadwaita::EntryRow, filters: Filters, apply: F)
+/// Wire a text entry row so edits write a trimmed `Option<String>` into the
+/// model and re-trigger the live count (the recount's own debounce absorbs the
+/// per-keystroke churn).
+fn wire_entry<F>(row: &libadwaita::EntryRow, filters: Filters, recount: Recount, apply: F)
 where
     F: Fn(&mut MetadataSearchFilters, Option<String>) + 'static,
 {
@@ -412,6 +552,7 @@ where
             Some(trimmed.to_string())
         };
         apply(&mut filters.borrow_mut(), value);
+        recount();
     });
 }
 

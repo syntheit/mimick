@@ -305,7 +305,15 @@ pub struct ConfigData {
     /// the selected `watch_paths` folders are treated as backup sources.
     #[serde(default)]
     pub backup_enabled: bool,
+    /// The last handful of submitted Search-tab queries, most-recent first.
+    /// Surfaced as tappable "recent searches" on the Search landing. Capped and
+    /// deduplicated via [`Config::push_recent_search`].
+    #[serde(default)]
+    pub recent_searches: Vec<String>,
 }
+
+/// How many recent search queries to remember (Google-Photos-style recents).
+pub const MAX_RECENT_SEARCHES: usize = 8;
 
 impl Default for ConfigData {
     fn default() -> Self {
@@ -338,6 +346,7 @@ impl Default for ConfigData {
             upload_xmp_sidecars: true,
             backup_enabled: false,
             galleries: Vec::new(),
+            recent_searches: Vec::new(),
         }
     }
 }
@@ -583,6 +592,57 @@ impl Config {
         self.data.galleries.retain(|p| p != path);
         self.data.galleries.len() != before
     }
+
+    /// Record a submitted search query as the most-recent entry and persist.
+    ///
+    /// Trims the query, ignores blanks, and moves an existing (case-insensitive)
+    /// duplicate to the front rather than adding it twice, so the recents list
+    /// stays a small most-recent-first set capped at [`MAX_RECENT_SEARCHES`].
+    /// Persists immediately (mirrors the gallery helpers' owning-`save` pattern
+    /// used elsewhere is caller-driven, but recents are cheap and always want to
+    /// survive a restart, so we save here). No-op for blank input.
+    pub fn push_recent_search(&mut self, query: &str) {
+        let q = query.trim();
+        if q.is_empty() {
+            return;
+        }
+        // Drop any prior case-insensitive match so the query bubbles to the top
+        // instead of duplicating.
+        let lower = q.to_ascii_lowercase();
+        self.data
+            .recent_searches
+            .retain(|existing| existing.to_ascii_lowercase() != lower);
+        self.data.recent_searches.insert(0, q.to_string());
+        self.data.recent_searches.truncate(MAX_RECENT_SEARCHES);
+        self.save();
+    }
+
+    /// Remove a single recent-search entry (exact, case-sensitive match) and
+    /// persist. Returns true if an entry was removed.
+    pub fn remove_recent_search(&mut self, query: &str) -> bool {
+        let before = self.data.recent_searches.len();
+        self.data.recent_searches.retain(|q| q != query);
+        let changed = self.data.recent_searches.len() != before;
+        if changed {
+            self.save();
+        }
+        changed
+    }
+
+    /// Clear all recent searches and persist. Returns true if any were removed.
+    pub fn clear_recent_searches(&mut self) -> bool {
+        if self.data.recent_searches.is_empty() {
+            return false;
+        }
+        self.data.recent_searches.clear();
+        self.save();
+        true
+    }
+
+    /// A snapshot of the recent-search queries, most-recent first.
+    pub fn recent_searches(&self) -> Vec<String> {
+        self.data.recent_searches.clone()
+    }
 }
 
 #[cfg(test)]
@@ -787,5 +847,68 @@ mod tests {
         let restored: ConfigData = serde_json::from_str(&json).expect("deserialize legacy config");
         assert!(restored.show_unnamed_faces);
         assert!(!restored.show_hidden_faces);
+    }
+
+    /// A `Config` backed by a throwaway temp file so `save()` (called inside the
+    /// recent-search helpers) writes somewhere harmless during tests.
+    fn temp_config() -> (Config, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data: ConfigData::default(),
+            config_file: dir.path().join("config.json"),
+        };
+        (config, dir)
+    }
+
+    #[test]
+    fn recent_searches_default_empty_and_legacy_loads() {
+        assert!(ConfigData::default().recent_searches.is_empty());
+        let restored: ConfigData = serde_json::from_str("{}").expect("legacy config");
+        assert!(restored.recent_searches.is_empty());
+    }
+
+    #[test]
+    fn push_recent_search_is_most_recent_first_and_capped() {
+        let (mut config, _dir) = temp_config();
+        for i in 0..(MAX_RECENT_SEARCHES + 3) {
+            config.push_recent_search(&format!("query {i}"));
+        }
+        assert_eq!(config.data.recent_searches.len(), MAX_RECENT_SEARCHES);
+        // Newest query is first; the three oldest fell off the end.
+        assert_eq!(
+            config.data.recent_searches.first().unwrap(),
+            &format!("query {}", MAX_RECENT_SEARCHES + 2)
+        );
+        assert!(!config.data.recent_searches.contains(&"query 0".to_string()));
+    }
+
+    #[test]
+    fn push_recent_search_dedups_case_insensitively_and_bubbles_up() {
+        let (mut config, _dir) = temp_config();
+        config.push_recent_search("Sunset");
+        config.push_recent_search("beach");
+        config.push_recent_search("sunset"); // same query, different case
+        assert_eq!(config.data.recent_searches, vec!["sunset", "beach"]);
+    }
+
+    #[test]
+    fn push_recent_search_ignores_blank() {
+        let (mut config, _dir) = temp_config();
+        config.push_recent_search("   ");
+        config.push_recent_search("");
+        assert!(config.data.recent_searches.is_empty());
+    }
+
+    #[test]
+    fn remove_and_clear_recent_searches() {
+        let (mut config, _dir) = temp_config();
+        config.push_recent_search("a");
+        config.push_recent_search("b");
+        assert!(config.remove_recent_search("a"));
+        assert!(!config.remove_recent_search("a")); // already gone
+        assert_eq!(config.data.recent_searches, vec!["b"]);
+        assert!(config.clear_recent_searches());
+        assert!(!config.clear_recent_searches()); // already empty
+        assert!(config.data.recent_searches.is_empty());
     }
 }

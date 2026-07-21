@@ -393,6 +393,73 @@ impl ImmichApiClient {
         .await
     }
 
+    /// Count how many assets match `filters` without fetching the full result
+    /// set. Requests a single-item page and reads Immich's `total` field from
+    /// the `/search/metadata` response.
+    ///
+    /// Powers the Filters sheet's live "Show N photos" apply button. Returns:
+    /// - `Ok(Some(n))` — the server reported an exact `total`.
+    /// - `Ok(None)`   — the request succeeded but the server omitted `total`
+    ///   (older/edge servers); the caller shows a neutral "Show photos" label
+    ///   rather than a guessed number.
+    /// - `Err(_)`     — network/HTTP failure; the caller keeps the last known
+    ///   label. Deliberately does *not* mutate the connection issue state, so a
+    ///   transient count probe never trips the reconnect/permission machinery.
+    pub async fn count_metadata_matches(
+        &self,
+        filters: &MetadataSearchFilters,
+    ) -> Result<Option<u64>, String> {
+        let mut body = serde_json::to_value(filters).map_err(|err| err.to_string())?;
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("page".into(), serde_json::json!(1));
+            obj.insert("size".into(), serde_json::json!(1));
+            // Match the timeline-scope default that `fetch_search_assets`
+            // applies, so the count reflects the same result set the drill-in
+            // will show (hidden Live-Photo movie parts excluded, etc.).
+            if !obj.contains_key("visibility")
+                && !obj.contains_key("isArchived")
+                && !obj.contains_key("withDeleted")
+                && !obj.contains_key("isTrashed")
+            {
+                obj.insert(
+                    "visibility".into(),
+                    serde_json::Value::String("timeline".into()),
+                );
+            }
+            obj.entry("withExif")
+                .or_insert(serde_json::Value::Bool(true));
+        }
+
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/search/metadata", base_url);
+
+        match self
+            .client
+            .post(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .json(&body)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let response = resp
+                    .json::<SearchResponse>()
+                    .await
+                    .map_err(|err| err.to_string())?;
+                Ok(response.assets.total)
+            }
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
     /// Retrieve total images, videos, and overall asset count statistics from the server.
     pub async fn fetch_server_stats(&self) -> Result<ServerStats, String> {
         let base_url = self
