@@ -793,6 +793,17 @@ fn connect_tab_switch(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ui,
         move |stack| {
+            // Clear selection and exit select mode when the user switches tabs.
+            // Replicates the exact same sequence the "✕" pill button uses
+            // (unselect_all + set_active(false)), which triggers connect_toggled
+            // to call refresh() and hide the pill + drawer. No-op when not in
+            // select mode because set_active(false) on an already-inactive
+            // toggle is a no-op.
+            if ui.select_toggle.is_active() {
+                ui.grid.selection.unselect_all();
+                ui.select_toggle.set_active(false);
+            }
+
             // Collapse any active drill when leaving its tab: pop it so the
             // shared grid returns to the Photos host and its source is
             // restored (finish_drill_pop), instead of stranding the grid in a

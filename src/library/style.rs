@@ -332,9 +332,9 @@ box.mimick-select-pill {
 }
 
 button.mimick-pill-clear {
-    min-width: 26px;
-    min-height: 26px;
-    padding: 0;
+    min-width: 40px;
+    min-height: 40px;
+    padding: 6px;
     background: transparent;
     box-shadow: none;
 }
