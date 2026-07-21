@@ -785,7 +785,11 @@ fn bootstrap_window(ui: Rc<LibraryWindowUi>) {
     connect_albums_create(ui.clone());
     spawn_server_ping_loop(ui.clone());
     spawn_transfer_poll_loop(ui.clone());
-    load_source_page(ui, initial_request, false);
+    load_source_page(ui.clone(), initial_request, false);
+    // Warm the truthful backup-badge cache after the first gallery load. This
+    // runs concurrently with the initial paint (which uses the index-based
+    // fallback) and re-renders the grid once the server set is populated.
+    spawn_server_checksum_refresh(ui);
 }
 
 /// Wire the bottom-nav ViewStack: lazily populate Albums/Library on first
@@ -1492,10 +1496,36 @@ fn spawn_transfer_poll_loop(ui: Rc<LibraryWindowUi>) {
         let completed_batches = ui.ctx.state.lock().completed_upload_batches;
         if completed_batches != ui.last_seen_upload_batch.get() {
             ui.last_seen_upload_batch.set(completed_batches);
+            // A backup batch just finished: re-render immediately for prompt
+            // feedback, and re-probe the server so freshly-uploaded photos (and
+            // anything a concurrent client changed) flip to the correct badge.
             refresh_library_after_mutation(ui.clone(), true);
+            spawn_server_checksum_refresh(ui.clone());
         }
         update_transfer_ui(&ui);
         glib::ControlFlow::Continue
+    });
+}
+
+/// Refresh `ctx.server_checksums` off-thread, then re-render the visible grid so
+/// the truthful backup badges update. The re-render reuses the existing
+/// mutation-refresh path (reload the current source → rebuild `AssetObject`s →
+/// repaint), which reads the freshly-populated checksum set synchronously.
+///
+/// Cheap to call repeatedly: the enumeration+hashing is bounded to the gallery
+/// and backup folders and runs on the Tokio blocking pool. Guarded against a
+/// closed window via the weak-ref pattern GLib gives `spawn_local` closures —
+/// if `ui` outlives the window the grid reset is a no-op reset over stale state.
+pub(super) fn spawn_server_checksum_refresh(ui: Rc<LibraryWindowUi>) {
+    glib::MainContext::default().spawn_local(async move {
+        let before = ui.ctx.server_checksums.read().clone();
+        crate::app_context::refresh_server_checksums(ui.ctx.clone()).await;
+        // Only pay for a grid reset when the set actually changed — avoids a
+        // redundant re-page every 250 ms tick while nothing is moving.
+        let changed = *ui.ctx.server_checksums.read() != before;
+        if changed {
+            refresh_library_after_mutation(ui, true);
+        }
     });
 }
 

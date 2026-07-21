@@ -289,6 +289,9 @@ async fn main() {
             expected_self_downloads: Arc::new(app_context::RecentSelfPaths::default()),
             reconcile_locks: Arc::new(app_context::ReconcileLocks::default()),
             pending_deletions: Arc::new(app_context::PendingDeletions::default()),
+            server_checksums: Arc::new(parking_lot::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
         });
         let _ = APP_CONTEXT.set(ctx.clone());
 

@@ -160,16 +160,50 @@ fn build_sorted_asset_objects(
     items
 }
 
+/// Decide the backup badge state for a LOCAL file, preferring the authoritative
+/// server-checksum set over local sync-index membership.
+///
+/// - If the server set is populated AND we already know this file's checksum
+///   (from the in-memory index — no hashing / stat on the paint path), the badge
+///   is truthful: `2` (backed up on the server, by *any* client) iff the
+///   checksum is in the set, else `1` (not backed up).
+/// - If the server set is empty (not yet populated / probe failed) OR the file's
+///   checksum isn't cached yet, fall back to the current `local_sync_state`
+///   (index membership) so badges are never wrong-blank on first paint and never
+///   *worse* than today.
+///
+/// `stored_checksum` is a pure index lookup (no filesystem access), keeping the
+/// model build cheap. The async `refresh_server_checksums` is what warms both
+/// the server set and the index; here we only *read* them synchronously.
+fn local_backup_state(ctx: &AppContext, path: &std::path::Path) -> u32 {
+    use crate::library::local_source::local_sync_state;
+
+    let server = ctx.server_checksums.read();
+    if server.is_empty() {
+        return local_sync_state(&ctx.sync_index, path);
+    }
+    match ctx.sync_index.stored_checksum(&path.display().to_string()) {
+        Some(checksum) => {
+            if server.contains(&checksum) {
+                2
+            } else {
+                1
+            }
+        }
+        // Checksum not hashed yet — can't prove server presence, so keep the
+        // index-based answer rather than falsely flipping to "not backed up".
+        None => local_sync_state(&ctx.sync_index, path),
+    }
+}
+
 fn build_asset_objects(assets: &[LibraryAsset], ctx: &AppContext) -> Vec<AssetObject> {
     use super::{LOCAL_ID_PREFIX, immich_checksum_to_hex};
-    use crate::library::local_source::local_sync_state;
 
     assets
         .iter()
         .map(|asset| {
             if let Some(local_path) = asset.id.strip_prefix(LOCAL_ID_PREFIX) {
-                let sync_state =
-                    local_sync_state(&ctx.sync_index, std::path::Path::new(local_path));
+                let sync_state = local_backup_state(ctx, std::path::Path::new(local_path));
                 let object = AssetObject::new_local(
                     &asset.id,
                     &asset.filename,

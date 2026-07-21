@@ -22,6 +22,11 @@ use libadwaita::prelude::*;
 use super::LibraryWindowUi;
 use crate::config::WatchPathEntry;
 
+/// Per-page cache of loaded upload-details thumbnails, keyed by item file path.
+/// Threaded through the status tick so the rows (rebuilt each tick) don't
+/// re-decode the same file repeatedly.
+type ThumbCache = Rc<std::cell::RefCell<std::collections::HashMap<String, gtk::gdk::Texture>>>;
+
 /// Build the "Backup" home page and push it onto the root navigation view.
 ///
 /// The page is an `AdwPreferencesPage` (boxed list) wrapped in its own
@@ -32,6 +37,10 @@ use crate::config::WatchPathEntry;
 pub fn present_backup(ui: Rc<LibraryWindowUi>) {
     let page = build_backup_home(ui.clone());
     ui.nav.push(&page);
+    // Opening the backup page is a natural moment to re-probe the server so the
+    // grid's cloud badges (and, on return, the counters) reflect anything a
+    // concurrent client changed. Runs off-thread; re-renders the grid when done.
+    super::spawn_server_checksum_refresh(ui);
 }
 
 /// Construct the backup home page (§2).
@@ -103,6 +112,10 @@ fn build_backup_home(ui: Rc<LibraryWindowUi>) -> libadwaita::NavigationPage {
     // One-shot guard so re-`shown` events (e.g. returning from the folder-select
     // sub-page) don't stack duplicate status-tick timers on the same widgets.
     let tick_started = Rc::new(std::cell::Cell::new(false));
+    // Per-page thumbnail cache for the upload-details rows, keyed by the item's
+    // file path. The rows are rebuilt every tick, so caching the loaded textures
+    // here keeps us from re-issuing an async decode for the same file each tick.
+    let thumb_cache: ThumbCache = Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
 
     // --- Enable + action group --------------------------------------------
     let toggle_group = libadwaita::PreferencesGroup::builder().build();
@@ -168,6 +181,8 @@ fn build_backup_home(ui: Rc<LibraryWindowUi>) -> libadwaita::NavigationPage {
         items_list,
         #[strong]
         tick_started,
+        #[strong]
+        thumb_cache,
         move |_| {
             folders_row.set_subtitle(&selected_folders_subtitle(&ui));
             spawn_counter_compute(
@@ -183,6 +198,7 @@ fn build_backup_home(ui: Rc<LibraryWindowUi>) -> libadwaita::NavigationPage {
                     status_row.clone(),
                     status_progress.clone(),
                     items_list.clone(),
+                    thumb_cache.clone(),
                 );
             } else {
                 // Timer already running; just repaint immediately.
@@ -192,6 +208,7 @@ fn build_backup_home(ui: Rc<LibraryWindowUi>) -> libadwaita::NavigationPage {
                     &status_row,
                     &status_progress,
                     &items_list,
+                    &thumb_cache,
                 );
             }
         }
@@ -257,6 +274,13 @@ fn basename(path: &str) -> String {
 }
 
 /// Persist the "Enable backup" toggle to config (§1).
+///
+// TODO(auto-backup): this only persists the flag today. The auto-backup
+// scheduler (a background tick that enqueues the not-backed-up set whenever
+// `backup_enabled` is on) is intentionally DEFERRED — it changes background
+// behaviour the user wants to opt into carefully. "Back up now" remains the
+// manual trigger; wire the scheduler here (or in the sync engine) once the
+// opt-in UX is settled.
 fn set_backup_enabled(ui: &LibraryWindowUi, enabled: bool) {
     let mut config = ui.ctx.config.write();
     if config.data.backup_enabled == enabled {
@@ -372,25 +396,46 @@ fn start_status_tick(
     status_row: libadwaita::ActionRow,
     status_progress: gtk::ProgressBar,
     items_list: gtk::ListBox,
+    thumb_cache: ThumbCache,
 ) {
     // Paint once immediately so the section is correct on first reveal.
-    refresh_backup_status(&ui, &status_group, &status_row, &status_progress, &items_list);
+    refresh_backup_status(
+        &ui,
+        &status_group,
+        &status_row,
+        &status_progress,
+        &items_list,
+        &thumb_cache,
+    );
     glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
         if status_group.root().is_none() {
             return glib::ControlFlow::Break;
         }
-        refresh_backup_status(&ui, &status_group, &status_row, &status_progress, &items_list);
+        refresh_backup_status(
+            &ui,
+            &status_group,
+            &status_row,
+            &status_progress,
+            &items_list,
+            &thumb_cache,
+        );
         glib::ControlFlow::Continue
     });
 }
 
 /// Repaint the live upload-status group from the current transfer snapshot.
+///
+/// This is the "Cargar detalles" surface: a summary header ("Uploading N") over
+/// a per-item list, one row per active upload — thumbnail, filename, per-item
+/// progress bar, and a `bytes / total (pct%)` byte read-out — all driven by
+/// `TransferSnapshot`'s per-item `active_item_bytes` / `active_item_totals`.
 fn refresh_backup_status(
     ui: &LibraryWindowUi,
     status_group: &libadwaita::PreferencesGroup,
     status_row: &libadwaita::ActionRow,
     status_progress: &gtk::ProgressBar,
     items_list: &gtk::ListBox,
+    thumb_cache: &ThumbCache,
 ) {
     use crate::state_manager::TransferDirection;
 
@@ -424,9 +469,11 @@ fn refresh_backup_status(
         _ => status_progress.pulse(),
     }
 
-    // Per-item list: one row per active item with its own progress bar. Rebuilt
-    // each tick — the active set is small (a few parallel workers), so clearing
-    // and re-appending is cheap and keeps the code simple.
+    // Per-item list: one row per active item with a thumbnail, filename,
+    // progress bar, and byte/percent read-out. Rebuilt each tick — the active
+    // set is small (a few parallel workers), so clearing and re-appending is
+    // cheap and keeps the code simple. Thumbnails are cached across ticks in
+    // `thumb_cache` so we don't re-decode the same file every 250 ms.
     while let Some(child) = items_list.first_child() {
         items_list.remove(&child);
     }
@@ -443,19 +490,121 @@ fn refresh_backup_status(
             .hexpand(true)
             .width_request(96)
             .build();
-        if total > 0 {
-            bar.set_fraction((bytes as f64 / total as f64).clamp(0.0, 1.0));
+        let pct = if total > 0 {
+            let f = (bytes as f64 / total as f64).clamp(0.0, 1.0);
+            bar.set_fraction(f);
+            (f * 100.0).round() as u32
         } else {
             bar.pulse();
-        }
+            0
+        };
+
         let row = libadwaita::ActionRow::builder()
             .title(&item_display_name(id))
             .title_lines(1)
+            .subtitle(&byte_progress_text(bytes, total, pct))
             .build();
+        row.add_prefix(&item_thumbnail(ui, id, thumb_cache));
         row.add_suffix(&bar);
         items_list.append(&row);
     }
     items_list.set_visible(items_list.first_child().is_some());
+}
+
+/// Format the per-item byte read-out, e.g. "1.2 MB / 3.4 MB · 35%". Falls back
+/// to just the transferred bytes when the total isn't known yet.
+fn byte_progress_text(bytes: u64, total: u64, pct: u32) -> String {
+    if total > 0 {
+        format!(
+            "{} / {} · {pct}%",
+            human_bytes(bytes),
+            human_bytes(total)
+        )
+    } else {
+        human_bytes(bytes)
+    }
+}
+
+/// Compact human-readable byte size (binary units), e.g. "1.2 MB".
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Build a small rounded thumbnail widget for an upload-details row.
+///
+/// The transfer item key is the file's absolute path, so we can load a local
+/// thumbnail directly. A cached texture is applied synchronously; otherwise a
+/// generic image icon is shown and an async decode is kicked off that fills the
+/// picture in (and caches it) when it resolves. Guarded against a dropped page
+/// by checking the picture is still rooted before applying the late texture.
+fn item_thumbnail(ui: &LibraryWindowUi, path: &str, thumb_cache: &ThumbCache) -> gtk::Widget {
+    let thumb = gtk::Overlay::builder()
+        .overflow(gtk::Overflow::Hidden)
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::Center)
+        .css_classes(vec!["mimick-explore-tile".to_string()])
+        .build();
+    let spacer = gtk::Box::builder().build();
+    spacer.set_size_request(40, 40);
+    let picture = gtk::Picture::builder()
+        .can_shrink(true)
+        .content_fit(gtk::ContentFit::Cover)
+        .build();
+    thumb.set_child(Some(&spacer));
+
+    if let Some(texture) = thumb_cache.borrow().get(path).cloned() {
+        picture.set_paintable(Some(&texture));
+        thumb.add_overlay(&picture);
+        return thumb.upcast();
+    }
+
+    // No cached thumbnail yet: show a generic placeholder icon and load async.
+    let placeholder = gtk::Image::from_icon_name("image-x-generic-symbolic");
+    placeholder.set_pixel_size(20);
+    thumb.add_overlay(&placeholder);
+    thumb.add_overlay(&picture);
+
+    let file_path = std::path::PathBuf::from(path);
+    if file_path.is_file() {
+        let ctx = ui.ctx.clone();
+        let key = path.to_string();
+        let cache = thumb_cache.clone();
+        glib::MainContext::default().spawn_local(clone!(
+            #[strong]
+            picture,
+            #[strong]
+            placeholder,
+            async move {
+                let result = ctx
+                    .thumbnail_cache
+                    .load_local_thumbnail_cancellable(&key, &file_path, || false)
+                    .await;
+                if let Ok(texture) = result {
+                    cache.borrow_mut().insert(key, texture.clone());
+                    // The row may have been rebuilt on a later tick (which reads
+                    // the now-warm cache) — only touch this picture if it's still
+                    // in the tree.
+                    if picture.root().is_some() {
+                        picture.set_paintable(Some(&texture));
+                        placeholder.set_visible(false);
+                    }
+                }
+            }
+        ));
+    }
+
+    thumb.upcast()
 }
 
 /// Best-effort display name for a per-item transfer key (a path or id).
