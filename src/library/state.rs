@@ -292,6 +292,14 @@ impl LibraryState {
         self.sort_mode = mode;
     }
 
+    /// Sort `self.assets` newest-first by `created_at`. Used by the `Galleries`
+    /// source after each remote page append so that newly-appended older remote
+    /// photos slot into correct chronological position relative to any local
+    /// photos that were merged on page 1.
+    pub fn sort_assets_by_created_desc(&mut self) {
+        self.assets.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    }
+
     pub fn clear_search_restore_previous_source(&mut self) -> Option<(u64, LibrarySource, u32)> {
         if self.source.is_search() {
             Some(self.switch_source(self.previous_non_search_source.clone()))

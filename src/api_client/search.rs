@@ -148,6 +148,7 @@ impl ImmichApiClient {
 
         let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut page: u32 = 1;
+        let mut completed_pages: u32 = 0;
         const PAGE_SIZE: u32 = 250;
         // Bounded scan: cap the number of pages and the wall-clock time so the
         // spinner can never spin indefinitely on a very large library. 40 pages
@@ -209,6 +210,7 @@ impl ImmichApiClient {
                     seen.entry(city).or_insert(asset.id);
                 }
             }
+            completed_pages += 1;
             if !has_more || page >= MAX_PAGES || start.elapsed() >= TIME_BUDGET {
                 break;
             }
@@ -223,7 +225,7 @@ impl ImmichApiClient {
         log::debug!(
             "fetch_all_places: {} cities from {} pages in {:.1}s",
             places.len(),
-            page,
+            completed_pages,
             start.elapsed().as_secs_f64()
         );
         Ok(places)

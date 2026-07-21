@@ -970,7 +970,7 @@ fn load_search_landing(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ctx,
         async move {
-            let people_res = ctx.api_client.fetch_people(false).await;
+            let people_res = ctx.api_client.fetch_people(true).await;
             if let Err(e) = &people_res
                 && (e.contains("HTTP 401") || e.contains("HTTP 403"))
             {
@@ -1793,7 +1793,7 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
         #[strong]
         ctx,
         async move {
-            let people_res = ctx.api_client.fetch_people(false).await;
+            let people_res = ctx.api_client.fetch_people(true).await;
             if let Err(e) = &people_res
                 && (e.contains("HTTP 401") || e.contains("HTTP 403"))
             {
@@ -2090,11 +2090,18 @@ fn load_source_page(ui: Rc<LibraryWindowUi>, request: (u64, LibrarySource, u32),
                         if !applied {
                             return;
                         }
-                        if append {
+                        if append && !matches!(source, LibrarySource::Galleries) {
                             ui.grid
                                 .model
                                 .extend(&ui.ctx, &state.assets, &state.sort_mode);
                         } else {
+                            // For Galleries, re-sort the full accumulated asset list
+                            // newest-first so page-1 local photos stay in correct
+                            // chronological position relative to older remote pages
+                            // that arrive via subsequent appends.
+                            if append && matches!(source, LibrarySource::Galleries) {
+                                state.sort_assets_by_created_desc();
+                            }
                             ui.grid
                                 .model
                                 .reset(&ui.ctx, &state.assets, &state.sort_mode);

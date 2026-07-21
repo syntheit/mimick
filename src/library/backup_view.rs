@@ -304,17 +304,19 @@ fn spawn_counter_compute(
         let paths: Vec<PathBuf> = locals.into_iter().map(|a| a.path).collect();
         let total = paths.len();
 
-        // 2. Resolve each file's checksum: free via the sync index when the file
-        //    is unchanged, otherwise hash on a blocking worker.
+        // 2. Resolve each file's checksum, keeping the (path, checksum) pair so
+        //    we can compute remaining per-file (mirroring what start_backup_now
+        //    uses for its enqueue filter). Files that fail to hash are counted
+        //    as remaining — we can't prove they are on the server.
         let sync_index = ctx.sync_index.clone();
-        let checksums: Vec<String> = tokio::task::spawn_blocking(move || {
+        let pairs: Vec<(PathBuf, String)> = tokio::task::spawn_blocking(move || {
             let mut out = Vec::with_capacity(paths.len());
-            for path in &paths {
-                let checksum = sync_index.fresh_checksum(path).or_else(|| {
+            for path in paths {
+                let checksum = sync_index.fresh_checksum(&path).or_else(|| {
                     crate::monitor::compute_sha1_chunked(&path.to_string_lossy()).ok()
                 });
                 if let Some(checksum) = checksum {
-                    out.push(checksum);
+                    out.push((path, checksum));
                 }
             }
             out
@@ -324,11 +326,14 @@ fn spawn_counter_compute(
         if total_label.root().is_none() {
             return;
         }
+        // Files that failed to hash: count them as remaining.
+        let unhashed = total.saturating_sub(pairs.len());
 
         // Dedup checksums so a file present in two folders isn't double-counted
-        // toward Backed up.
+        // when asking the server.
         let unique: Vec<String> = {
-            let set: std::collections::HashSet<String> = checksums.into_iter().collect();
+            let set: std::collections::HashSet<String> =
+                pairs.iter().map(|(_, c)| c.clone()).collect();
             set.into_iter().collect()
         };
 
@@ -337,8 +342,15 @@ fn spawn_counter_compute(
         if total_label.root().is_none() {
             return;
         }
-        let backed_up = unique.iter().filter(|c| server.contains_key(*c)).count();
-        let remaining = total.saturating_sub(backed_up);
+        // Remaining = files whose checksum is not on the server + files that
+        // couldn't be hashed. This mirrors the enqueue filter in start_backup_now
+        // so the counter matches what "Back up now" will actually upload.
+        let remaining = pairs
+            .iter()
+            .filter(|(_, checksum)| !server.contains_key(checksum))
+            .count()
+            + unhashed;
+        let backed_up = total.saturating_sub(remaining);
 
         total_label.set_text(&total.to_string());
         backed_label.set_text(&backed_up.to_string());
