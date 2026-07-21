@@ -60,6 +60,7 @@ mod controls;
 mod download;
 mod filters;
 mod lightbox;
+mod map_view;
 mod search_filters;
 mod search_view;
 mod server_stats_dialog;
@@ -1776,6 +1777,11 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
     ui.explore.populated.set(true);
     let ctx = ui.ctx.clone();
     explore_view::wire_people_filter(&ui.explore, ctx.clone(), || {});
+    // Wire the Places header map button to push the full-screen browsable map.
+    explore_view::wire_places_map(&ui.explore, {
+        let map_ui = ui.clone();
+        move || map_view::open_places_map(map_ui.clone())
+    });
     explore_view::show_loading(&ui.explore);
     ui.library_tab.show_content();
 

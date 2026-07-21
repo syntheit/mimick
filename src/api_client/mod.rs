@@ -405,6 +405,21 @@ pub struct PlaceItem {
     pub asset_id: String,
 }
 
+/// A single geotagged asset as returned by Immich's `/api/map/markers`
+/// endpoint. The server returns a flat JSON array whose objects carry an
+/// asset `id`, its `lat`/`lon` coordinates, and (unused here) `city`/`state`/
+/// `country` strings. We only need enough to drop a pin and open the asset on
+/// tap, so we deserialize just those three fields; extra fields are ignored.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MapMarker {
+    /// Asset ID; used to open the asset in the lightbox on marker tap.
+    pub id: String,
+    /// Latitude in decimal degrees.
+    pub lat: f64,
+    /// Longitude in decimal degrees.
+    pub lon: f64,
+}
+
 /// Full EXIF metadata schema properties returned by Immich.
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

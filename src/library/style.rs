@@ -503,6 +503,18 @@ scale.mimick-lightbox-video-scale trough {
 scale.mimick-lightbox-video-scale highlight {
     background: white;
 }
+
+/* Places-map cluster badge: a filled circular pill showing the asset count. */
+label.mimick-map-cluster {
+    background: @accent_bg_color;
+    color: @accent_fg_color;
+    border-radius: 999px;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 2px 6px;
+    font-weight: bold;
+    border: 2px solid white;
+}
 "#;
 
 static REGISTERED: OnceLock<()> = OnceLock::new();

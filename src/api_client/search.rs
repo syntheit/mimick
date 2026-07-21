@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use super::errors::{RequestContext, classify_http_issue, classify_network_issue};
 use super::{
-    ExifSearchResponse, ExploreSection, ImmichApiClient, LibraryAsset, MetadataSearchFilters,
-    PeopleResponse, Person, PlaceItem, SearchResponse, ServerAbout, ServerStatistics, ServerStats,
-    SortOrder,
+    ExifSearchResponse, ExploreSection, ImmichApiClient, LibraryAsset, MapMarker,
+    MetadataSearchFilters, PeopleResponse, Person, PlaceItem, SearchResponse, ServerAbout,
+    ServerStatistics, ServerStats, SortOrder,
 };
 
 impl ImmichApiClient {
@@ -227,6 +227,46 @@ impl ImmichApiClient {
             start.elapsed().as_secs_f64()
         );
         Ok(places)
+    }
+
+    /// Fetch every geotagged asset's map marker from Immich's `/api/map/markers`
+    /// endpoint. Powers the browsable Places map: one `MapMarker` (asset id +
+    /// lat/lon) per photo/video that has GPS coordinates.
+    ///
+    /// A single bare GET returning the full array — the server computes the set
+    /// server-side, so unlike [`fetch_all_places`] there is no pagination to
+    /// walk. Mirrors [`fetch_people`]'s header/timeout/error shape (API key +
+    /// `Accept: application/json`, HTTP/network errors surfaced as `Err(String)`
+    /// for the caller to turn into an empty-state). The timeout is generous
+    /// because a large library can return tens of thousands of markers.
+    pub async fn fetch_map_markers(&self) -> Result<Vec<MapMarker>, String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!("{}/api/map/markers", base_url);
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let markers = resp
+                    .json::<Vec<MapMarker>>()
+                    .await
+                    .map_err(|err| err.to_string())?;
+                self.clear_issue().await;
+                log::debug!("fetch_map_markers: {} markers", markers.len());
+                Ok(markers)
+            }
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
+        }
     }
 
     /// Per-person face thumbnail. Distinct from `fetch_thumbnail` (asset).

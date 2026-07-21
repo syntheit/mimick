@@ -50,6 +50,11 @@ pub struct ExploreViewParts {
     person_thumbs: Rc<RefCell<HashMap<String, Texture>>>,
     cached_places: Rc<RefCell<Vec<PlaceItem>>>,
     cached_places_click: Rc<RefCell<Option<ExploreClick>>>,
+    /// The "open map" button in the Places section header (hidden until wired).
+    places_map_button: gtk::Button,
+    /// Callback that opens the full-screen Places map, registered by the
+    /// orchestrator via [`wire_places_map`] (so `ui` is in scope for the push).
+    on_places_map: Rc<RefCell<Option<LibraryAction>>>,
     pub search_query: Rc<RefCell<String>>,
     cached_ctx: Rc<RefCell<Option<Arc<AppContext>>>>,
     on_favorites: Rc<RefCell<Option<LibraryAction>>>,
@@ -123,7 +128,7 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
 
     let (people_section, people_row, people_spinner, people_filter_button) = build_people_section();
     let (recents_section, recents_grid, recents_spinner) = build_tile_section("Recently Added");
-    let (places_section, places_grid, places_spinner) = build_tile_section("Places");
+    let (places_section, places_grid, places_spinner, places_map_button) = build_places_section();
     let (things_section, things_grid, things_spinner) = build_tile_section("Things");
 
     // Optional lead widget (search bar) sits above everything.
@@ -188,6 +193,8 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
         person_thumbs: Rc::new(RefCell::new(HashMap::new())),
         cached_places: Rc::new(RefCell::new(Vec::new())),
         cached_places_click: Rc::new(RefCell::new(None)),
+        places_map_button,
+        on_places_map: Rc::new(RefCell::new(None)),
         search_query: Rc::new(RefCell::new(String::new())),
         cached_ctx: Rc::new(RefCell::new(None)),
         on_favorites,
@@ -389,6 +396,67 @@ fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox, gtk::Spinner) {
     (section, grid, spinner)
 }
 
+/// Build the Places section like [`build_tile_section`], but with a small "open
+/// map" button in the header (between the title and the spinner) that pushes the
+/// full-screen browsable Places map. The button is wired later via
+/// [`wire_places_map`]; until then it is a no-op.
+fn build_places_section() -> (gtk::Box, gtk::FlowBox, gtk::Spinner, gtk::Button) {
+    let section = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .visible(false)
+        .build();
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    let title_label = heading("Places");
+    title_label.set_hexpand(true);
+    header.append(&title_label);
+    let map_button = gtk::Button::builder()
+        .icon_name("mark-location-symbolic")
+        .tooltip_text("Open map")
+        .css_classes(["flat", "circular"])
+        .valign(gtk::Align::Center)
+        .build();
+    header.append(&map_button);
+    let spinner = gtk::Spinner::builder()
+        .visible(false)
+        .valign(gtk::Align::Center)
+        .build();
+    header.append(&spinner);
+    section.append(&header);
+    let grid = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .row_spacing(8)
+        .column_spacing(8)
+        .min_children_per_line(2)
+        .max_children_per_line(20)
+        .homogeneous(true)
+        .halign(gtk::Align::Start)
+        .build();
+    section.append(&grid);
+    (section, grid, spinner, map_button)
+}
+
+/// Register the callback that opens the full-screen Places map, invoked when the
+/// Places header map button is tapped. The orchestrator calls this once after
+/// the view is built (guarded by the explore `populated` flag) so `ui` is
+/// captured for the nav push. The handler reads through the shared slot, so a
+/// later re-registration replaces the target without re-wiring the button.
+pub fn wire_places_map(parts: &ExploreViewParts, on_open: impl Fn() + 'static) {
+    let first = parts.on_places_map.borrow().is_none();
+    *parts.on_places_map.borrow_mut() = Some(Rc::new(on_open));
+    if first {
+        let slot = parts.on_places_map.clone();
+        parts.places_map_button.connect_clicked(move |_| {
+            if let Some(cb) = slot.borrow().clone() {
+                cb();
+            }
+        });
+    }
+}
+
 /// Helper to create a styled section heading label.
 fn heading(text: &str) -> gtk::Label {
     gtk::Label::builder()
@@ -573,6 +641,8 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         person_thumbs: parts.person_thumbs.clone(),
         cached_places: parts.cached_places.clone(),
         cached_places_click: parts.cached_places_click.clone(),
+        places_map_button: parts.places_map_button.clone(),
+        on_places_map: parts.on_places_map.clone(),
         search_query: parts.search_query.clone(),
         cached_ctx: parts.cached_ctx.clone(),
         on_favorites: parts.on_favorites.clone(),
