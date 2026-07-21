@@ -48,6 +48,55 @@ impl ImmichApiClient {
         }
     }
 
+    /// Fetch distinct facet values for a search field from Immich's
+    /// `/api/search/suggestions` endpoint. `suggestion_type` is one of the
+    /// server's `SearchSuggestionType` values: `camera-make`, `camera-model`,
+    /// `city`, `state`, or `country`. Returns a plain `Vec<String>` of values.
+    ///
+    /// Powers the Camera picker (make/model) and can enrich the Location picker
+    /// (country/state/city) without the expensive full metadata scan that
+    /// [`fetch_all_places`] performs. Mirrors [`fetch_people`]: a bare GET with
+    /// the API key + `Accept: application/json`, HTTP/network errors surfaced as
+    /// an `Err(String)` for the caller to handle (pickers fall back to an empty
+    /// list rather than blocking).
+    pub async fn fetch_search_suggestions(
+        &self,
+        suggestion_type: &str,
+    ) -> Result<Vec<String>, String> {
+        let base_url = self
+            .get_active_url()
+            .await
+            .ok_or_else(|| "No active connection".to_string())?;
+        let settings = self.settings_snapshot();
+        let url = format!(
+            "{}/api/search/suggestions?type={}",
+            base_url, suggestion_type
+        );
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &settings.api_key)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let mut values = resp
+                    .json::<Vec<String>>()
+                    .await
+                    .map_err(|err| err.to_string())?;
+                // The server may include null/empty entries for assets missing
+                // the field; drop them so the picker list is clean.
+                values.retain(|v| !v.trim().is_empty());
+                self.clear_issue().await;
+                Ok(values)
+            }
+            Ok(resp) => Err(format!("HTTP {}", resp.status())),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
     /// Sectioned tile data (places + things) for the Explore landing.
     pub async fn fetch_explore(&self) -> Result<Vec<ExploreSection>, String> {
         let base_url = self

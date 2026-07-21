@@ -215,8 +215,8 @@ pub(super) fn present_advanced_filters_dialog(ui: Rc<LibraryWindowUi>) {
                     2 => Some("VIDEO".into()),
                     _ => None,
                 },
-                taken_after: normalise_iso_date(&after_row.text()),
-                taken_before: normalise_iso_date(&before_row.text()),
+                taken_after: normalise_iso_date(after_row.text().as_str()),
+                taken_before: normalise_iso_date(before_row.text().as_str()),
                 make: opt_string(&make_row.text()),
                 model: opt_string(&model_row.text()),
                 lens_model: opt_string(&lens_row.text()),
@@ -265,7 +265,11 @@ fn opt_true(active: bool) -> Option<bool> {
     if active { Some(true) } else { None }
 }
 
-fn normalise_iso_date(text: &gtk::glib::GString) -> Option<String> {
+/// Normalise a loosely-typed date string into an RFC3339 timestamp Immich
+/// accepts as `takenAfter`/`takenBefore`. Accepts an already-RFC3339 string
+/// (passed through) or a bare `YYYY-MM-DD` (expanded to midnight UTC); anything
+/// else yields `None`. Shared with the guided date picker in `search_filters`.
+pub(super) fn normalise_iso_date(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;

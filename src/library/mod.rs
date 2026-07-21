@@ -60,6 +60,7 @@ mod controls;
 mod download;
 mod filters;
 mod lightbox;
+mod search_filters;
 mod search_view;
 mod server_stats_dialog;
 mod shell;
@@ -928,11 +929,13 @@ fn connect_search(ui: Rc<LibraryWindowUi>) {
         }
     });
 
-    // One honest Filters entry → the existing advanced-filters dialog. Phase 2
-    // replaces this dialog with a grouped bottom sheet.
+    // One honest Filters entry → the guided, grouped filters sheet (Phase 2).
+    // Replaces the old free-text advanced-filters dialog: grouped facet rows,
+    // each pushing a dedicated picker (People / Location / Date / Camera) inside
+    // one AdwDialog-hosted AdwNavigationView.
     let ui_filter = ui.clone();
     ui.search_view.set_on_filter(move || {
-        filters::present_advanced_filters_dialog(ui_filter.clone());
+        search_filters::present_search_filters_sheet(ui_filter.clone());
     });
 }
 

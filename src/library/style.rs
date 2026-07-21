@@ -69,6 +69,16 @@ picture.mimick-person-avatar {
     background-color: alpha(@view_fg_color, 0.08);
 }
 
+/* Selection checkmark badge overlaid on avatars in the People filter picker. */
+image.mimick-people-check {
+    color: white;
+    background-color: @accent_bg_color;
+    border-radius: 9999px;
+    padding: 3px;
+    margin: 2px;
+    -gtk-icon-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
 picture.mimick-explore-tile,
 overlay.mimick-explore-tile {
     border-radius: 6px;
