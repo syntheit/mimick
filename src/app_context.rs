@@ -225,4 +225,15 @@ pub struct AppContext {
     /// falls back to the local sync-index membership test so badges are never
     /// *worse* than the index-only behaviour.
     pub server_checksums: Arc<RwLock<HashSet<String>>>,
+
+    /// Re-entrancy guard shared by the auto-backup scheduler and the manual
+    /// "Back up now" button. Set to `true` synchronously at the start of an
+    /// enqueue batch (manual or scheduled) and cleared on completion — or
+    /// immediately when the batch turns out to be empty — so two concurrent
+    /// batches can't double-enqueue the same not-backed-up set.
+    ///
+    /// Combined with the post-batch `refresh_server_checksums` (which repopulates
+    /// [`Self::server_checksums`]) and the queue's own 409 dedup, this is what
+    /// lets the in-process scheduler and the foreground UI work hand-in-hand.
+    pub backup_in_progress: AtomicBool,
 }

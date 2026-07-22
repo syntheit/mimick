@@ -118,7 +118,11 @@ pub(super) fn open_places_map(ui: Rc<LibraryWindowUi>) {
 /// verbatim (the tricky part — the `RasterRenderer::new_full_from_url` layout
 /// must match exactly for tiles to load), sized to fill the page instead of the
 /// 180px minimap.
-fn build_simple_map() -> libshumate::SimpleMap {
+///
+/// Returned `vexpand`/`hexpand` are both `true`; the embedded Places map in
+/// `explore_view` overrides `vexpand` to `false` and wraps it in a fixed-height
+/// host so it can't inflate the page scroll.
+pub(super) fn build_simple_map() -> libshumate::SimpleMap {
     let map = libshumate::SimpleMap::new();
     map.set_vexpand(true);
     map.set_hexpand(true);
@@ -140,7 +144,11 @@ fn build_simple_map() -> libshumate::SimpleMap {
 }
 
 /// A friendly empty state shown when the library has no geotagged assets.
-fn empty_state() -> gtk::Widget {
+///
+/// Shared by the full-screen Places map and the embedded Places map on the
+/// Library landing; sized to read fine both full-page and inside the embedded
+/// map's fixed-height host.
+pub(super) fn empty_state() -> gtk::Widget {
     let icon = gtk::Image::builder()
         .icon_name("mark-location-symbolic")
         .pixel_size(64)
@@ -173,7 +181,14 @@ fn empty_state() -> gtk::Widget {
 /// Populate the map: fit the viewport to the markers' bounding box, add a
 /// marker layer, do an initial cluster pass, and rebuild the clustering
 /// whenever the zoom level changes.
-fn populate_map(ui: &Rc<LibraryWindowUi>, map: &libshumate::SimpleMap, markers: Vec<MapMarker>) {
+///
+/// Shared by the full-screen Places map ([`open_places_map`]) and the embedded
+/// Places map on the Library landing. Each call installs one marker layer and
+/// one `zoom-level` notify handler on the viewport, so callers must invoke it
+/// at most once per `SimpleMap` instance (the embedded map guards this with a
+/// `places_map_populated` flag; the full-screen map is single-use and torn
+/// down on pop).
+pub(super) fn populate_map(ui: &Rc<LibraryWindowUi>, map: &libshumate::SimpleMap, markers: Vec<MapMarker>) {
     let Some(viewport) = map.viewport() else {
         log::warn!("Places map: SimpleMap has no viewport");
         return;

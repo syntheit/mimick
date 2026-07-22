@@ -14,13 +14,22 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use glib::clone;
 use gtk::prelude::*;
 use libadwaita::prelude::*;
 
 use super::LibraryWindowUi;
+use crate::app_context::AppContext;
 use crate::config::WatchPathEntry;
+
+/// Auto-backup scheduler tick interval. Chosen to be frequent enough to feel
+/// prompt while the app is open, but coarse enough to avoid battery churn on a
+/// mobile device. The timeout persists for the app lifetime and dies with the
+/// process when the window close → `app.quit()` path fires.
+const BACKUP_TICK_SECS: u32 = 120;
 
 /// Per-page cache of loaded upload-details thumbnails, keyed by item file path.
 /// Threaded through the status tick so the rows (rebuilt each tick) don't
@@ -275,12 +284,13 @@ fn basename(path: &str) -> String {
 
 /// Persist the "Enable backup" toggle to config (§1).
 ///
-// TODO(auto-backup): this only persists the flag today. The auto-backup
-// scheduler (a background tick that enqueues the not-backed-up set whenever
-// `backup_enabled` is on) is intentionally DEFERRED — it changes background
-// behaviour the user wants to opt into carefully. "Back up now" remains the
-// manual trigger; wire the scheduler here (or in the sync engine) once the
-// opt-in UX is settled.
+/// The auto-backup scheduler itself is a process-lifetime GLib timeout spawned
+/// once at bootstrap (see [`spawn_backup_scheduler`]); it re-checks
+/// `backup_enabled` on every tick and no-ops while off. Toggling the switch on
+/// here also kicks a single immediate backup tick so the user gets prompt
+/// feedback without having to wait up to `BACKUP_TICK_SECS` for the first
+/// scheduled pass. Toggling off needs nothing special — the next tick (and any
+/// in-flight batch) just runs to completion and subsequent ticks no-op.
 fn set_backup_enabled(ui: &LibraryWindowUi, enabled: bool) {
     let mut config = ui.ctx.config.write();
     if config.data.backup_enabled == enabled {
@@ -289,6 +299,12 @@ fn set_backup_enabled(ui: &LibraryWindowUi, enabled: bool) {
     config.data.backup_enabled = enabled;
     if !config.save() {
         log::error!("Failed to save config after toggling backup_enabled");
+    }
+    drop(config);
+
+    // Prompt feedback when the user opts in: run one backup pass right now.
+    if enabled {
+        trigger_backup_tick(ui);
     }
 }
 
@@ -620,77 +636,215 @@ fn item_display_name(id: &str) -> String {
 // §5  "Back up now" — reuse the existing upload engine
 // ---------------------------------------------------------------------------
 
-/// Enqueue an upload for every not-backed-up file across the selected folders.
+/// Enqueue every not-backed-up file across the selected folders, sharing the
+/// same enumerate → hash → server-check → filter → enqueue pipeline as the
+/// manual "Back up now" button. This is the single shared core used by both the
+/// button ([`start_backup_now`]) and the auto-backup scheduler
+/// ([`spawn_backup_scheduler`]/[`trigger_backup_tick`]), so the two paths can
+/// never double-enqueue and the foreground UI stays truthful.
 ///
-/// Reuses `upload_picker::spawn_enqueue_with_callback` (straight to the library,
-/// `album = None`) so the existing dedup (409) + queue + transfer-bar plumbing
-/// handles everything. Files already on the server are filtered out up front via
-/// `bulk_existing_asset_ids`, and the queue's own dedup catches any that slip
-/// through.
+/// Returns `Some(count)` with the number of files handed to the queue (and
+/// immediately kicked off the enqueue), or `None` when there was nothing to
+/// back up (or enumeration/hashing yielded nothing).
+///
+/// `on_complete(queued, skipped)` fires on the GLib main context once the
+/// underlying enqueue task has hashed and queued every file. Both callers use
+/// it to release the [`AppContext::backup_in_progress`] guard; the manual
+/// button additionally uses it to restore its label. The post-batch
+/// [`crate::app_context::refresh_server_checksums`] is invoked from inside this
+/// helper's completion wrapper so BOTH paths refresh the shared
+/// `server_checksums` set — that is the dedup guarantee that keeps the badge
+/// classifier truthful and prevents the next tick from re-uploading.
+async fn enqueue_unbacked_files<F>(
+    ctx: Arc<AppContext>,
+    on_complete: F,
+) -> Option<usize>
+where
+    F: FnOnce(usize, usize) + 'static,
+{
+    let locals = crate::library::local_source::enumerate_local(ctx.clone()).await;
+    let paths: Vec<PathBuf> = locals.into_iter().map(|a| a.path).collect();
+
+    // Resolve checksums so we can skip files already on the server. Hashing is
+    // off-thread (CPU-heavy); `fresh_checksum` is a free cache hit when the
+    // file's size+mtime are unchanged, otherwise we hash on the blocking pool.
+    let sync_index = ctx.sync_index.clone();
+    let paths_for_hash = paths.clone();
+    let pairs: Vec<(PathBuf, String)> = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::with_capacity(paths_for_hash.len());
+        for path in paths_for_hash {
+            let checksum = sync_index.fresh_checksum(&path).or_else(|| {
+                crate::monitor::compute_sha1_chunked(&path.to_string_lossy()).ok()
+            });
+            if let Some(checksum) = checksum {
+                out.push((path, checksum));
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default();
+
+    let all_checksums: Vec<String> = pairs.iter().map(|(_, c)| c.clone()).collect();
+    let server = ctx.api_client.bulk_existing_asset_ids(&all_checksums).await;
+
+    let to_upload: Vec<PathBuf> = pairs
+        .into_iter()
+        .filter(|(_, checksum)| !server.contains_key(checksum))
+        .map(|(path, _)| path)
+        .collect();
+
+    let count = to_upload.len();
+    if count == 0 {
+        return None;
+    }
+
+    // Upload straight to the library (no album). The wrapped callback runs after
+    // every file has been hashed + enqueued, and is what releases the guard +
+    // refreshes the shared server-checksum set so both paths benefit.
+    let ctx_for_refresh = ctx.clone();
+    crate::library::upload_picker::spawn_enqueue_with_callback(
+        ctx,
+        None,
+        to_upload,
+        move |queued, skipped| {
+            log::info!("Backup: queued {}/{} file(s), skipped {skipped}", queued, count);
+            // Refresh the authoritative server-checksum set so the badge
+            // classifier (and the next scheduler tick) see what just landed
+            // and don't re-upload it. Spawned on the main context because the
+            // callback itself is synchronous.
+            let ctx_refresh = ctx_for_refresh.clone();
+            glib::MainContext::default().spawn_local(async move {
+                crate::app_context::refresh_server_checksums(ctx_refresh).await;
+            });
+            on_complete(queued, skipped);
+        },
+    );
+
+    Some(count)
+}
+
+/// Manually trigger "Back up now" from the button (§5).
+///
+/// UX is identical to before: "Preparing…" while enumerate/hashing runs,
+/// "Backing up N…" once the batch is handed to the queue, "All backed up" when
+/// nothing was pending, and "Back up now" once the enqueue completes.
+///
+/// Respects the shared [`AppContext::backup_in_progress`] guard: if a backup
+/// (manual or scheduled) is already in flight, the tap is a no-op rather than
+/// queueing a second batch.
 fn start_backup_now(ui: Rc<LibraryWindowUi>, button: gtk::Button) {
+    // Re-entrancy guard: claim synchronously so two rapid taps (or a tap while
+    // a scheduler tick is running) can't enqueue the same set twice. Released
+    // either here (nothing to enqueue) or in the completion callback.
+    if ui.ctx.backup_in_progress.swap(true, Ordering::SeqCst) {
+        return;
+    }
     button.set_sensitive(false);
     button.set_label("Preparing…");
 
-    glib::MainContext::default().spawn_local(async move {
-        let ctx = ui.ctx.clone();
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        ui,
+        #[strong]
+        button,
+        async move {
+            let ctx = ui.ctx.clone();
+            let count = enqueue_unbacked_files(
+                ctx.clone(),
+                clone!(
+                    #[strong]
+                    button,
+                    #[strong]
+                    ui,
+                    move |queued, _skipped| {
+                        log::info!("Back up now: enqueued {queued} file(s)");
+                        button.set_label("Back up now");
+                        button.set_sensitive(true);
+                        ui.ctx.backup_in_progress.store(false, Ordering::SeqCst);
+                    }
+                ),
+            )
+            .await;
 
-        let locals = crate::library::local_source::enumerate_local(ctx.clone()).await;
-        let paths: Vec<PathBuf> = locals.into_iter().map(|a| a.path).collect();
-
-        // Resolve checksums so we can skip files already on the server.
-        let sync_index = ctx.sync_index.clone();
-        let paths_for_hash = paths.clone();
-        let pairs: Vec<(PathBuf, String)> = tokio::task::spawn_blocking(move || {
-            let mut out = Vec::with_capacity(paths_for_hash.len());
-            for path in paths_for_hash {
-                let checksum = sync_index.fresh_checksum(&path).or_else(|| {
-                    crate::monitor::compute_sha1_chunked(&path.to_string_lossy()).ok()
-                });
-                if let Some(checksum) = checksum {
-                    out.push((path, checksum));
+            match count {
+                None => {
+                    button.set_label("All backed up");
+                    button.set_sensitive(true);
+                    ui.ctx.backup_in_progress.store(false, Ordering::SeqCst);
+                }
+                Some(n) => {
+                    // Immediate feedback while the enqueue task hashes files.
+                    button.set_label(&format!("Backing up {n}…"));
                 }
             }
-            out
-        })
-        .await
-        .unwrap_or_default();
-
-        let all_checksums: Vec<String> = pairs.iter().map(|(_, c)| c.clone()).collect();
-        let server = ctx.api_client.bulk_existing_asset_ids(&all_checksums).await;
-
-        let to_upload: Vec<PathBuf> = pairs
-            .into_iter()
-            .filter(|(_, checksum)| !server.contains_key(checksum))
-            .map(|(path, _)| path)
-            .collect();
-
-        let count = to_upload.len();
-        if count == 0 {
-            button.set_label("All backed up");
-            button.set_sensitive(true);
-            return;
         }
+    ));
+}
 
-        // Upload straight to the library (no album). The callback runs after
-        // every file has been hashed + enqueued.
-        crate::library::upload_picker::spawn_enqueue_with_callback(
-            ctx,
-            None,
-            to_upload,
-            clone!(
-                #[strong]
-                button,
-                move |queued, _skipped| {
-                    log::info!("Backup now: queued {}/{} file(s)", queued, count);
-                    button.set_label("Back up now");
-                    button.set_sensitive(true);
-                }
-            ),
-        );
+/// Run a single auto-backup pass if `backup_enabled` is on and no batch is
+/// already running. Shared by [`spawn_backup_scheduler`]'s periodic ticks and
+/// by [`set_backup_enabled`]'s immediate-on-enable kick. Operates purely on the
+/// shared [`AppContext`] (no widget touches), so it is safe to call from either
+/// the timeout closure or a switch notify handler.
+fn trigger_backup_tick(ui: &LibraryWindowUi) {
+    // Re-check the flag here too: the user may have disabled backup between the
+    // scheduler's spawn and this call (or this is the on-enable kick and the
+    // flag was just flipped off by a racing toggle).
+    if !ui.ctx.config.read().data.backup_enabled {
+        return;
+    }
+    // Claim the guard synchronously; if a manual "Back up now" or another tick
+    // is mid-flight, this tick silently no-ops.
+    if ui.ctx.backup_in_progress.swap(true, Ordering::SeqCst) {
+        return;
+    }
 
-        // Immediate feedback while the enqueue task hashes files.
-        button.set_label(&format!("Backing up {count}…"));
+    let ctx = ui.ctx.clone();
+    glib::MainContext::default().spawn_local(async move {
+        let ctx_for_cb = ctx.clone();
+        let count = enqueue_unbacked_files(
+            ctx.clone(),
+            move |queued, skipped| {
+                log::debug!("Auto-backup tick: queued {queued}, skipped {skipped}");
+                ctx_for_cb.backup_in_progress.store(false, Ordering::SeqCst);
+            },
+        )
+        .await;
+        // Nothing to enqueue this pass: release the guard immediately so the
+        // next tick (or a manual button press) isn't blocked.
+        if count.is_none() {
+            ctx.backup_in_progress.store(false, Ordering::SeqCst);
+        }
     });
+}
+
+/// Spawn the in-process auto-backup scheduler: a periodic GLib timeout on the
+/// default main context that, every [`BACKUP_TICK_SECS`] seconds while the app
+/// is alive, enqueues every not-backed-up file across the backup watch folders
+/// via [`enqueue_unbacked_files`] (the same path "Back up now" uses).
+///
+/// The timeout persists for the application lifetime and dies with the process
+/// when the window close → `app.quit()` path (already wired by the orchestrator)
+/// fires — there is intentionally NO `app.hold()` here, so closing the window
+/// kills the scheduler. A future separate out-of-process background-sync daemon
+/// is deferred; this is the in-app, while-open auto-backup.
+///
+/// Each tick no-ops while `config.backup_enabled` is off or while
+/// [`AppContext::backup_in_progress`] is already claimed, and shares the same
+/// `server_checksums` set + `QueueManager` pipeline as the manual button, so the
+/// foreground UI and the scheduler never double-upload and the badge classifier
+/// stays truthful.
+pub fn spawn_backup_scheduler(ui: Rc<LibraryWindowUi>) {
+    glib::timeout_add_local(std::time::Duration::from_secs(BACKUP_TICK_SECS as u64), clone!(
+        #[strong]
+        ui,
+        move || {
+            trigger_backup_tick(&ui);
+            // Persist for the app lifetime; close→quit kills the loop.
+            glib::ControlFlow::Continue
+        }
+    ));
 }
 
 // Note: the `ctx.clone()` sites above rely on `ctx: Arc<AppContext>`; the type

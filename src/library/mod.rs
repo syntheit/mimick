@@ -762,8 +762,16 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
     ui.window.add_action(&action_serverstats);
 
     let close_ctx = ui.ctx.clone();
+    let close_app = app.clone();
     window.connect_close_request(move |_| {
         close_ctx.thumbnail_cache.clear_memory();
+        // mimick is a single-instance GtkApplication that holds itself open
+        // (main.rs `app.hold()`), so closing the window would otherwise leave
+        // the primary process alive in the background — drawing idle power and
+        // silently shadowing the next launch with a stale binary. Quit the
+        // whole app on window close so "closed" really means "killed". A future
+        // opt-in background-sync setting can re-introduce a hold if needed.
+        close_app.quit();
         glib::Propagation::Proceed
     });
 
@@ -789,7 +797,13 @@ fn bootstrap_window(ui: Rc<LibraryWindowUi>) {
     // Warm the truthful backup-badge cache after the first gallery load. This
     // runs concurrently with the initial paint (which uses the index-based
     // fallback) and re-renders the grid once the server set is populated.
-    spawn_server_checksum_refresh(ui);
+    spawn_server_checksum_refresh(ui.clone());
+    // Start the in-app auto-backup scheduler. Each tick (BACKUP_TICK_SECS)
+    // enqueues not-backed-up files when `config.backup_enabled` is on, sharing
+    // the same queue / sync_index / server_checksums as "Back up now" so the
+    // two paths never double-upload. Dies with the process on window close
+    // (close → `app.quit()`); no `app.hold()`, no background daemon.
+    backup_view::spawn_backup_scheduler(ui.clone());
 }
 
 /// Wire the bottom-nav ViewStack: lazily populate Albums/Library on first
@@ -1897,46 +1911,29 @@ fn load_explore_landing(ui: Rc<LibraryWindowUi>) {
             });
         }
     ));
-    // Fetch places (slow paginated scan) only if not cached.
+    // Fetch geotagged map markers powering the embedded Places map, only if not
+    // cached. Replaces the old paginated `fetch_all_places` city-scan;
+    // `/api/map/markers` is a single server-side call. The embedded map reuses
+    // the full-screen map's clustering machinery (cluster bubbles + asset pins).
     if !explore_view::has_cached_places(&ui.explore) {
-        log::debug!("Explore: places cache empty, fetching from server");
+        log::debug!("Explore: places cache empty, fetching map markers");
         mctx.spawn_local(clone!(
             #[strong]
             ui,
-            #[strong]
-            ctx,
             async move {
-                let places_res = ctx.api_client.fetch_all_places().await;
-                if let Err(e) = &places_res
+                let markers_res = ui.ctx.api_client.fetch_map_markers().await;
+                if let Err(e) = &markers_res
                     && (e.contains("HTTP 401") || e.contains("HTTP 403"))
                 {
                     show_library_permission_error(&ui.window);
                 }
-                let places = places_res.unwrap_or_default();
-                let click_ui = ui.clone();
-                explore_view::populate_places(
-                    &ui.explore,
-                    ctx.clone(),
-                    places,
-                    move |_kind, value, _asset_id| {
-                        tab_drill_in(
-                            click_ui.clone(),
-                            click_ui.library_tab.nav.clone(),
-                            value.clone(),
-                            LibrarySource::AdvancedSearch {
-                                filters: Box::new(MetadataSearchFilters {
-                                    city: Some(value),
-                                    ..Default::default()
-                                }),
-                            },
-                        );
-                    },
-                );
+                let markers = markers_res.unwrap_or_default();
+                explore_view::populate_places(&ui, &ui.explore, markers);
             }
         ));
     } else {
-        log::debug!("Explore: rendering places from cache");
-        explore_view::render_cached_places(&ui.explore, ctx.clone());
+        log::debug!("Explore: rendering places map from cache");
+        explore_view::render_cached_places(&ui, &ui.explore);
     }
 
     mctx.spawn_local(clone!(

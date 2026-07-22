@@ -292,6 +292,11 @@ async fn main() {
             server_checksums: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            // Auto-backup re-entrancy guard: prevents the scheduler tick and
+            // the manual "Back up now" button (or two ticks) from enqueuing
+            // the same batch twice. Constructed false; claimed/released in
+            // `backup_view::enqueue_unbacked_files` and its callers.
+            backup_in_progress: std::sync::atomic::AtomicBool::new(false),
         });
         let _ = APP_CONTEXT.set(ctx.clone());
 

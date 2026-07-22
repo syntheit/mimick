@@ -1,8 +1,9 @@
 //! Sectioned landing page mirroring Immich web's Explore tab.
 //!
-//! Four rows: People (round avatars), Recently Added (date tiles),
-//! Places (city tiles), Things (tag tiles). Tile clicks invoke
-//! caller-provided closures so dispatch lives in `mod.rs`.
+//! Four rows: People (round avatars), Places (embedded map with cluster
+//! bubbles), Recently Added (date tiles), Things (tag tiles). Tile clicks
+//! invoke caller-provided closures so dispatch lives in `mod.rs`; the Places
+//! map reuses `map_view`'s clustering machinery directly.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -13,8 +14,11 @@ use gdk4::Texture;
 use glib::Bytes;
 use gtk::prelude::*;
 
-use crate::api_client::{ExploreSection, Person, PlaceItem, ThumbnailSize};
+use crate::api_client::{ExploreSection, MapMarker, Person, ThumbnailSize};
 use crate::app_context::AppContext;
+
+use super::LibraryWindowUi;
+use super::map_view;
 
 type ExploreClick = Rc<dyn Fn(&str, String, String)>;
 type PersonClick = Rc<dyn Fn(String, String)>;
@@ -29,7 +33,13 @@ pub struct ExploreViewParts {
     pub populated: Rc<Cell<bool>>,
     people_row: gtk::Box,
     recents_grid: gtk::FlowBox,
-    places_grid: gtk::FlowBox,
+    /// Stack swapping the embedded Places map between loading / empty / map
+    /// states. Replaces the old Places city-tile `FlowBox`.
+    places_stack: gtk::Stack,
+    /// The embedded libshumate map; built once and reused for the lifetime of
+    /// the explore view (the `SimpleMap` carries its viewport + marker layer +
+    /// zoom-notify handler, so rebuilding it would stack duplicates).
+    places_map: libshumate::SimpleMap,
     things_grid: gtk::FlowBox,
     people_section: gtk::Box,
     recents_section: gtk::Box,
@@ -48,8 +58,16 @@ pub struct ExploreViewParts {
     /// "faces reload for 1-2 s on every Library visit" bug). Populated the first
     /// time an avatar decodes; reused instantly on every subsequent tile build.
     person_thumbs: Rc<RefCell<HashMap<String, Texture>>>,
-    cached_places: Rc<RefCell<Vec<PlaceItem>>>,
-    cached_places_click: Rc<RefCell<Option<ExploreClick>>>,
+    /// Cached geotagged markers powering the embedded Places map. Replaces the
+    /// old `Vec<PlaceItem>` city list; the map re-populates from this on
+    /// revisit without re-fetching `/api/map/markers`.
+    cached_places: Rc<RefCell<Vec<MapMarker>>>,
+    /// Whether [`map_view::populate_map`] has already installed a marker layer
+    /// + zoom-notify handler on `places_map`. The `SimpleMap` lives for the
+    /// explore view's lifetime, so a second call would stack duplicate layers
+    /// and handlers; this guard makes populate-once idempotent. Reset only if
+    /// the `SimpleMap` were ever rebuilt (it isn't).
+    places_map_populated: Rc<Cell<bool>>,
     /// The "open map" button in the Places section header (hidden until wired).
     places_map_button: gtk::Button,
     /// Callback that opens the full-screen Places map, registered by the
@@ -128,7 +146,8 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
 
     let (people_section, people_row, people_spinner, people_filter_button) = build_people_section();
     let (recents_section, recents_grid, recents_spinner) = build_tile_section("Recently Added");
-    let (places_section, places_grid, places_spinner, places_map_button) = build_places_section();
+    let (places_section, places_stack, places_map, places_spinner, places_map_button) =
+        build_places_section();
     let (things_section, things_grid, things_spinner) = build_tile_section("Things");
 
     // Optional lead widget (search bar) sits above everything.
@@ -177,7 +196,8 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
         populated: Rc::new(Cell::new(false)),
         people_row,
         recents_grid,
-        places_grid,
+        places_stack,
+        places_map,
         things_grid,
         people_section,
         recents_section,
@@ -192,7 +212,7 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
         cached_people_click: Rc::new(RefCell::new(None)),
         person_thumbs: Rc::new(RefCell::new(HashMap::new())),
         cached_places: Rc::new(RefCell::new(Vec::new())),
-        cached_places_click: Rc::new(RefCell::new(None)),
+        places_map_populated: Rc::new(Cell::new(false)),
         places_map_button,
         on_places_map: Rc::new(RefCell::new(None)),
         search_query: Rc::new(RefCell::new(String::new())),
@@ -398,9 +418,21 @@ fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox, gtk::Spinner) {
 
 /// Build the Places section like [`build_tile_section`], but with a small "open
 /// map" button in the header (between the title and the spinner) that pushes the
-/// full-screen browsable Places map. The button is wired later via
-/// [`wire_places_map`]; until then it is a no-op.
-fn build_places_section() -> (gtk::Box, gtk::FlowBox, gtk::Spinner, gtk::Button) {
+/// full-screen browsable Places map, and an **embedded libshumate map** in place
+/// of the old city-tile grid. The map is interactive (pan/zoom in place);
+/// tapping a cluster bubble zooms in and tapping a single-asset pin opens the
+/// lightbox (both reuse `map_view`'s clustering machinery). A fixed-height
+/// stack wraps it so it can't inflate the surrounding page scroll.
+///
+/// Returns the section box, the loading/empty/map stack, the embedded
+/// `SimpleMap`, the header spinner, and the "open map" header button.
+fn build_places_section() -> (
+    gtk::Box,
+    gtk::Stack,
+    libshumate::SimpleMap,
+    gtk::Spinner,
+    gtk::Button,
+) {
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
@@ -426,17 +458,44 @@ fn build_places_section() -> (gtk::Box, gtk::FlowBox, gtk::Spinner, gtk::Button)
         .build();
     header.append(&spinner);
     section.append(&header);
-    let grid = gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .row_spacing(8)
-        .column_spacing(8)
-        .min_children_per_line(2)
-        .max_children_per_line(20)
-        .homogeneous(true)
-        .halign(gtk::Align::Start)
+
+    // The embedded map. `build_simple_map` returns a `vexpand`+`hexpand` map;
+    // we drop `vexpand` so the fixed-height host below bounds it, and the
+    // surrounding Library page keeps scrolling normally (libshumate's own pan
+    // gesture would otherwise fight the page's scrollable).
+    let simple_map = map_view::build_simple_map();
+    simple_map.set_vexpand(false);
+    simple_map.set_hexpand(true);
+
+    // Fixed-height host: gives the map a bounded footprint inside the scrolling
+    // page. `Overflow::Hidden` + the `card` class give it a tidy rounded frame.
+    let map_host = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .height_request(260)
+        .hexpand(true)
+        .vexpand(false)
+        .overflow(gtk::Overflow::Hidden)
+        .css_classes(["card"])
         .build();
-    section.append(&grid);
-    (section, grid, spinner, map_button)
+    map_host.append(&simple_map);
+
+    // Stack swaps between a blank loading slot (the header spinner signals
+    // "fetching"), the empty state, and the live map. Height-request on the
+    // stack keeps the footprint stable across state transitions so the page
+    // doesn't jump when markers arrive.
+    let stack = gtk::Stack::builder()
+        .hexpand(true)
+        .vexpand(false)
+        .height_request(260)
+        .build();
+    let loading = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    stack.add_named(&loading, Some("loading"));
+    stack.add_named(&map_view::empty_state(), Some("empty"));
+    stack.add_named(&map_host, Some("map"));
+    stack.set_visible_child_name("loading");
+    section.append(&stack);
+
+    (section, stack, simple_map, spinner, map_button)
 }
 
 /// Register the callback that opens the full-screen Places map, invoked when the
@@ -625,7 +684,8 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         populated: parts.populated.clone(),
         people_row: parts.people_row.clone(),
         recents_grid: parts.recents_grid.clone(),
-        places_grid: parts.places_grid.clone(),
+        places_stack: parts.places_stack.clone(),
+        places_map: parts.places_map.clone(),
         things_grid: parts.things_grid.clone(),
         people_section: parts.people_section.clone(),
         recents_section: parts.recents_section.clone(),
@@ -640,7 +700,7 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         cached_people_click: parts.cached_people_click.clone(),
         person_thumbs: parts.person_thumbs.clone(),
         cached_places: parts.cached_places.clone(),
-        cached_places_click: parts.cached_places_click.clone(),
+        places_map_populated: parts.places_map_populated.clone(),
         places_map_button: parts.places_map_button.clone(),
         on_places_map: parts.on_places_map.clone(),
         search_query: parts.search_query.clone(),
@@ -651,76 +711,55 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
     }
 }
 
-/// Populate the city tiles representing locations in the places dashboard section.
+/// Populate the embedded Places map with fetched geotagged markers.
 ///
-/// Caches places data so subsequent visits don't re-fetch from the server.
-/// Shows the first 16 tiles with a "See More" button to expand.
-pub fn populate_places<F>(
-    parts: &ExploreViewParts,
-    ctx: Arc<AppContext>,
-    places: Vec<PlaceItem>,
-    on_click: F,
-) where
-    F: Fn(&str, String, String) + 'static,
-{
+/// Caches the markers so subsequent visits don't re-fetch `/api/map/markers`.
+/// The embedded `SimpleMap` is populated exactly once per explore view
+/// lifetime (see [`ExploreViewParts::places_map_populated`]): installing the
+/// marker layer + zoom-notify handler a second time would stack duplicates.
+/// The map widget persists across tab revisits, so [`render_cached_places`] is
+/// a no-op once populated.
+///
+/// Replaces the old `populate_places(Vec<PlaceItem>, city-click)` city-tile
+/// grid; tapping bubbles now zooms and tapping a single pin opens the lightbox
+/// (the city drill lives on the full-screen map opened from the header button).
+pub(super) fn populate_places(ui: &Rc<LibraryWindowUi>, parts: &ExploreViewParts, markers: Vec<MapMarker>) {
     stop_spinner(&parts.places_spinner);
-    *parts.cached_places.borrow_mut() = places;
-    *parts.cached_places_click.borrow_mut() = Some(Rc::new(on_click));
-    render_places(parts, ctx, false);
+    *parts.cached_places.borrow_mut() = markers.clone();
+    parts.places_section.set_visible(true);
+    if markers.is_empty() {
+        parts.places_stack.set_visible_child_name("empty");
+        return;
+    }
+    if !parts.places_map_populated.get() {
+        map_view::populate_map(ui, &parts.places_map, markers);
+        parts.places_map_populated.set(true);
+    }
+    parts.places_stack.set_visible_child_name("map");
 }
 
-/// Check if places are already cached and render them without fetching.
+/// Check if places markers are already cached (so the landing load can skip
+/// the fetch and re-render the embedded map from cache).
 pub fn has_cached_places(parts: &ExploreViewParts) -> bool {
     !parts.cached_places.borrow().is_empty()
 }
 
-/// Re-render places from cache (used when navigating back to explore).
-pub fn render_cached_places(parts: &ExploreViewParts, ctx: Arc<AppContext>) {
+/// Re-render the embedded Places map from cache, used when navigating back to
+/// the Library landing (or after a `refresh_library_surfaces` reset). No
+/// re-fetch: if the map was already populated it just stays live; otherwise it
+/// is populated now from the cached markers.
+pub(super) fn render_cached_places(ui: &Rc<LibraryWindowUi>, parts: &ExploreViewParts) {
     stop_spinner(&parts.places_spinner);
-    render_places(parts, ctx, false);
-}
-
-fn render_places(parts: &ExploreViewParts, ctx: Arc<AppContext>, expanded: bool) {
-    while let Some(child) = parts.places_grid.first_child() {
-        parts.places_grid.remove(&child);
+    let markers = parts.cached_places.borrow().clone();
+    if markers.is_empty() {
+        return;
     }
-    let places = parts.cached_places.borrow();
-    parts.places_section.set_visible(!places.is_empty());
-    let on_click = match parts.cached_places_click.borrow().clone() {
-        Some(cb) => cb,
-        None => return,
-    };
-    let limit = if expanded {
-        places.len()
-    } else {
-        INITIAL_TILE_COUNT
-    };
-    for place in places.iter().take(limit) {
-        let tile = explore_tile(
-            ctx.clone(),
-            "place",
-            &place.city,
-            &place.asset_id,
-            on_click.clone(),
-        );
-        parts.places_grid.append(&tile);
+    parts.places_section.set_visible(true);
+    if !parts.places_map_populated.get() {
+        map_view::populate_map(ui, &parts.places_map, markers);
+        parts.places_map_populated.set(true);
     }
-    if !expanded && places.len() > INITIAL_TILE_COUNT {
-        let remaining = places.len() - INITIAL_TILE_COUNT;
-        drop(places);
-        append_see_more_button(&parts.places_grid, remaining, {
-            let parts = clone_parts_handles(parts);
-            let ctx = ctx.clone();
-            move || render_places(&parts, ctx.clone(), true)
-        });
-    } else if expanded && places.len() > INITIAL_TILE_COUNT {
-        drop(places);
-        append_show_less_button(&parts.places_grid, {
-            let parts = clone_parts_handles(parts);
-            let ctx = ctx.clone();
-            move || render_places(&parts, ctx.clone(), false)
-        });
-    }
+    parts.places_stack.set_visible_child_name("map");
 }
 
 /// Populate explore sections: Things tiles + Recently Added tiles.
