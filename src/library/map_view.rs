@@ -365,8 +365,13 @@ fn rebuild_clusters(
     }
     let mut cells: HashMap<(i64, i64), Cell> = HashMap::new();
     for m in markers {
-        // Skip obviously-invalid coordinates (0,0 null-island / out of range).
-        if !m.lat.is_finite() || !m.lon.is_finite() || m.lat.abs() > 90.0 || m.lon.abs() > 180.0 {
+        // Skip markers with unusable geotags. `is_valid_marker` rejects the
+        // (0, 0) "null island" sentinel too: Immich (and many EXIF exports) use
+        // lat=0/lon=0 as the "no GPS data" placeholder rather than a real photo
+        // at the equator on the prime meridian, so including it would create a
+        // cluster pin there whose tap handler (`go_to_full(0, 0, …)`) jumps the
+        // viewport to the Atlantic off Africa — the "map jumps to 0,0" bug.
+        if !is_valid_marker(m) {
             continue;
         }
         let key = ((m.lat / cell).floor() as i64, (m.lon / cell).floor() as i64);
@@ -474,6 +479,24 @@ fn format_count(count: usize) -> String {
     }
 }
 
+/// Whether a marker carries a usable geotag.
+///
+/// Rejects non-finite and out-of-range coordinates, and also the (0, 0) "null
+/// island" sentinel: Immich (and many EXIF exports) use lat=0/lon=0 as the "no
+/// GPS data" placeholder rather than a real photo taken at the equator on the
+/// prime meridian. Including it would both skew the bounding-box fit toward the
+/// mid-Atlantic and create a null-island cluster pin whose tap handler
+/// (`go_to_full(0, 0, …)`) jumps the viewport there — the "map jumps to 0,0"
+/// bug. Shared by [`rebuild_clusters`] (the bucketing loop) and [`bounding_box`]
+/// so the two stay in sync.
+fn is_valid_marker(m: &MapMarker) -> bool {
+    m.lat.is_finite()
+        && m.lon.is_finite()
+        && m.lat.abs() <= 90.0
+        && m.lon.abs() <= 180.0
+        && !(m.lat == 0.0 && m.lon == 0.0)
+}
+
 /// Compute the lat/lon bounding box of all markers, ignoring invalid coords.
 /// Falls back to a whole-world box if nothing is valid (defensive; callers
 /// only reach here with a non-empty marker list).
@@ -484,7 +507,7 @@ fn bounding_box(markers: &[MapMarker]) -> (f64, f64, f64, f64) {
     let mut max_lon = f64::MIN;
     let mut any = false;
     for m in markers {
-        if !m.lat.is_finite() || !m.lon.is_finite() || m.lat.abs() > 90.0 || m.lon.abs() > 180.0 {
+        if !is_valid_marker(m) {
             continue;
         }
         any = true;

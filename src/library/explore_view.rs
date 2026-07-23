@@ -40,7 +40,8 @@ pub struct ExploreViewParts {
     /// the explore view (the `SimpleMap` carries its viewport + marker layer +
     /// zoom-notify handler, so rebuilding it would stack duplicates). Render-
     /// only: `can_target = false` makes it a static preview whose taps fall
-    /// through to the overlay expand button (see [`build_places_section`]).
+    /// through to the `map_host` parent (whose `GestureClick` opens the
+    /// full-screen map — see [`build_places_section`] / [`wire_places_map`]).
     places_map: libshumate::SimpleMap,
     things_grid: gtk::FlowBox,
     people_section: gtk::Box,
@@ -76,6 +77,14 @@ pub struct ExploreViewParts {
     /// corner). Tapping it opens the full-screen browsable map, same as the
     /// header button — wired together in [`wire_places_map`].
     places_expand_button: gtk::Button,
+    /// The fixed-height host wrapping the embedded `SimpleMap` (the card frame
+    /// around the render-only map preview). A `GestureClick` is attached to it
+    /// in [`wire_places_map`] so a tap *anywhere* on the card — not just on the
+    /// corner expand button — opens the full-screen map. The `SimpleMap` itself
+    /// is `can_target = false`, so taps fall through to this host; the expand
+    /// button stays on top (an overlay sibling of the host) and still claims its
+    /// own taps, so the two routes coexist without conflict.
+    places_map_host: gtk::Box,
     /// Callback that opens the full-screen Places map, registered by the
     /// orchestrator via [`wire_places_map`] (so `ui` is in scope for the push).
     on_places_map: Rc<RefCell<Option<LibraryAction>>>,
@@ -153,7 +162,7 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
     let (people_section, people_row, people_spinner, people_filter_button) = build_people_section();
     let (recents_section, recents_grid, recents_spinner) = build_tile_section("Recently Added");
     let (places_section, places_stack, places_map, places_spinner, places_map_button,
-        places_expand_button) = build_places_section();
+         places_expand_button, places_map_host) = build_places_section();
     let (things_section, things_grid, things_spinner) = build_tile_section("Things");
 
     // Optional lead widget (search bar) sits above everything.
@@ -221,6 +230,7 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
         places_map_populated: Rc::new(Cell::new(false)),
         places_map_button,
         places_expand_button,
+        places_map_host,
         on_places_map: Rc::new(RefCell::new(None)),
         search_query: Rc::new(RefCell::new(String::new())),
         cached_ctx: Rc::new(RefCell::new(None)),
@@ -431,14 +441,21 @@ fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox, gtk::Spinner) {
 /// The embedded map is a non-interactive **preview**: `set_can_target(false)`
 /// makes the `SimpleMap` render its fit-to-bbox viewport (tiles + cluster pins)
 /// while refusing all pointer input, so pan/zoom/rotation gestures can't fire on
-/// it in place — instead a tap on the overlay "expand" button (a sibling of the
-/// map inside the `gtk::Overlay`, so it stays `can_target = true`) opens the
-/// full-screen browsable map (same as the header button). A fixed-height stack
-/// wraps the map so it can't inflate the surrounding page scroll.
+/// it in place. Tapping *anywhere* on the card opens the full-screen browsable
+/// map: a `GestureClick` attached to the fixed-height `map_host` (the card frame
+/// around the render-only map) receives taps that fall through the
+/// `can_target = false` `SimpleMap`, and is wired in [`wire_places_map`] to the
+/// same `on_places_map` slot the header and overlay expand buttons use. The
+/// overlay "expand" button (an overlay sibling of the host, bottom-end corner)
+/// stays `can_target = true` and remains on top, so it still claims its own taps
+/// and works as a visual affordance — but the whole card is also tappable.
+/// A fixed-height stack wraps the map so it can't inflate the surrounding page
+/// scroll.
 ///
 /// Returns the section box, the loading/empty/map stack, the embedded
-/// `SimpleMap`, the header spinner, the "open map" header button, and the
-/// overlay expand button.
+/// `SimpleMap`, the header spinner, the "open map" header button, the overlay
+/// expand button, and the map host box (the card frame the `GestureClick` is
+/// attached to in [`wire_places_map`] for tap-anywhere-to-open).
 fn build_places_section() -> (
     gtk::Box,
     gtk::Stack,
@@ -446,6 +463,7 @@ fn build_places_section() -> (
     gtk::Spinner,
     gtk::Button,
     gtk::Button,
+    gtk::Box,
 ) {
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -484,8 +502,10 @@ fn build_places_section() -> (
     // Render-only preview: the card shows the map but doesn't accept pan/zoom/
     // rotation input. `set_can_target(false)` stops the `SimpleMap` (and its
     // child widgets/gestures) from receiving pointer events while still
-    // rendering tiles — tapping it does nothing in place; the overlay expand
-    // button below opens the full-screen browsable map instead.
+    // rendering tiles — taps fall through to the `map_host` parent, whose
+    // `GestureClick` (wired in `wire_places_map`) opens the full-screen
+    // browsable map. The overlay expand button below stays on top and remains
+    // an additional tap target / visual affordance.
     simple_map.set_can_target(false);
 
     // Fixed-height host: gives the map a bounded footprint inside the scrolling
@@ -500,12 +520,11 @@ fn build_places_section() -> (
         .build();
     map_host.append(&simple_map);
 
-    // Overlay an "expand" button at the bottom-end corner of the map card. The
-    // embedded map above is `can_target = false` (render-only), so it ignores all
-    // taps; the expand button is the card's tap target that opens the full-screen
-    // browsable map. It's added as an overlay *sibling* of the map host (not a
-    // child of the `SimpleMap`), so it keeps its default `can_target = true` and
-    // still receives clicks despite the non-interactive map beneath it.
+    // Overlay an "expand" button at the bottom-end corner of the map card. It
+    // remains a tappable affordance (a visual hint that the card opens the
+    // full-screen map) even though the whole card is now tappable via the
+    // `map_host` GestureClick wired in `wire_places_map`: as an overlay sibling
+    // of the host it sits on top and claims its own taps first.
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&map_host));
     let expand_button = gtk::Button::builder()
@@ -535,7 +554,7 @@ fn build_places_section() -> (
     stack.set_visible_child_name("loading");
     section.append(&stack);
 
-    (section, stack, simple_map, spinner, map_button, expand_button)
+    (section, stack, simple_map, spinner, map_button, expand_button, map_host)
 }
 
 /// Register the callback that opens the full-screen Places map, invoked when the
@@ -563,6 +582,22 @@ pub fn wire_places_map(parts: &ExploreViewParts, on_open: impl Fn() + 'static) {
                 cb();
             }
         });
+
+        // Tap-anywhere-to-open: a GestureClick on the embedded map's host box
+        // (the card frame around the `can_target = false` `SimpleMap`) opens the
+        // full-screen map. Taps fall through the non-interactive `SimpleMap` to
+        // this host; taps on the expand button are claimed by that button first
+        // (it's an overlay sibling on top), so the two routes don't double-fire.
+        // `Claimed` on release stops the gesture from propagating further.
+        let slot = parts.on_places_map.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |gesture, _n, _x, _y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            if let Some(cb) = slot.borrow().clone() {
+                cb();
+            }
+        });
+        parts.places_map_host.add_controller(click);
     }
 }
 
@@ -753,6 +788,7 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         places_map_populated: parts.places_map_populated.clone(),
         places_map_button: parts.places_map_button.clone(),
         places_expand_button: parts.places_expand_button.clone(),
+        places_map_host: parts.places_map_host.clone(),
         on_places_map: parts.on_places_map.clone(),
         search_query: parts.search_query.clone(),
         cached_ctx: parts.cached_ctx.clone(),
