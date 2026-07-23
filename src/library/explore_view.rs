@@ -38,7 +38,9 @@ pub struct ExploreViewParts {
     places_stack: gtk::Stack,
     /// The embedded libshumate map; built once and reused for the lifetime of
     /// the explore view (the `SimpleMap` carries its viewport + marker layer +
-    /// zoom-notify handler, so rebuilding it would stack duplicates).
+    /// zoom-notify handler, so rebuilding it would stack duplicates). Render-
+    /// only: `can_target = false` makes it a static preview whose taps fall
+    /// through to the overlay expand button (see [`build_places_section`]).
     places_map: libshumate::SimpleMap,
     things_grid: gtk::FlowBox,
     people_section: gtk::Box,
@@ -422,15 +424,21 @@ fn build_tile_section(title: &str) -> (gtk::Box, gtk::FlowBox, gtk::Spinner) {
 }
 
 /// Build the Places section like [`build_tile_section`], but with a small "open
-/// map" button in the header (between the title and the spinner) that pushes the
+/// map" button in the header (between the title and the spinner) that opens the
 /// full-screen browsable Places map, and an **embedded libshumate map** in place
-/// of the old city-tile grid. The map is interactive (pan/zoom in place);
-/// tapping a cluster bubble zooms in and tapping a single-asset pin opens the
-/// lightbox (both reuse `map_view`'s clustering machinery). A fixed-height
-/// stack wraps it so it can't inflate the surrounding page scroll.
+/// of the old city-tile grid.
+///
+/// The embedded map is a non-interactive **preview**: `set_can_target(false)`
+/// makes the `SimpleMap` render its fit-to-bbox viewport (tiles + cluster pins)
+/// while refusing all pointer input, so pan/zoom/rotation gestures can't fire on
+/// it in place — instead a tap on the overlay "expand" button (a sibling of the
+/// map inside the `gtk::Overlay`, so it stays `can_target = true`) opens the
+/// full-screen browsable map (same as the header button). A fixed-height stack
+/// wraps the map so it can't inflate the surrounding page scroll.
 ///
 /// Returns the section box, the loading/empty/map stack, the embedded
-/// `SimpleMap`, the header spinner, and the "open map" header button.
+/// `SimpleMap`, the header spinner, the "open map" header button, and the
+/// overlay expand button.
 fn build_places_section() -> (
     gtk::Box,
     gtk::Stack,
@@ -473,6 +481,12 @@ fn build_places_section() -> (
     let simple_map = map_view::build_simple_map();
     simple_map.set_vexpand(true);
     simple_map.set_hexpand(true);
+    // Render-only preview: the card shows the map but doesn't accept pan/zoom/
+    // rotation input. `set_can_target(false)` stops the `SimpleMap` (and its
+    // child widgets/gestures) from receiving pointer events while still
+    // rendering tiles — tapping it does nothing in place; the overlay expand
+    // button below opens the full-screen browsable map instead.
+    simple_map.set_can_target(false);
 
     // Fixed-height host: gives the map a bounded footprint inside the scrolling
     // page. `Overflow::Hidden` + the `card` class give it a tidy rounded frame.
@@ -486,10 +500,12 @@ fn build_places_section() -> (
         .build();
     map_host.append(&simple_map);
 
-    // Overlay an "expand" button at the bottom-end corner of the map card so a
-    // tap on the embedded map opens the full-screen browsable map (the map's own
-    // pan/zoom/pin gestures claim taps on the map itself, so a small overlay
-    // button is the standard mobile pattern for "open larger map").
+    // Overlay an "expand" button at the bottom-end corner of the map card. The
+    // embedded map above is `can_target = false` (render-only), so it ignores all
+    // taps; the expand button is the card's tap target that opens the full-screen
+    // browsable map. It's added as an overlay *sibling* of the map host (not a
+    // child of the `SimpleMap`), so it keeps its default `can_target = true` and
+    // still receives clicks despite the non-interactive map beneath it.
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&map_host));
     let expand_button = gtk::Button::builder()
@@ -755,9 +771,11 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
 /// The map widget persists across tab revisits, so [`render_cached_places`] is
 /// a no-op once populated.
 ///
-/// Replaces the old `populate_places(Vec<PlaceItem>, city-click)` city-tile
-/// grid; tapping bubbles now zooms and tapping a single pin opens the lightbox
-/// (the city drill lives on the full-screen map opened from the header button).
+/// The embedded map is a render-only preview (see [`build_places_section`]):
+/// it shows the cluster pins but isn't interactive — tapping the overlay
+/// expand button (or the header "open map" button) opens the full-screen
+/// browsable map, where tapping a cluster zooms in and tapping a single pin
+/// opens the lightbox.
 pub(super) fn populate_places(ui: &Rc<LibraryWindowUi>, parts: &ExploreViewParts, markers: Vec<MapMarker>) {
     stop_spinner(&parts.places_spinner);
     *parts.cached_places.borrow_mut() = markers.clone();

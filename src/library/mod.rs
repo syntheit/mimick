@@ -763,16 +763,23 @@ pub fn build_library_window(app: &libadwaita::Application, ctx: Arc<AppContext>)
 
     let close_ctx = ui.ctx.clone();
     let close_app = app.clone();
-    window.connect_close_request(move |_| {
+    window.connect_close_request(move |win| {
         close_ctx.thumbnail_cache.clear_memory();
-        // mimick is a single-instance GtkApplication that holds itself open
-        // (main.rs `app.hold()`), so closing the window would otherwise leave
-        // the primary process alive in the background — drawing idle power and
-        // silently shadowing the next launch with a stale binary. Quit the
-        // whole app on window close so "closed" really means "killed". A future
-        // opt-in background-sync setting can re-introduce a hold if needed.
-        close_app.quit();
-        glib::Propagation::Proceed
+        // Opt-in background backup: when enabled, HIDE the window instead of
+        // quitting so the single-instance primary (kept alive by main.rs's
+        // `app.hold()`) and the in-app auto-backup scheduler survive in the
+        // background and keep backing up new photos every BACKUP_TICK_SECS.
+        // Returning `Propagation::Stop` prevents GTK from destroying the window,
+        // so it stays in `app.windows()` and a relaunch's `open_default_window`
+        // → `find_window` + `present()` re-shows this same window. When
+        // disabled (default), close quits the whole process — "closed = killed".
+        if close_ctx.config.read().data.background_backup_enabled {
+            win.set_visible(false);
+            glib::Propagation::Stop
+        } else {
+            close_app.quit();
+            glib::Propagation::Proceed
+        }
     });
 
     bootstrap_window(ui);

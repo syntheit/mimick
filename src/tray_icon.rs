@@ -39,6 +39,15 @@ impl ksni::Tray for MimickTray {
         "Mimick Sync".into()
     }
 
+    fn activate(&mut self, _x: i32, _y: i32) {
+        // Re-show the library window when the user clicks the tray icon. This
+        // reuses the existing `library_tx` channel (polled by main.rs's GTK
+        // flag loop → `open_library_window_now` → `find_window` + `present`),
+        // so a window hidden by the opt-in background-backup close handler is
+        // brought back to the foreground without a new channel or main.rs change.
+        let _ = self.library_tx.send(true);
+    }
+
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
         let library_enabled = self.library_view_enabled;

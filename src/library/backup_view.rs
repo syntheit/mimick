@@ -140,6 +140,29 @@ fn build_backup_home(ui: Rc<LibraryWindowUi>) -> libadwaita::NavigationPage {
     ));
     toggle_group.add(&enable_row);
 
+    // Opt-in background backup: keep the process alive (hidden) after the
+    // window is closed so the auto-backup scheduler keeps ticking. Off (default)
+    // means closed = killed, matching the "only when I opt in" preference. The
+    // close→hide branch lives in `library::mod` (window close-request handler).
+    let background_row = libadwaita::SwitchRow::builder()
+        .title("Back up in background")
+        .subtitle("Keep mimick running in the background when closed so new photos back up automatically. Off = closed = killed.")
+        .subtitle_lines(2)
+        .active(ui.ctx.config.read().data.background_backup_enabled)
+        .build();
+    background_row.connect_active_notify(clone!(
+        #[strong]
+        ui,
+        move |row| {
+            let mut config = ui.ctx.config.write();
+            config.data.background_backup_enabled = row.is_active();
+            if !config.save() {
+                log::error!("Failed to save config after toggling background_backup_enabled");
+            }
+        }
+    ));
+    toggle_group.add(&background_row);
+
     let backup_now_button = gtk::Button::builder()
         .label("Back up now")
         .halign(gtk::Align::Center)

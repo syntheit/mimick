@@ -305,6 +305,14 @@ pub struct ConfigData {
     /// the selected `watch_paths` folders are treated as backup sources.
     #[serde(default)]
     pub backup_enabled: bool,
+    /// Opt-in background backup: when on, closing the library window HIDES it
+    /// instead of quitting the process, so the single-instance primary (kept
+    /// alive by main.rs's `app.hold()`) and the in-app auto-backup scheduler
+    /// keep ticking and back up new photos every ~120s. When off (default),
+    /// closing the window quits the whole process — "closed = killed". Re-shows
+    /// via relaunch (single-instance re-activation → `find_window` + present).
+    #[serde(default)]
+    pub background_backup_enabled: bool,
     /// The last handful of submitted Search-tab queries, most-recent first.
     /// Surfaced as tappable "recent searches" on the Search landing. Capped and
     /// deduplicated via [`Config::push_recent_search`].
@@ -345,6 +353,7 @@ impl Default for ConfigData {
             show_hidden_faces: false,
             upload_xmp_sidecars: true,
             backup_enabled: false,
+            background_backup_enabled: false,
             galleries: Vec::new(),
             recent_searches: Vec::new(),
         }

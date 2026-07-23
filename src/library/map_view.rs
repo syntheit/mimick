@@ -15,7 +15,9 @@
 //! is rebuilt whenever the map's zoom level changes so clusters split apart as
 //! you zoom.
 
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use glib::clone;
 use gtk::prelude::*;
@@ -33,15 +35,37 @@ use super::{LibraryWindowUi, open_asset_in_lightbox};
 /// exactly one) can never spawn tens of thousands of widgets and jank the UI.
 const MAX_PINS: usize = 2_000;
 
-/// Fetch the map markers and present the full-screen Places map page.
+/// Debounce window (ms) for rebuilding the marker layer on a zoom-bucket change.
+/// During a pinch-zoom the `viewport::zoom-level` notify fires many times and
+/// can cross several integer buckets in quick succession; rather than rebuilding
+/// the whole layer on every step, we coalesce the notifies into a single rebuild
+/// fired this long after the last bucket change. 150 ms is short enough to feel
+/// responsive once the zoom settles and long enough to swallow a pinch's burst.
+const ZOOM_REBUILD_DEBOUNCE_MS: u64 = 150;
+
+/// Fetch the map markers and present the full-screen Places map.
 ///
-/// Pushes onto the *root* nav (`ui.nav`) so the map covers the bottom tab bar
-/// like the lightbox does. The marker fetch is async; the page is built and
-/// pushed immediately (showing a spinner), and populated when markers arrive.
-/// If the page has already been popped by the time the fetch returns, the
-/// update is skipped (guarded via a weak reference to the page).
+/// Presented as a bottom-sheet `adw::Dialog` rather than a page pushed onto the
+/// root `AdwNavigationView`. The nav view's right-edge back-swipe gesture would
+/// otherwise fire while the user pans the map: libshumate's pan (`GtkGestureDrag`)
+/// never claims its event sequence (unlike its zoom/rotate gestures, which do),
+/// so it loses the gesture race to `AdwSwipeTracker` — a horizontal drag on the
+/// map would pop the page instead of panning. A dialog carries no nav back-swipe
+/// at all, sidestepping the conflict.
+///
+/// `can-close = false` additionally disables the bottom sheet's swipe-DOWN
+/// dismiss, which would otherwise grab *vertical* map pans for the same reason
+/// (the sheet's own `AdwSwipeTracker` is vertical). Closing still works: the
+/// `HeaderBar`'s built-in close button (and the Esc shortcut) call
+/// `Dialog::close()`, which with `can-close = false` emits `close-attempt`; we
+/// route that to `force_close()`, which succeeds regardless of `can-close`.
+///
+/// The marker fetch is async; the dialog is built and shown immediately
+/// (spinner state), and populated when markers arrive. If the dialog has been
+/// dismissed by the time the fetch returns, the update is skipped (guarded via
+/// the `closed` flag set from the dialog's `closed` signal).
 pub(super) fn open_places_map(ui: Rc<LibraryWindowUi>) {
-    // ── Build the map + page shell up front (spinner state) ─────────────
+    // ── Build the map + dialog shell up front (spinner state) ───────────
     let simple_map = build_simple_map();
     // A stack swaps between the loading spinner, the live map, and the empty
     // state so we never show a blank grey map while markers are in flight.
@@ -65,23 +89,49 @@ pub(super) fn open_places_map(ui: Rc<LibraryWindowUi>) {
     stack.add_named(&simple_map, Some("map"));
     stack.set_visible_child_name("loading");
 
-    // Page chrome mirrors backup_view: a HeaderBar in a ToolbarView. The
-    // NavigationPage title auto-displays in the HeaderBar, and AdwNavigationView
-    // supplies the back button automatically when the page is pushed.
-    let header = libadwaita::HeaderBar::new();
+    // Dialog chrome: a HeaderBar in a ToolbarView. Inside an `adw::Dialog` the
+    // HeaderBar automatically renders the dialog's own close button (which
+    // calls `Dialog::close()`).
+    let header = libadwaita::HeaderBar::builder().show_title(true).build();
     let toolbar = libadwaita::ToolbarView::builder().build();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&stack));
 
-    let page = libadwaita::NavigationPage::builder()
+    // Present as a bottom sheet (full-screen feel on mobile). `content_width`/
+    // `content_height` are clamped to the display by the shell, so generous
+    // values make the sheet fill a phone screen.
+    let dialog = libadwaita::Dialog::builder()
         .title("Map")
-        .child(&toolbar)
+        .content_width(900)
+        .content_height(1400)
+        .can_close(false)
         .build();
+    dialog.set_child(Some(&toolbar));
 
-    ui.nav.push(&page);
+    // `can-close = false` makes `close()` emit `close-attempt` instead of
+    // dismissing; route that to `force_close()` so the header close button and
+    // Esc still dismiss the dialog (while the swipe-down dismiss stays off).
+    // A weak ref (not a strong clone) is captured so the handler the dialog
+    // owns doesn't keep itself alive (dialog → handler → dialog cycle).
+    let dialog_weak = dialog.downgrade();
+    dialog.connect_close_attempt(move |_| {
+        if let Some(d) = dialog_weak.upgrade() {
+            d.force_close();
+        }
+    });
 
-    // ── Fetch markers, then populate (guarded against a popped page) ─────
-    let page_weak = page.downgrade();
+    // Guard against the dialog being dismissed before the marker fetch lands
+    // (the `closed` signal fires synchronously on dismiss, before the dialog's
+    // widgets are torn down).
+    let closed = Rc::new(Cell::new(false));
+    let closed_handler = closed.clone();
+    dialog.connect_closed(move |_| {
+        closed_handler.set(true);
+    });
+
+    dialog.present(Some(&ui.window));
+
+    // ── Fetch markers, then populate (guarded against a closed dialog) ──
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
         ui,
@@ -89,6 +139,8 @@ pub(super) fn open_places_map(ui: Rc<LibraryWindowUi>) {
         simple_map,
         #[strong]
         stack,
+        #[strong]
+        closed,
         async move {
             let markers = match ui.ctx.api_client.fetch_map_markers().await {
                 Ok(m) => m,
@@ -97,9 +149,9 @@ pub(super) fn open_places_map(ui: Rc<LibraryWindowUi>) {
                     Vec::new()
                 }
             };
-            // If the page was popped while we were fetching, do nothing (the
-            // widgets are being torn down / may already be gone).
-            if page_weak.upgrade().is_none() {
+            // If the dialog was dismissed while we were fetching, do nothing
+            // (its widgets are being torn down / may already be gone).
+            if closed.get() {
                 return;
             }
             if markers.is_empty() {
@@ -180,14 +232,14 @@ pub(super) fn empty_state() -> gtk::Widget {
 
 /// Populate the map: fit the viewport to the markers' bounding box, add a
 /// marker layer, do an initial cluster pass, and rebuild the clustering
-/// whenever the zoom level changes.
+/// (debounced) whenever the integer zoom bucket changes.
 ///
-/// Shared by the full-screen Places map ([`open_places_map`]) and the embedded
-/// Places map on the Library landing. Each call installs one marker layer and
-/// one `zoom-level` notify handler on the viewport, so callers must invoke it
-/// at most once per `SimpleMap` instance (the embedded map guards this with a
-/// `places_map_populated` flag; the full-screen map is single-use and torn
-/// down on pop).
+/// Shared by the full-screen Places map ([`open_places_map`], now hosted in an
+/// `adw::Dialog`) and the embedded Places map on the Library landing. Each call
+/// installs one marker layer and one `zoom-level` notify handler on the
+/// viewport, so callers must invoke it at most once per `SimpleMap` instance
+/// (the embedded map guards this with a `places_map_populated` flag; the
+/// full-screen map is single-use and torn down on dismiss).
 pub(super) fn populate_map(ui: &Rc<LibraryWindowUi>, map: &libshumate::SimpleMap, markers: Vec<MapMarker>) {
     let Some(viewport) = map.viewport() else {
         log::warn!("Places map: SimpleMap has no viewport");
@@ -216,34 +268,65 @@ pub(super) fn populate_map(ui: &Rc<LibraryWindowUi>, map: &libshumate::SimpleMap
 
     let markers = Rc::new(markers);
 
-    // Initial cluster pass at the fit zoom.
+    // Initial cluster pass at the fit zoom — kept immediate (not debounced) so
+    // the map shows its pins as soon as markers land.
     rebuild_clusters(ui, map, &viewport, &layer, &markers, fit_zoom);
 
     // Re-cluster whenever the *integer* zoom bucket changes so dense clusters
     // split apart as the user zooms in (and merge back on zoom-out). The
-    // `zoom-level` property is a continuous f64 that notifies many times during a
-    // single pinch/scroll gesture; since the cluster grid granularity is keyed to
-    // the integer zoom (`cell_size_for_zoom`), rebuilding on every fractional
-    // step would thrash the widget tree for no visible change. We therefore only
-    // rebuild when the rounded zoom bucket actually crosses a boundary.
+    // `zoom-level` property is a continuous f64 that notifies many times during
+    // a single pinch/scroll gesture — and can cross several integer buckets in
+    // quick succession — so rebuilding the layer (remove_all + re-add every
+    // pin) on every fractional step would thrash the widget tree and visibly
+    // jank during a pinch. We therefore (a) only react when the rounded bucket
+    // actually crosses a boundary, and (b) DEBOUNCE the rebuild: a bucket change
+    // arms a one-shot 150 ms timeout that coalesces rapid successive notifies
+    // into a single rebuild after the zoom settles, cancelling any previously
+    // armed but not-yet-fired timeout on each new notify.
     //
-    // The layer/map are held by weak refs so this closure can't keep the popped
-    // page's widgets alive (and so the viewport → closure → viewport ownership
-    // doesn't form a cycle); the notifying `vp` argument is the live viewport.
+    // The layer/map/viewport are held by weak refs so the timeout closure can't
+    // keep the (now dialog-hosted) page's widgets alive after dismiss, nor touch
+    // dead widgets — if the weak refs are dead when the timeout fires, it no-ops.
+    // (`ui` is held strongly, matching the prior closure: it's the long-lived
+    // library window, not the map page; `markers` is a cheap `Rc<Vec<...>>`.)
     let layer_weak = layer.downgrade();
     let map_weak = map.downgrade();
+    let viewport_weak = viewport.downgrade();
     let ui = ui.clone();
-    let last_bucket = std::cell::Cell::new(fit_zoom.round() as i32);
+    let last_bucket = Cell::new(fit_zoom.round() as i32);
+    let pending: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
     viewport.connect_zoom_level_notify(move |vp| {
         let bucket = vp.zoom_level().round() as i32;
         if bucket == last_bucket.get() {
             return;
         }
         last_bucket.set(bucket);
-        let (Some(layer), Some(map)) = (layer_weak.upgrade(), map_weak.upgrade()) else {
-            return;
-        };
-        rebuild_clusters(&ui, &map, vp, &layer, &markers, vp.zoom_level());
+
+        // Cancel any rebuild that hasn't fired yet, then arm a fresh debounce.
+        if let Some(id) = pending.take() {
+            id.remove();
+        }
+
+        let pending_clone = pending.clone();
+        let layer_weak = layer_weak.clone();
+        let map_weak = map_weak.clone();
+        let viewport_weak = viewport_weak.clone();
+        let ui = ui.clone();
+        let markers = markers.clone();
+        let id = glib::timeout_add_local_once(Duration::from_millis(ZOOM_REBUILD_DEBOUNCE_MS), move || {
+            // This one-shot has now fired; clear the slot so the next notify
+            // doesn't try to remove an already-removed source id.
+            pending_clone.set(None);
+
+            let (Some(layer), Some(map), Some(viewport)) =
+                (layer_weak.upgrade(), map_weak.upgrade(), viewport_weak.upgrade())
+            else {
+                // The map page was dismissed while we waited; nothing to do.
+                return;
+            };
+            rebuild_clusters(&ui, &map, &viewport, &layer, &markers, viewport.zoom_level());
+        });
+        pending.set(Some(id));
     });
 }
 
@@ -251,8 +334,11 @@ pub(super) fn populate_map(ui: &Rc<LibraryWindowUi>, map: &libshumate::SimpleMap
 /// current `zoom`. Each occupied grid cell yields one pin: a single-asset cell
 /// becomes a tappable asset pin (→ lightbox); a multi-asset cell becomes a
 /// count pin (→ zoom in). Grid-clustering keeps the pin count low even for huge
-/// libraries, so rebuilding the whole layer on each zoom change is cheap; the
-/// `viewport::zoom-level` notify that drives it only fires on real zoom deltas.
+/// libraries, so rebuilding the whole layer on each zoom change is cheap.
+///
+/// Called immediately for the initial fit-zoom pass, and (debounced — see the
+/// `ZOOM_REBUILD_DEBOUNCE_MS` arm in [`populate_map`]) whenever the integer zoom
+/// bucket later crosses a boundary.
 fn rebuild_clusters(
     ui: &Rc<LibraryWindowUi>,
     map: &libshumate::SimpleMap,
