@@ -70,6 +70,10 @@ pub struct ExploreViewParts {
     places_map_populated: Rc<Cell<bool>>,
     /// The "open map" button in the Places section header (hidden until wired).
     places_map_button: gtk::Button,
+    /// The overlay "expand" button on the embedded Places map card (bottom-end
+    /// corner). Tapping it opens the full-screen browsable map, same as the
+    /// header button — wired together in [`wire_places_map`].
+    places_expand_button: gtk::Button,
     /// Callback that opens the full-screen Places map, registered by the
     /// orchestrator via [`wire_places_map`] (so `ui` is in scope for the push).
     on_places_map: Rc<RefCell<Option<LibraryAction>>>,
@@ -146,8 +150,8 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
 
     let (people_section, people_row, people_spinner, people_filter_button) = build_people_section();
     let (recents_section, recents_grid, recents_spinner) = build_tile_section("Recently Added");
-    let (places_section, places_stack, places_map, places_spinner, places_map_button) =
-        build_places_section();
+    let (places_section, places_stack, places_map, places_spinner, places_map_button,
+        places_expand_button) = build_places_section();
     let (things_section, things_grid, things_spinner) = build_tile_section("Things");
 
     // Optional lead widget (search bar) sits above everything.
@@ -214,6 +218,7 @@ pub fn build_browse_view(opts: BrowseOptions) -> ExploreViewParts {
         cached_places: Rc::new(RefCell::new(Vec::new())),
         places_map_populated: Rc::new(Cell::new(false)),
         places_map_button,
+        places_expand_button,
         on_places_map: Rc::new(RefCell::new(None)),
         search_query: Rc::new(RefCell::new(String::new())),
         cached_ctx: Rc::new(RefCell::new(None)),
@@ -432,6 +437,7 @@ fn build_places_section() -> (
     libshumate::SimpleMap,
     gtk::Spinner,
     gtk::Button,
+    gtk::Button,
 ) {
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -460,11 +466,12 @@ fn build_places_section() -> (
     section.append(&header);
 
     // The embedded map. `build_simple_map` returns a `vexpand`+`hexpand` map;
-    // we drop `vexpand` so the fixed-height host below bounds it, and the
-    // surrounding Library page keeps scrolling normally (libshumate's own pan
-    // gesture would otherwise fight the page's scrollable).
+    // keep `vexpand` so the map fills the fixed-height host below (the host's
+    // `height_request` bounds the footprint so the surrounding Library page
+    // still scrolls normally — libshumate's own pan gesture lives inside the
+    // bounded host, not the page).
     let simple_map = map_view::build_simple_map();
-    simple_map.set_vexpand(false);
+    simple_map.set_vexpand(true);
     simple_map.set_hexpand(true);
 
     // Fixed-height host: gives the map a bounded footprint inside the scrolling
@@ -473,11 +480,28 @@ fn build_places_section() -> (
         .orientation(gtk::Orientation::Vertical)
         .height_request(260)
         .hexpand(true)
-        .vexpand(false)
+        .vexpand(true)
         .overflow(gtk::Overflow::Hidden)
         .css_classes(["card"])
         .build();
     map_host.append(&simple_map);
+
+    // Overlay an "expand" button at the bottom-end corner of the map card so a
+    // tap on the embedded map opens the full-screen browsable map (the map's own
+    // pan/zoom/pin gestures claim taps on the map itself, so a small overlay
+    // button is the standard mobile pattern for "open larger map").
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&map_host));
+    let expand_button = gtk::Button::builder()
+        .icon_name("view-fullscreen-symbolic")
+        .tooltip_text("Open full map")
+        .css_classes(["osd", "circular"])
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::End)
+        .margin_bottom(10)
+        .margin_end(10)
+        .build();
+    overlay.add_overlay(&expand_button);
 
     // Stack swaps between a blank loading slot (the header spinner signals
     // "fetching"), the empty state, and the live map. Height-request on the
@@ -491,24 +515,34 @@ fn build_places_section() -> (
     let loading = gtk::Box::new(gtk::Orientation::Vertical, 0);
     stack.add_named(&loading, Some("loading"));
     stack.add_named(&map_view::empty_state(), Some("empty"));
-    stack.add_named(&map_host, Some("map"));
+    stack.add_named(&overlay, Some("map"));
     stack.set_visible_child_name("loading");
     section.append(&stack);
 
-    (section, stack, simple_map, spinner, map_button)
+    (section, stack, simple_map, spinner, map_button, expand_button)
 }
 
 /// Register the callback that opens the full-screen Places map, invoked when the
-/// Places header map button is tapped. The orchestrator calls this once after
-/// the view is built (guarded by the explore `populated` flag) so `ui` is
-/// captured for the nav push. The handler reads through the shared slot, so a
-/// later re-registration replaces the target without re-wiring the button.
+/// Places header map button or the embedded map's overlay expand button is
+/// tapped. The orchestrator calls this once after the view is built (guarded by
+/// the explore `populated` flag) so `ui` is in scope for the nav push. The
+/// handler reads through the shared slot, so a later re-registration replaces
+/// the target without re-wiring the buttons.
 pub fn wire_places_map(parts: &ExploreViewParts, on_open: impl Fn() + 'static) {
     let first = parts.on_places_map.borrow().is_none();
     *parts.on_places_map.borrow_mut() = Some(Rc::new(on_open));
     if first {
+        // Wire both the header "open map" button and the overlay expand button
+        // on the embedded map card to the same callback. Only wire on first
+        // registration so a re-registration just swaps the target.
         let slot = parts.on_places_map.clone();
         parts.places_map_button.connect_clicked(move |_| {
+            if let Some(cb) = slot.borrow().clone() {
+                cb();
+            }
+        });
+        let slot = parts.on_places_map.clone();
+        parts.places_expand_button.connect_clicked(move |_| {
             if let Some(cb) = slot.borrow().clone() {
                 cb();
             }
@@ -702,6 +736,7 @@ fn clone_parts_handles(parts: &ExploreViewParts) -> ExploreViewParts {
         cached_places: parts.cached_places.clone(),
         places_map_populated: parts.places_map_populated.clone(),
         places_map_button: parts.places_map_button.clone(),
+        places_expand_button: parts.places_expand_button.clone(),
         on_places_map: parts.on_places_map.clone(),
         search_query: parts.search_query.clone(),
         cached_ctx: parts.cached_ctx.clone(),
